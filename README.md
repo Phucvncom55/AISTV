@@ -100,7 +100,26 @@ cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
 | `/files` `/get <đường dẫn>` | Liệt kê / tải file agent tạo |
 | `/allow <id>` `/deny <id>` | Cấp / thu hồi quyền (chủ bot) |
 
+**Chủ động & trí nhớ**
+
+| Lệnh | Tác dụng |
+|---|---|
+| `/remind +30m uống nước` | Hẹn nhắc việc (`+2h`, `20:30`, `mai 8:00`, `25/12 20:00`, `daily 8:00`) |
+| `/task daily 9:00 kiểm tra repo` | Để **agent tự chạy** yêu cầu theo lịch rồi gửi kết quả |
+| `/reminders` · `/unremind <mã\|all>` | Xem / xoá nhắc việc |
+| `/watch git owner/repo [nhánh]` | Báo khi repo có commit mới |
+| `/watch log <file> [regex]` | Báo dòng lỗi mới trong log (bot tự theo dõi log của nó) |
+| `/watch file <đường dẫn>` | Báo khi file/thư mục thay đổi |
+| `/cloud [sync]` | Trạng thái trí nhớ đám mây / đẩy ngay lên Firebase |
+| `/summary` | Cô đọng hội thoại hiện tại vào `MEMORY.md` |
+
+- **Trí nhớ đám mây (Firebase RTDB):** `MEMORY.md`, lịch sử chat, nhắc việc và watch được lưu trên cloud nên **restart bot / Colab reset vẫn còn**. Mỗi bot dùng namespace riêng `AISTV_CLOUD_NS/<bot id>`.
+- **Tự tóm tắt:** sau ~20 lượt hỏi–đáp, bot tự cô đọng phần cũ thành gạch đầu dòng trong `MEMORY.md` rồi cắt bớt lịch sử (giữ ngữ cảnh gần).
+- **Nhắc việc/việc định kỳ** sống qua restart; việc định kỳ dùng đúng model và workspace hiện tại.
+
 Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
+
+**Tiến độ kiểu terminal:** trong lúc chạy, tin nhắn "Đang làm việc" tự cập nhật ~1 giây/lần — suy nghĩ của model và từng bước (lệnh, file đang đọc/sửa) cuộn từ dưới lên, dòng cũ rơi khỏi đỉnh khi đầy. `/think off` ẩn suy nghĩ; `/activity on` hiện thêm output/code chi tiết.
 
 ## 5. Biến môi trường
 
@@ -115,6 +134,18 @@ Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
 | `AISTV_REPO` | URL trong `run.sh` | Repo khác để tải mã nguồn |
 | `AISTV_DIR` | `~/AISTV` | Nơi clone khi chạy one-liner |
 | `AISTV_BRANCH` | `main` | Nhánh cần tải |
+| `AISTV_FIREBASE_URL` | RTDB mặc định | URL Firebase Realtime Database cho trí nhớ đám mây |
+| `AISTV_CLOUD` | `1` | `0` = tắt đồng bộ cloud (chỉ lưu cục bộ) |
+| `AISTV_CLOUD_NS` | `aistv` | Namespace gốc trên Firebase |
+| `AISTV_FIREBASE_SECRET` | trống | `?auth=` nếu Rules yêu cầu xác thực |
+| `AISTV_AUTO_SUMMARY` | `1` | `0` = tắt tự tóm tắt hội thoại |
+| `AISTV_SUMMARY_ITEMS` / `AISTV_SUMMARY_KEEP` | `40` / `16` | Ngưỡng kích hoạt / số lượt giữ lại |
+| `AISTV_PROACTIVE` | `1` | `0` = tắt nhắc việc & theo dõi |
+| `AISTV_REMIND_TICK` | `15` | Nhịp kiểm tra nhắc việc (giây) |
+| `AISTV_WATCH_INTERVAL` / `AISTV_WATCH_GIT_INTERVAL` | `60` / `300` | Nhịp theo dõi log/file · git |
+| `AISTV_WATCH_SELF` | `1` | Tự báo lỗi trong log của chính bot |
+| `AISTV_PROGRESS_TICK` | `1` | Giây giữa 2 lần cập nhật khung tiến độ |
+| `AISTV_PROGRESS_LINES` | `14` | Số dòng cuộn trong khung tiến độ (dòng cũ rơi khỏi đỉnh) |
 
 Cấu hình nâng cao nằm ở đầu `aistv_bot.py` (model, timeout, số lịch sử, `FULL_ACCESS`, `USE_GOOGLE_DRIVE`).
 
@@ -129,6 +160,7 @@ AISTV/
 ├── requirements.txt
 ├── .env.example
 ├── seed/             SOUL.md, AGENTS.md, skills mặc định
+├── logs/             (tạo lúc chạy) aistv.log xoay vòng 2MB × 3
 └── workspace/        (tạo lúc chạy) trí nhớ, skills, inbox, file agent tạo
 ```
 
@@ -140,6 +172,7 @@ Dữ liệu chạy nằm ngoài repo tại `STV_HOME` (mặc định `~/stv_agen
 - Token chỉ đọc từ biến môi trường / Colab Secrets / `.env`; agent không nhìn thấy token (đã xoá khỏi môi trường tiến trình con).
 - `FULL_ACCESS = False` mặc định: agent chỉ ghi trong workspace và bị OpenCode chặn thao tác cần quyền.
 - Repo public **không chứa bí mật**; đừng commit `.env`.
+- **Firebase Rules:** mặc định bot chỉ lưu URL database, không nhúng API key. Nếu Rules đang `true` (mở), **ai biết URL cũng đọc/ghi/xoá được** — hãy siết Rules và chỉ cho phép đúng namespace `aistv/<bot id>`, hoặc bật `AISTV_FIREBASE_SECRET`. Không lưu dữ liệu nhạy cảm (mật khẩu, token) vào trí nhớ.
 
 ## Giấy phép
 

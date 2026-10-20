@@ -30,11 +30,12 @@ KIẾN TRÚC (học theo OpenClaw)
 # 0. CẤU HÌNH — chỉnh ở đây
 # ════════════════════════════════════════════════════════════════════
 import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib
-import secrets, shlex, threading, urllib.request, urllib.parse
+import secrets, shlex, threading, textwrap, urllib.request, urllib.parse
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "1") != "0"   # 0 = giữ bản OpenCode đã cài, không xoá & cài lại
@@ -56,6 +57,30 @@ MAX_PROMPT_BYTES = 110_000      # giới hạn an toàn cho 1 tham số dòng l�
 SPLIT_LIMIT = 3000              # ký tự tối đa mỗi tin nhắn Telegram (trước khi đổi sang HTML)
 PROGRESS_DETAIL = 500           # ký tự tối đa cho mỗi đoạn chi tiết (lệnh, code, output) trong tin nhắn tiến độ
 PROGRESS_KEEP = 6               # số việc gần nhất hiển thị trong tin nhắn tiến độ
+PROGRESS_TICK = float(os.getenv("AISTV_PROGRESS_TICK", "1") or 1)   # giây giữa 2 lần cập nhật tiến độ
+PROGRESS_LINES = int(os.getenv("AISTV_PROGRESS_LINES", "14") or 14) # số dòng cuộn trong tin nhắn tiến độ
+PROGRESS_CHARS = 3700           # giới hạn ký tự của khung cuộn (Telegram tối đa 4096)
+
+# ── Trí nhớ đám mây: Firebase Realtime Database (sống sót khi restart / Colab reset) ──
+FIREBASE_URL = os.getenv("AISTV_FIREBASE_URL", "https://sever-login-ae5cc-default-rtdb.firebaseio.com").rstrip("/")
+FIREBASE_SECRET = os.getenv("AISTV_FIREBASE_SECRET", "")   # chỉ cần nếu Rules yêu cầu auth (?auth=...)
+CLOUD_ENABLED = bool(FIREBASE_URL) and os.getenv("AISTV_CLOUD", "1") != "0"
+CLOUD_NS_BASE = os.getenv("AISTV_CLOUD_NS", "aistv")       # namespace riêng, không đụng dữ liệu app khác
+HIST_PUSH_DELAY = 2.0           # gom thay đổi lịch sử rồi đẩy 1 lần (giây)
+HIST_KEEP_REMOTE = 300          # số lượt giữ trên cloud mỗi chat
+
+# ── Tự tóm tắt hội thoại dài → trí nhớ dài hạn ──
+AUTO_SUMMARY = os.getenv("AISTV_AUTO_SUMMARY", "1") != "0"
+SUMMARY_MIN_ITEMS = int(os.getenv("AISTV_SUMMARY_ITEMS", "40"))     # số lượt (user+AI) để kích hoạt
+SUMMARY_KEEP_ITEMS = int(os.getenv("AISTV_SUMMARY_KEEP", "16"))     # số lượt gần nhất giữ nguyên
+SUMMARY_TIMEOUT = int(os.getenv("AISTV_SUMMARY_TIMEOUT", "420"))
+
+# ── Nhắc việc định kỳ & theo dõi repo/log ──
+REMIND_TICK = int(os.getenv("AISTV_REMIND_TICK", "15"))             # giây giữa 2 lần kiểm tra
+WATCH_INTERVAL = int(os.getenv("AISTV_WATCH_INTERVAL", "60"))       # nhịp mặc định cho log/file
+WATCH_GIT_INTERVAL = int(os.getenv("AISTV_WATCH_GIT_INTERVAL", "300"))
+WATCH_SELF = os.getenv("AISTV_WATCH_SELF", "1") != "0"              # tự báo lỗi trong log của bot
+PROACTIVE = os.getenv("AISTV_PROACTIVE", "1") != "0"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -159,7 +184,9 @@ ARCHIVE = HOME / "archive"
 SECRETS_DIR = HOME / ".secrets"
 GITHUB_TOKEN_FILE = SECRETS_DIR / "github_token"
 STATE_FILE = HOME / "state.json"
-for _d in (WORKSPACE, MEMORY_DIR, SKILLS_DIR, INBOX, SESSIONS, ARCHIVE, SECRETS_DIR):
+LOG_DIR = HOME / "logs"
+LOG_FILE = LOG_DIR / "aistv.log"
+for _d in (WORKSPACE, MEMORY_DIR, SKILLS_DIR, INBOX, SESSIONS, ARCHIVE, SECRETS_DIR, LOG_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 try:
     SECRETS_DIR.chmod(0o700)
@@ -185,6 +212,7 @@ ASK_BY_CHAT: dict = {}             # chat_id -> ask_id
 ASK_LOCK = threading.Lock()
 
 THINKING: dict = {}                # chat_id -> [các đoạn reasoning model đã trả về]
+LIVE: dict = {}                    # chat_id -> dòng thời gian sự kiện (think/tool) để cuộn như terminal
 THINK_TOKENS: dict = {}            # chat_id -> số token reasoning
 THINKING_LAST: dict = {}           # chat_id -> thời điểm nhận reasoning gần nhất
 GH_TOKEN_CACHE = ""                # token GitHub đang dùng (để che trong log/output)
@@ -192,6 +220,12 @@ GH_TOKEN_CACHE = ""                # token GitHub đang dùng (để che trong l
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)       # httpx in URL chứa token → tắt
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+try:                                    # log xoay vòng: /watch log có thể theo dõi chính bot
+    _fh = RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
+    logging.getLogger().addHandler(_fh)
+except Exception:
+    pass
 log = logging.getLogger("stv-agent")
 
 
@@ -417,8 +451,10 @@ def memory_items() -> list:
 
 
 def write_memory(items: list) -> None:
+    global MEM_DIRTY
     body = MEMORY_HEADER + ("\n" + "\n".join(items) + "\n" if items else "")
     (WORKSPACE / "MEMORY.md").write_text(body, "utf-8")
+    MEM_DIRTY = True                     # cloud_loop sẽ đẩy lên Firebase
 
 
 def list_skills() -> list:
@@ -479,6 +515,7 @@ def append_history(chat_id: int, role: str, content: str) -> None:
     items = load_history(chat_id)
     if len(items) > 400:
         rewrite_history(chat_id, items[-200:])
+    HIST_DIRTY[chat_id] = time.time()    # đẩy lên Firebase sau vài giây
 
 
 def archive_history(chat_id: int) -> None:
@@ -977,6 +1014,9 @@ def _tool_entry(part: dict) -> Optional[dict]:
             if isinstance(v, str) and v.strip():
                 target = _clip(_redact(v), 100)
                 break
+    if not target:
+        target = _clip(_redact(st.get("title") or ""), 100)
+    target = " ".join(str(target).split())
     return {"icon": icon, "label": label, "target": target, "detail": detail,
             "lang": lang, "ok": st.get("status") != "error", "call": part.get("callID")}
 
@@ -1014,25 +1054,94 @@ def _last_action(chat_id: int) -> str:
     return f"{e['icon']} {e['label']}"
 
 
+def _push_live(chat_id: int, kind: str, payload, call: Optional[str] = None) -> None:
+    """Ghi 1 sự kiện vào dòng thời gian để tin nhắn tiến độ cuộn như terminal."""
+    box = LIVE.setdefault(chat_id, [])
+    if kind == "think":
+        txt = str(payload or "")
+        if not txt:
+            return
+        if box and box[-1].get("kind") == "think":
+            box[-1]["text"] = (box[-1]["text"] + txt)[-4000:]
+        else:
+            box.append({"kind": "think", "text": txt[-4000:]})
+    else:
+        if call:
+            for i, old in enumerate(box):
+                if old.get("call") == call:
+                    box[i] = {"kind": "tool", "entry": payload, "call": call}
+                    return
+        box.append({"kind": "tool", "entry": payload, "call": call})
+    del box[:-300]
+
+
+def _wrap_live(text: str, width: int = 44) -> list:
+    out = []
+    for para in str(text or "").splitlines():
+        para = para.strip()
+        if not para:
+            continue
+        out.extend(textwrap.wrap(para, width=width, break_long_words=True,
+                                 replace_whitespace=False) or [para])
+    return out
+
+
+def _live_blocks(chat_id: int, detailed: bool = False) -> list:
+    """Đổi dòng thời gian thành các khối HTML đã escape, mới nhất ở cuối."""
+    blocks = []
+    show_think = STATE.get("show_thinking", True)
+    for ev in LIVE.get(chat_id) or []:
+        if ev.get("kind") == "think":
+            if not show_think:
+                continue
+            text = clean_output(ev.get("text") or "").strip()
+            if not text:
+                continue
+            lines = _wrap_live(text[-900:])
+            blocks.append("💭 " + "\n   ".join(esc(x) for x in lines[-8:]))
+        else:
+            e = ev.get("entry") or {}
+            line = f"{e.get('icon', '🔧')} " + ("" if e.get("ok", True) else "⚠️ ")
+            line += f"<b>{esc(e.get('label', 'Công cụ'))}</b>"
+            if e.get("target"):
+                line += f" <code>{esc(e['target'])}</code>"
+            if detailed and e.get("detail"):
+                det = str(e["detail"])
+                dlines = det.splitlines()
+                if len(dlines) > 5:
+                    det = "\n".join(dlines[:5]) + "\n…"
+                line += f"\n<pre>{esc(det)}</pre>"
+            blocks.append(line)
+    return blocks
+
+
+def _tail_blocks(blocks: list, max_lines: int = PROGRESS_LINES,
+                 max_chars: int = PROGRESS_CHARS) -> tuple:
+    """Giữ các khối cuối vừa khung; khối cũ rơi khỏi đỉnh (cuộn xuống)."""
+    kept, used_lines, used_chars = [], 0, 0
+    for b in reversed(blocks):
+        n = b.count("\n") + 1
+        c = len(b) + 1
+        if kept and (used_lines + n > max_lines or used_chars + c > max_chars):
+            break
+        kept.append(b)
+        used_lines += n
+        used_chars += c
+    kept.reverse()
+    return kept, len(kept) < len(blocks)
+
+
 def _render_status(chat_id: int, started: float, frame: str = "🧠") -> str:
     secs = int(time.monotonic() - started)
-    if not STATE.get("show_activity", False):
-        # Chế độ gọn: chỉ 1 dòng, không lệnh / code / output để không chiếm chỗ.
-        head = f"{frame} <i>Đang làm việc…</i> {secs}s"
-        act = _last_action(chat_id)
-        if act:
-            head += f" · {esc(act)}"
-        return head + " · /stop để huỷ"
-    head = f"{frame} <i>Đang suy nghĩ…</i> {secs}s · /stop để huỷ"
-    parts = [head]
-    think = _thinking_tail(chat_id, 600)
-    if think:
-        parts += ["", "💭 <b>Suy nghĩ</b>", f"<blockquote>{esc(think)}</blockquote>"]
-    rows = _status_rows(chat_id, limit=PROGRESS_KEEP if not think else 3)
-    if rows:
-        parts += ["", "✅ <b>Việc đã làm</b>"] + rows
-    body = "\n".join(parts)
-    return body if len(body) <= 3800 else body[:3790] + "\n…"
+    head = f"{frame} <i>Đang làm việc…</i> {secs}s · /stop để huỷ"
+    detailed = bool(STATE.get("show_activity", False))
+    blocks = _live_blocks(chat_id, detailed=detailed)
+    kept, cut = _tail_blocks(blocks, PROGRESS_LINES + (4 if detailed else 0))
+    if cut:
+        kept.insert(0, "⏫ <i>…</i>")
+    if not kept:
+        return head + "\n⏳ <i>Đang chờ model phản hồi…</i>"
+    return "\n".join([head] + kept)
 
 
 async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> str:
@@ -1087,8 +1196,11 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> s
             elif etype == "reasoning":
                 txt = part.get("text") or ""
                 if txt:
-                    THINKING.setdefault(chat_id, []).append(txt)
+                    parts = THINKING.setdefault(chat_id, [])
+                    parts.append(txt)
+                    del parts[:-200]
                     THINKING_LAST[chat_id] = time.monotonic()
+                    _push_live(chat_id, "think", txt)
             elif etype == "step_finish":
                 try:
                     rt = int(((part.get("tokens") or {}).get("reasoning")) or 0)
@@ -1111,6 +1223,7 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> s
                     else:
                         items.append(entry)
                     del items[:-PROGRESS_KEEP * 3]
+                    _push_live(chat_id, "tool", entry, call)
             elif etype == "error":
                 err = part.get("error") or ev.get("error") or ""
                 if isinstance(err, dict):
@@ -1158,6 +1271,7 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
             cmd.append(prompt)
         ACTIVITY[chat_id] = []
         THINKING[chat_id] = []
+        LIVE[chat_id] = []
         THINK_TOKENS[chat_id] = 0
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=str(WORKSPACE), env=env, limit=2 ** 20,
@@ -1365,23 +1479,31 @@ MENU_KB = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Trạng thái", call
 
 async def _ticker(bot, chat_id: int, status, started: float, stop: asyncio.Event) -> None:
     frames, i, last = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", 0, ""
+    delay = max(0.3, PROGRESS_TICK)
+    typing_at = 0.0
     while not stop.is_set():
-        try:
-            await bot.send_chat_action(chat_id, ChatAction.TYPING)
-        except Exception:
-            pass
+        if time.monotonic() - typing_at >= 4.5:      # "đang nhập" chỉ cần ~5s/lần
+            typing_at = time.monotonic()
+            try:
+                await bot.send_chat_action(chat_id, ChatAction.TYPING)
+            except Exception:
+                pass
         body = _render_status(chat_id, started, frames[i % len(frames)])
         if body != last:
             try:
                 await status.edit_text(body, parse_mode=HTML, link_preview_options=NO_PREVIEW)
                 last = body
+                delay = max(0.3, PROGRESS_TICK)
             except RetryAfter as e:
-                await asyncio.sleep(e.retry_after + 1)
+                delay = min(30.0, e.retry_after + 1)
+                await asyncio.sleep(delay)
+            except BadRequest:
+                last = body
             except Exception:
                 pass
         i += 1
         try:
-            await asyncio.wait_for(stop.wait(), timeout=2)
+            await asyncio.wait_for(stop.wait(), timeout=delay)
         except asyncio.TimeoutError:
             pass
 
@@ -1395,6 +1517,7 @@ async def _finish_status(status, chat_id: int, started: float, ok: bool) -> None
         except Exception:
             pass
         ACTIVITY.pop(chat_id, None)
+        LIVE.pop(chat_id, None)
         return
     head = (f"✅ <b>Hoàn tất</b> · {time.monotonic() - started:.1f}s" if ok
             else f"⚠️ <b>Dừng lại</b> · {time.monotonic() - started:.1f}s")
@@ -1409,6 +1532,7 @@ async def _finish_status(status, chat_id: int, started: float, ok: bool) -> None
         except Exception:
             pass
     ACTIVITY.pop(chat_id, None)
+    LIVE.pop(chat_id, None)
 
 
 async def send_new_files(message, before: dict) -> None:
@@ -1432,6 +1556,7 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
         await message.reply_text("⏳ Tôi đang xử lý yêu cầu trước — yêu cầu này đã được xếp hàng.")
     async with lock:
         async with SEM:
+            await ensure_history(chat_id)        # máy mới → lấy lại hội thoại từ cloud
             status = await message.reply_text("🧠 <i>Đang làm việc…</i>", parse_mode=HTML)
             started = time.monotonic()
             prompt = build_prompt(chat_id, text, skill)
@@ -1448,8 +1573,7 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
                 append_history(chat_id, "user", text)
                 append_history(chat_id, "assistant", answer[:6000])
                 log_daily(text, answer)
-                if STATE.get("show_thinking", True):
-                    await send_thinking(message, chat_id)
+                maybe_schedule_summary(chat_id)
             think_tok = THINK_TOKENS.get(chat_id, 0)
             foot = f"⏱ {time.monotonic() - started:.1f}s · {esc(STATE['model'].split('/')[-1])}"
             if think_tok:
@@ -1460,6 +1584,7 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
                 await send_new_files(message, before)
             THINKING.pop(chat_id, None)
             THINK_TOKENS.pop(chat_id, None)
+            LIVE.pop(chat_id, None)
             return ok
 
 
@@ -1481,7 +1606,9 @@ def build_status(chat_id: int) -> str:
         f"• GitHub: {esc(gh)}\n"
         f"• Giới hạn 1 yêu cầu: {to}\n"
         f"• Hội thoại: {len(load_history(chat_id)) // 2} lượt đã lưu\n"
-        f"• Trí nhớ dài hạn: {len(memory_items())} mục\n"
+        f"• Trí nhớ dài hạn: {len(memory_items())} mục"
+        f" · cloud {'🟢' if CLOUD_STAT['ok'] else ('🔴' if CLOUD_STAT['ok'] is False else '🟡')}\n"
+        f"• Nhắc việc: {len(REMINDERS)} · Theo dõi: {len(WATCHES)}\n"
         f"• Skills: {len(list_skills())}\n"
         f"• File trong workspace: {len(snapshot())}\n"
         f"• Tác vụ: {'🟢 đang chạy' if chat_id in RUNNING else '⚪ rảnh'}\n"
@@ -1513,7 +1640,9 @@ def welcome_text() -> str:
         "• Hiện <b>suy nghĩ (thinking)</b> của model theo thời gian thực\n"
         "• Agent <b>hỏi lại bạn</b> bằng bảng nút bấm khi cần chọn phương án\n"
         "• Nhớ hội thoại bền vững, kể cả khi bot khởi động lại\n"
-        "• Trí nhớ dài hạn — /remember, /memory\n"
+        "• Trí nhớ dài hạn — /remember, /memory; tự tóm tắt hội thoại dài\n"
+        "• <b>Trí nhớ đám mây</b> (Firebase) — restart/Colab reset vẫn còn\n"
+        "• <b>Chủ động</b>: /remind hẹn giờ, /task tự chạy, /watch theo dõi repo &amp; log\n"
         "• Đọc file bạn gửi, tạo file và tự gửi lại cho bạn\n"
         "• <b>Không giới hạn 10 phút</b> — dự án lớn chạy tới khi xong (/stop để huỷ)\n"
         "• Kết nối GitHub 1 lần — /github login; tự cập nhật — /update\n\n"
@@ -1526,10 +1655,17 @@ HELP_TEXT = (
     "Nhắn trực tiếp yêu cầu (hỏi đáp, viết/sửa code, phân tích, tạo file…).\n\n"
     "<b>Hội thoại</b>\n/new — cuộc trò chuyện mới\n/stop — huỷ tác vụ đang chạy\n/status — trạng thái\n\n"
     "<b>Trí nhớ &amp; Skills</b>\n/remember &lt;nội dung&gt; — ghi nhớ dài hạn\n/memory — xem trí nhớ\n"
-    "/forget &lt;số|all&gt; — xoá trí nhớ\n/skills — danh sách skills\n/skill &lt;tên&gt; &lt;yêu cầu&gt; — chạy theo skill\n\n"
+    "/forget &lt;số|all&gt; — xoá trí nhớ\n/summary — cô đọng hội thoại vào trí nhớ\n"
+    "/cloud [sync] — trạng thái / đồng bộ trí nhớ đám mây\n"
+    "/skills — danh sách skills\n/skill &lt;tên&gt; &lt;yêu cầu&gt; — chạy theo skill\n\n"
+    "<b>Chủ động</b>\n/remind &lt;thời gian&gt; &lt;nội dung&gt; — nhắc việc (+30m, 20:30, daily 8:00)\n"
+    "/task &lt;thời gian&gt; &lt;yêu cầu&gt; — để agent tự chạy theo lịch\n"
+    "/reminders — danh sách · /unremind &lt;mã|all&gt; — xoá\n"
+    "/watch git owner/repo — báo commit mới · /watch log &lt;file&gt; — báo lỗi mới\n"
+    "/watch file &lt;đường dẫn&gt; — báo khi thay đổi · /watch del &lt;mã|all&gt;\n\n"
     "<b>File</b>\nGửi file cho bot → lưu vào <code>inbox/</code> để agent đọc\n/files — file trong workspace\n/get &lt;đường dẫn&gt; — tải file về\n\n"
-    "<b>Suy nghĩ &amp; hỏi đáp</b>\n/think on|off — hiện/tắt phần suy nghĩ của model\n"
-    "/activity on|off — hiện/tắt chi tiết lệnh &amp; sửa code khi đang chạy (mặc định tắt)\n"
+    "<b>Suy nghĩ &amp; hỏi đáp</b>\n/think on|off — hiện/tắt suy nghĩ cuộn trực tiếp khi chạy\n"
+    "/activity on|off — hiện/tắt chi tiết lệnh, code, output trong khung cuộn\n"
     "/variant [high|max|off] — mức reasoning của model\n"
     "Agent tự dùng nút bấm khi cần bạn chọn/xác nhận.\n\n"
     "<b>GitHub &amp; tự cập nhật (chủ bot)</b>\n/github login — kết nối GitHub bằng mã, lưu lâu dài\n"
@@ -1622,7 +1758,7 @@ async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE):
     on = STATE.get("show_thinking", True)
     await msg.reply_text(
         f"💭 Hiển thị suy nghĩ (reasoning): <b>{'BẬT' if on else 'TẮT'}</b>\n"
-        "Model có reasoning sẽ hiện phần này khi đang chạy và gửi kèm sau khi xong.",
+        "Suy nghĩ hiện trực tiếp trong tin nhắn tiến độ, cuộn xuống theo thời gian thực.",
         parse_mode=HTML)
 
 
@@ -1641,9 +1777,9 @@ async def cmd_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     on = STATE.get("show_activity", False)
     await msg.reply_text(
         f"⚙️ Chi tiết việc đang làm (lệnh, code, output): <b>{'BẬT' if on else 'TẮT'}</b>\n"
-        + ("Đang bật: tin nhắn tiến độ hiện từng lệnh/sửa file và giữ lại khi xong."
+        + ("Đang bật: tin nhắn tiến độ cuộn chi tiết từng lệnh/sửa file, giữ lại khi xong."
            if on else
-           "Đang tắt: chỉ 1 dòng trạng thái ngắn và tự xoá khi xong, không chiếm chỗ."),
+           "Đang tắt: tiến độ vẫn cuộn theo thời gian thực nhưng gọn (1 dòng/sự kiện) và tự xoá khi xong."),
         parse_mode=HTML)
 
 
@@ -2058,6 +2194,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("ask:"):
         await _on_ask_button(q, data)
         return
+    if data.startswith("done:"):
+        rid = data.split(":", 1)[1]
+        REMINDERS.pop(rid, None)
+        await rem_save()
+        await q.answer("Đã xoá nhắc việc")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
     await q.answer()
     if data == "status":
         await q.message.reply_text(build_status(chat_id), parse_mode=HTML)
@@ -2090,6 +2236,831 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ════════════════════════════════════════════════════════════════════
+# 8b. TRÍ NHỚ ĐÁM MÂY · TÓM TẮT TỰ ĐỘNG · NHẮC VIỆC · THEO DÕI
+#     Firebase RTDB giữ MEMORY.md, lịch sử chat, nhắc việc và watch
+#     → restart bot / Colab reset vẫn còn nguyên.
+# ════════════════════════════════════════════════════════════════════
+CLOUD_NS = CLOUD_NS_BASE
+CLOUD_STAT = {"ok": None, "at": 0.0, "err": 0, "up": 0, "last": ""}
+MEM_DIRTY = False
+HIST_DIRTY: dict = {}
+SUMMARY_BUSY: set = set()
+SUMMARY_PENDING: set = set()
+REMINDERS: dict = {}
+WATCHES: dict = {}
+REMIND_FILE = HOME / "reminders.json"
+WATCH_FILE = HOME / "watches.json"
+_ERROR_RX = re.compile(r"(?i)\b(error|exception|traceback|critical|fatal|panic|failed)\b")
+_UNITS = {"s": 1, "giây": 1, "giay": 1, "m": 60, "phút": 60, "phut": 60, "p": 60,
+          "h": 3600, "giờ": 3600, "gio": 3600, "g": 3600,
+          "d": 86400, "ngày": 86400, "ngay": 86400, "n": 86400}
+
+
+def _cloud_path(path: str) -> str:
+    return f"{CLOUD_NS}/{path.strip('/')}".strip("/")
+
+
+def _fb_url(path: str) -> str:
+    url = f"{FIREBASE_URL}/{_cloud_path(path)}.json"
+    if FIREBASE_SECRET:
+        url += "?auth=" + urllib.parse.quote(FIREBASE_SECRET)
+    return url
+
+
+def fb_call(method: str, path: str, data=None, timeout: int = 20):
+    """REST tới Firebase RTDB (đồng bộ). Không bao giờ ném lỗi ra ngoài."""
+    if not CLOUD_ENABLED:
+        return None
+    body = json.dumps(data, ensure_ascii=False).encode("utf-8") if data is not None else None
+    req = urllib.request.Request(_fb_url(path), data=body, method=method,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+        CLOUD_STAT.update(ok=True, at=time.time())
+        if method in ("PUT", "POST", "PATCH"):
+            CLOUD_STAT["up"] += 1
+        CLOUD_STAT["last"] = f"{method} /{_cloud_path(path)}"
+        return json.loads(raw) if raw.strip() and raw.strip() != "null" else None
+    except Exception as e:
+        CLOUD_STAT.update(ok=False, err=CLOUD_STAT["err"] + 1)
+        log.warning("Firebase %s /%s: %s", method, _cloud_path(path), oneline(str(e), 160))
+        return None
+
+
+async def fb(method: str, path: str, data=None):
+    return await asyncio.to_thread(fb_call, method, path, data)
+
+
+def _save_json(path: Path, data) -> None:
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+    except Exception as e:
+        log.warning("Không ghi được %s: %s", path.name, e)
+
+
+def _load_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+# ── Trí nhớ dài hạn + lịch sử hội thoại đồng bộ 2 chiều ─────────────
+async def cloud_merge_memory() -> str:
+    """Gộp MEMORY.md cục bộ với bản trên cloud (giữ thứ tự, không trùng)."""
+    global MEM_DIRTY
+    if not CLOUD_ENABLED:
+        return "tắt"
+    remote = await fb("GET", "mem/items")
+    remote = [str(x).strip() for x in remote] if isinstance(remote, list) else []
+    remote = [x if x.startswith("- ") else "- " + x for x in remote if x]
+    merged, added = list(memory_items()), 0
+    for it in remote:
+        if it not in merged:
+            merged.append(it)
+            added += 1
+    if added:
+        write_memory(merged)
+    elif merged:
+        MEM_DIRTY = True                     # bản cục bộ mới hơn → đẩy lên
+    return f"{len(merged)} mục (+{added} từ cloud)"
+
+
+async def cloud_push_memory() -> None:
+    if CLOUD_ENABLED:
+        await fb("PUT", "mem/items", memory_items())
+
+
+async def cloud_push_history(chat_id: int) -> None:
+    if CLOUD_ENABLED:
+        await fb("PUT", f"hist/{chat_id}", load_history(chat_id)[-HIST_KEEP_REMOTE:])
+
+
+async def cloud_pull_history(chat_id: int) -> int:
+    if not CLOUD_ENABLED:
+        return 0
+    items = await fb("GET", f"hist/{chat_id}")
+    if isinstance(items, list) and items:
+        clean = [x for x in items if isinstance(x, dict) and x.get("role")]
+        if clean:
+            rewrite_history(chat_id, clean)
+            return len(clean)
+    return 0
+
+
+async def ensure_history(chat_id: int) -> None:
+    """Máy mới / Colab reset: lấy lại hội thoại của chat này từ cloud."""
+    if not CLOUD_ENABLED or load_history(chat_id):
+        return
+    n = await cloud_pull_history(chat_id)
+    if n:
+        log.info("Khôi phục %d lượt hội thoại từ cloud (chat %s)", n, chat_id)
+
+
+async def cloud_restore_all() -> None:
+    if not CLOUD_ENABLED:
+        log.info("Cloud: tắt (AISTV_CLOUD=0)")
+        return
+    try:
+        mem = await cloud_merge_memory()
+    except Exception as e:
+        mem = "lỗi: " + oneline(str(e), 80)
+    restored = 0
+    hist = await fb("GET", "hist")
+    if isinstance(hist, dict):
+        for cid, items in hist.items():
+            try:
+                cid_i = int(cid)
+            except (TypeError, ValueError):
+                continue
+            if load_history(cid_i) or not isinstance(items, list) or not items:
+                continue
+            clean = [x for x in items if isinstance(x, dict) and x.get("role")]
+            if clean:
+                rewrite_history(cid_i, clean)
+                restored += 1
+    await rem_restore()
+    await watch_restore()
+    log.info("Cloud sẵn sàng (%s) · trí nhớ: %s · %d hội thoại · %d nhắc việc · %d theo dõi",
+             CLOUD_NS, mem, restored, len(REMINDERS), len(WATCHES))
+
+
+async def cloud_loop() -> None:
+    """Gom thay đổi rồi đẩy lên Firebase (tránh gọi mạng mỗi lần append)."""
+    global MEM_DIRTY
+    await asyncio.sleep(3)
+    while True:
+        try:
+            if MEM_DIRTY:
+                MEM_DIRTY = False
+                await cloud_push_memory()
+            for cid, ts in list(HIST_DIRTY.items()):
+                if time.time() - ts >= HIST_PUSH_DELAY:
+                    HIST_DIRTY.pop(cid, None)
+                    await cloud_push_history(cid)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("cloud_loop: %s", oneline(str(e), 160))
+        await asyncio.sleep(2)
+
+
+# ── Tự tóm tắt hội thoại dài → MEMORY.md ────────────────────────────
+def add_memory_lines(lines: list) -> int:
+    items, added = memory_items(), 0
+    for raw in lines:
+        line = (raw or "").strip().lstrip("-*• ").strip()
+        if not line:
+            continue
+        entry = "- " + line[:400]
+        if entry not in items:
+            items.append(entry)
+            added += 1
+    if added:
+        if len(items) > 400:                       # chỉ dọn mục auto cũ, giữ mục người dùng tự ghi
+            autos = [i for i, x in enumerate(items) if x.startswith("- [tóm tắt ")]
+            drop = set(autos[:max(0, len(items) - 400)])
+            items = [x for i, x in enumerate(items) if i not in drop]
+        write_memory(items)
+    return added
+
+
+async def ask_model_once(prompt: str, timeout: int = 300) -> tuple:
+    """Gọi OpenCode 1 lần, không tool, không đụng state hội thoại."""
+    if not OPENCODE_BIN:
+        return False, "chưa có OpenCode"
+    env = os.environ.copy()
+    env.pop("TELEGRAM_BOT_TOKEN", None)
+    env.update(NO_COLOR="1", TERM="dumb")
+    cmd = [OPENCODE_BIN, "run", "--dir", str(WORKSPACE), "--model", STATE["model"], "--auto"]
+    if STATE.get("variant"):
+        cmd += ["--variant", STATE["variant"]]
+    cmd.append(prompt[:MAX_PROMPT_BYTES - 2000])
+    try:
+        p = await asyncio.to_thread(subprocess.run, cmd, cwd=str(WORKSPACE), env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, timeout=timeout)
+    except Exception as e:
+        return False, oneline(str(e), 200)
+    if p.returncode != 0:
+        return False, (p.stdout or "")[-400:] or f"mã lỗi {p.returncode}"
+    return True, clean_output(p.stdout or "")
+
+
+async def summarize_chat(chat_id: int, force: bool = False) -> Optional[str]:
+    """Cô đọng các lượt cũ thành gạch đầu dòng trong MEMORY.md rồi cắt lịch sử."""
+    if chat_id in SUMMARY_BUSY:
+        return None
+    items = load_history(chat_id)
+    if len(items) < (6 if force else SUMMARY_MIN_ITEMS):
+        return None
+    SUMMARY_BUSY.add(chat_id)
+    try:
+        keep_n = max(SUMMARY_KEEP_ITEMS, 4)
+        old, keep = items[:-keep_n], items[-keep_n:]
+        convo = "\n".join(
+            f"{'Người dùng' if i.get('role') == 'user' else 'AI STV'}: {oneline(i.get('content', ''), 400)}"
+            for i in old)[-20000:]
+        prompt = ("Bạn là bộ phận ghi nhớ của một trợ lý. Tóm tắt hội thoại dưới đây thành tối đa 10 dòng, "
+                  "mỗi dòng bắt đầu bằng '- '. Chỉ giữ: sự kiện, quyết định, sở thích, thông tin cá nhân, "
+                  "đường dẫn/tên file, mốc thời gian, việc còn dang dở. Bỏ lời chào, câu hỏi lặp, chi tiết vụn. "
+                  "Không thêm lời dẫn, không dùng markdown đậm.\n\n" + convo)
+        ok, txt = await ask_model_once(prompt, SUMMARY_TIMEOUT)
+        if not ok:
+            log.warning("Tóm tắt chat %s thất bại: %s", chat_id, oneline(txt, 200))
+            return None
+        lines = [l.strip() for l in txt.splitlines() if l.strip().startswith(("-", "*", "•"))]
+        if not lines:
+            lines = ["- " + oneline(txt, 300)]
+        lines = [f"[tóm tắt {now():%d/%m %H:%M}] " + l.lstrip("-*• ").strip() for l in lines[:10]]
+        added = add_memory_lines(lines)
+        rewrite_history(chat_id, keep)
+        if CLOUD_ENABLED:
+            await cloud_push_memory()                  # lưu ngay, không chờ vòng nền
+            await fb("PUT", f"summary/{chat_id}", {"at": int(time.time()), "items": len(old), "added": added})
+            HIST_DIRTY.pop(chat_id, None)
+            await cloud_push_history(chat_id)
+        log.info("Tóm tắt chat %s: %d lượt → %d mục trí nhớ", chat_id, len(old), added)
+        return f"đã cô đọng {len(old)} lượt cũ thành {added} mục trí nhớ"
+    finally:
+        SUMMARY_BUSY.discard(chat_id)
+
+
+def maybe_schedule_summary(chat_id: int) -> None:
+    if not AUTO_SUMMARY or chat_id in SUMMARY_BUSY or chat_id in SUMMARY_PENDING:
+        return
+    if len(load_history(chat_id)) < SUMMARY_MIN_ITEMS:
+        return
+    SUMMARY_PENDING.add(chat_id)
+
+    async def runner():
+        try:
+            for _ in range(60):                   # chờ khi bot rảnh (tối đa ~10 phút)
+                if not RUNNING and not LOCKS[chat_id].locked():
+                    break
+                await asyncio.sleep(10)
+            await summarize_chat(chat_id)
+        except Exception as e:
+            log.warning("Auto-summary chat %s lỗi: %s", chat_id, oneline(str(e), 200))
+        finally:
+            SUMMARY_PENDING.discard(chat_id)
+
+    try:
+        asyncio.create_task(runner())
+    except RuntimeError:
+        SUMMARY_PENDING.discard(chat_id)
+
+
+# ── Nhắc việc / việc định kỳ ────────────────────────────────────────
+def _new_id(prefix: str) -> str:
+    return prefix + secrets.token_hex(3)
+
+
+def _when_str(ts) -> str:
+    try:
+        dt = datetime.fromtimestamp(float(ts), TZ) if TZ else datetime.fromtimestamp(float(ts))
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return "?"
+
+
+def _in_str(ts) -> str:
+    try:
+        d = max(0, int(float(ts) - time.time()))
+    except Exception:
+        return ""
+    if d < 60:
+        return f"{d}s"
+    if d < 3600:
+        return f"{d // 60} phút"
+    if d < 86400:
+        return f"{d // 3600}h{d % 3600 // 60:02d}"
+    return f"{d // 86400} ngày"
+
+
+def _next_at(hh: int, mm: int, add_days: int = 0) -> float:
+    base = now().replace(hour=min(max(hh, 0), 23), minute=min(max(mm, 0), 59),
+                         second=0, microsecond=0)
+    if add_days:
+        base += timedelta(days=add_days)
+    elif base.timestamp() <= time.time() + 30:
+        base += timedelta(days=1)
+    return base.timestamp()
+
+
+def parse_schedule(text: str):
+    """Trả (epoch|None, kiểu lặp, phần nội dung còn lại).
+    Nhận: +30m · 20:30 · 20h30 · daily 8:00 · mai 8:00 · 25/12 20:00 · 25/12/2026 20:00"""
+    t = (text or "").strip()
+    if not t:
+        return None, "", ""
+    m = re.match(r"^\+\s*(\d+)\s*([^\s\d]+)?\s*(.*)$", t)
+    if m:
+        sec = _UNITS.get((m.group(2) or "m").lower().rstrip("."))
+        if sec:
+            return time.time() + int(m.group(1)) * sec, "none", m.group(3).strip()
+    m = re.match(r"^(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\s+(?:lúc\s+)?(\d{1,2})[h:.](\d{2})?\s*(.*)$",
+                 t, re.I)
+    if m:
+        d, mo = int(m.group(1)), int(m.group(2))
+        yr = int(m.group(3)) if m.group(3) else now().year
+        if yr < 100:
+            yr += 2000
+        hh, mm = int(m.group(4)), int(m.group(5) or 0)
+        try:
+            base = datetime(yr, mo, d, min(hh, 23), min(mm, 59), tzinfo=TZ) if TZ \
+                else datetime(yr, mo, d, min(hh, 23), min(mm, 59))
+        except ValueError:
+            return None, "", t
+        return base.timestamp(), "none", m.group(6).strip()
+    m = re.match(r"^(?:daily|hằng ngày|hang ngay|mỗi ngày|moi ngay)\s+(\d{1,2})[h:.]?(\d{2})?\s*(.*)$",
+                 t, re.I)
+    if m:
+        return _next_at(int(m.group(1)), int(m.group(2) or 0)), "daily", m.group(3).strip()
+    m = re.match(r"^(?:(mai|ngày mai|ngay mai|tomorrow)\s+)?(\d{1,2})[h:.](\d{2})?\s*(.*)$", t, re.I)
+    if m:
+        hh, mm = int(m.group(2)), int(m.group(3) or 0)
+        return _next_at(hh, mm, 1 if m.group(1) else 0), "none", m.group(4).strip()
+    return None, "", t
+
+
+async def rem_save(push: bool = True) -> None:
+    _save_json(REMIND_FILE, REMINDERS)
+    if CLOUD_ENABLED and push:
+        await fb("PUT", "rem", REMINDERS)
+
+
+async def rem_restore() -> None:
+    data = await fb("GET", "rem") if CLOUD_ENABLED else None
+    cloud_ok = isinstance(data, dict) or not CLOUD_ENABLED
+    if not isinstance(data, dict):
+        data = {}
+    for k, v in _load_json(REMIND_FILE).items():
+        data.setdefault(k, v)
+    REMINDERS.clear()
+    REMINDERS.update({k: v for k, v in data.items() if isinstance(v, dict) and v.get("when")})
+    stale = [k for k, v in REMINDERS.items()
+             if float(v.get("when", 0)) < time.time() - 2 * 86400 and v.get("repeat") != "daily"]
+    for k in stale:
+        REMINDERS.pop(k, None)
+    await rem_save(push=cloud_ok)          # cloud lỗi thì chỉ ghi cục bộ, tránh xoá dữ liệu cloud
+
+
+def build_reminders() -> str:
+    if not REMINDERS:
+        return ("⏰ <b>Chưa có nhắc việc</b>\n"
+                "• <code>/remind +30m uống nước</code>\n"
+                "• <code>/remind 20:30 họp nhóm</code>\n"
+                "• <code>/remind mai 8:00 nộp báo cáo</code>\n"
+                "• <code>/remind daily 8:00 điểm danh</code>\n"
+                "• <code>/task daily 9:00 kiểm tra repo có lỗi mới</code>")
+    rows = []
+    for r in sorted(REMINDERS.values(), key=lambda x: float(x.get("when", 0))):
+        icon = "🤖" if r.get("kind") == "agent" else "⏰"
+        rep = " · mỗi ngày" if r.get("repeat") == "daily" else ""
+        rows.append(f"{icon} <code>{esc(r.get('id'))}</code> · {esc(_when_str(r.get('when')))}{rep}"
+                    f" <i>({esc(_in_str(r.get('when')))})</i>\n   {esc(oneline(r.get('text', ''), 140))}")
+    return ("⏰ <b>Nhắc việc &amp; việc định kỳ</b>\n" + "\n".join(rows)
+            + "\n\nXoá: <code>/unremind &lt;mã|all&gt;</code>")
+
+
+async def send_plain(app, chat_id: int, text: str, html_ok: bool = False, markup=None) -> None:
+    text = (text or "").strip()
+    if not text:
+        return
+    parts = [text[i:i + 3800] for i in range(0, len(text), 3800)]
+    for i, part in enumerate(parts):
+        try:
+            await app.bot.send_message(
+                chat_id, part,
+                parse_mode=HTML if html_ok else None,
+                link_preview_options=NO_PREVIEW,
+                reply_markup=markup if i == len(parts) - 1 else None)
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+        except Exception as e:
+            log.warning("send_plain tới %s lỗi: %s", chat_id, e)
+            return
+
+
+TASK_RUNNING: set = set()
+
+
+async def _run_scheduled_task_guarded(app, rec: dict) -> None:
+    chat_id = int(rec["chat"])
+    if chat_id in TASK_RUNNING:
+        return
+    TASK_RUNNING.add(chat_id)
+    try:
+        async with LOCKS[chat_id]:
+            await _run_scheduled_task(app, rec)
+    except Exception as e:
+        log.warning("Việc định kỳ chat %s lỗi: %s", chat_id, oneline(str(e), 200))
+    finally:
+        TASK_RUNNING.discard(chat_id)
+
+
+async def _run_scheduled_task(app, rec: dict) -> None:
+    chat_id = int(rec["chat"])
+    text = rec.get("text", "")
+    await send_plain(app, chat_id, f"⏰ <b>Việc định kỳ:</b> {esc(oneline(text, 200))}", html_ok=True)
+    ok, ans = await run_agent(chat_id, build_prompt(
+        chat_id, f"[TỰ ĐỘNG THEO LỊCH · {now():%d/%m %H:%M}] {text}"))
+    if ok:
+        append_history(chat_id, "user", f"[tự động] {text}")
+        append_history(chat_id, "assistant", ans[:6000])
+        maybe_schedule_summary(chat_id)
+        await send_plain(app, chat_id, ans)
+    else:
+        await send_plain(app, chat_id, "⚠️ " + ans)
+
+
+async def tick_reminders(app) -> None:
+    if not REMINDERS:
+        return
+    changed = False
+    for rid, rec in list(REMINDERS.items()):
+        try:
+            ts = float(rec.get("when", 0))
+        except (TypeError, ValueError):
+            REMINDERS.pop(rid, None)
+            changed = True
+            continue
+        if ts > time.time():
+            continue
+        chat_id = int(rec.get("chat") or 0)
+        if not chat_id:
+            REMINDERS.pop(rid, None)
+            changed = True
+            continue
+        if rec.get("kind") == "agent":
+            if chat_id in RUNNING or chat_id in TASK_RUNNING or LOCKS[chat_id].locked():
+                rec["when"] = time.time() + 180          # đang bận → lùi 3 phút
+                changed = True
+                continue
+            try:
+                asyncio.create_task(_run_scheduled_task_guarded(app, dict(rec)))
+            except RuntimeError:
+                rec["when"] = time.time() + 180
+                changed = True
+                continue
+        else:
+            await send_plain(
+                app, chat_id,
+                f"⏰ <b>Nhắc việc</b> · {esc(_when_str(ts))}\n{esc(rec.get('text', ''))}",
+                html_ok=True,
+                markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Đã xong",
+                                                                   callback_data=f"done:{rid}")]]))
+        if rec.get("repeat") == "daily":
+            dt = datetime.fromtimestamp(ts, TZ) if TZ else datetime.fromtimestamp(ts)
+            rec["when"] = _next_at(dt.hour, dt.minute, 1)
+        else:
+            REMINDERS.pop(rid, None)
+        changed = True
+    if changed:
+        await rem_save()
+
+
+# ── Theo dõi repo / log / file ──────────────────────────────────────
+def _norm_repo(s: str) -> str:
+    s = re.sub(r"^(?:https?://|git@)github\.com[:/]", "", (s or "").strip())
+    return re.sub(r"\.git$", "", s).strip("/")
+
+
+def _path_digest(p: Path) -> str:
+    h = hashlib.sha256()
+    try:
+        if p.is_dir():
+            for f in sorted(x for x in p.rglob("*") if x.is_file())[:500]:
+                h.update(str(f.relative_to(p)).encode())
+                h.update(str(f.stat().st_mtime_ns).encode())
+        elif p.exists():
+            with p.open("rb") as fh:
+                h.update(fh.read(2 * 1024 * 1024))
+        else:
+            return "missing"
+    except Exception as e:
+        return "err:" + oneline(str(e), 40)
+    return h.hexdigest()[:16]
+
+
+async def watch_save() -> None:
+    _save_json(WATCH_FILE, WATCHES)
+    if CLOUD_ENABLED:
+        await fb("PUT", "watch", WATCHES)
+
+
+async def watch_restore() -> None:
+    data = await fb("GET", "watch") if CLOUD_ENABLED else None
+    if not isinstance(data, dict):
+        data = {}
+    for k, v in _load_json(WATCH_FILE).items():
+        data.setdefault(k, v)
+    WATCHES.clear()
+    WATCHES.update({k: v for k, v in data.items() if isinstance(v, dict) and v.get("kind")})
+
+
+async def _watch_git(app, w: dict) -> None:
+    repo, branch = w.get("repo", ""), w.get("branch") or "main"
+    url = (f"https://api.github.com/repos/{repo}/commits/"
+           + urllib.parse.quote(branch, safe=""))
+    data = await asyncio.to_thread(_gh_http, url, None, github_token(), 25)
+    sha = (data or {}).get("sha") or ""
+    if not sha:
+        return
+    w["last"] = time.time()
+    if w.get("sha") == sha:
+        return
+    old, w["sha"] = w.get("sha"), sha
+    await watch_save()
+    if not old:
+        return                                   # lần đầu chỉ ghi nhận
+    commit = data.get("commit") or {}
+    msg = ((commit.get("message") or "").splitlines() or [""])[0][:200]
+    who = (commit.get("author") or {}).get("name") or "?"
+    await send_plain(app, int(w["chat"]),
+                     f"🔔 <b>Repo có commit mới</b> · <code>{esc(repo)}@{esc(branch)}</code>\n"
+                     f"• <code>{sha[:7]}</code> bởi {esc(who)}\n• {esc(msg)}\n"
+                     f"{esc(data.get('html_url', ''))}", html_ok=True)
+
+
+async def _watch_log(app, w: dict) -> None:
+    p = Path(os.path.expanduser(w.get("path", "")))
+    if not p.is_file():
+        return
+    size = p.stat().st_size
+    off = int(w.get("offset") or 0)
+    if size < off:
+        off = 0
+    if size == off:
+        return
+    if size - off > 300_000:
+        off = size - 300_000
+    with p.open("rb") as fh:
+        fh.seek(off)
+        chunk = fh.read()
+    w["offset"], w["last"] = size, time.time()
+    rx = re.compile(w.get("regex") or _ERROR_RX.pattern, re.I)
+    hits = [l.strip()[:300] for l in chunk.decode("utf-8", "replace").splitlines() if rx.search(l)]
+    if not hits:
+        await watch_save()
+        return
+    digest = hashlib.sha1("\n".join(hits).encode()).hexdigest()
+    w["digest"] = digest
+    if digest == w.get("last_digest") or time.time() - float(w.get("notified") or 0) < 300:
+        w["last_digest"] = digest
+        await watch_save()
+        return
+    w["last_digest"], w["notified"] = digest, time.time()
+    await watch_save()
+    await send_plain(
+        app, int(w["chat"]),
+        f"🚨 <b>Log có lỗi mới</b>\n<code>{esc(oneline(str(p), 120))}</code>\n"
+        + "\n".join(f"• {esc(h)}" for h in hits[-5:]), html_ok=True)
+
+
+async def _watch_file(app, w: dict) -> None:
+    p = Path(os.path.expanduser(w.get("path", "")))
+    digest = await asyncio.to_thread(_path_digest, p)
+    old, w["digest"], w["last"] = w.get("digest"), digest, time.time()
+    await watch_save()
+    if old and digest != old and not str(digest).startswith(("missing", "err")):
+        await send_plain(app, int(w["chat"]),
+                         f"👀 <b>File/thư mục thay đổi</b>\n<code>{esc(oneline(str(p), 160))}</code>",
+                         html_ok=True)
+
+
+async def tick_watches(app) -> None:
+    for wid, w in list(WATCHES.items()):
+        try:
+            default = WATCH_GIT_INTERVAL if w.get("kind") == "git" else WATCH_INTERVAL
+            every = int(w["every"]) if w.get("every") is not None else default
+            if time.time() - float(w.get("last") or 0) < every:
+                continue
+            if w.get("kind") == "git":
+                await _watch_git(app, w)
+            elif w.get("kind") == "log":
+                await _watch_log(app, w)
+            elif w.get("kind") == "file":
+                await _watch_file(app, w)
+        except Exception as e:
+            log.warning("Watch %s (%s) lỗi: %s", wid, w.get("kind"), oneline(str(e), 160))
+
+
+def build_watches() -> str:
+    if not WATCHES:
+        return ("👀 <b>Chưa theo dõi gì</b>\n"
+                "• <code>/watch git owner/repo [nhánh]</code> — báo khi có commit mới\n"
+                "• <code>/watch log /đường/dẫn.log [regex]</code> — báo dòng lỗi mới\n"
+                "• <code>/watch file /đường/dẫn</code> — báo khi file/thư mục thay đổi\n"
+                "Bot tự theo dõi log của chính nó để báo lỗi.")
+    rows = []
+    for w in WATCHES.values():
+        icon = {"git": "🐙", "log": "🚨", "file": "📄"}.get(w.get("kind"), "👀")
+        target = w.get("repo") or w.get("path") or "?"
+        rows.append(f"{icon} <code>{esc(w.get('id'))}</code> · {esc(oneline(target, 120))}"
+                    f"\n   chat <code>{esc(w.get('chat'))}</code> · mỗi {int(w.get('every') or 0)}s")
+    return ("👀 <b>Đang theo dõi</b>\n" + "\n".join(rows)
+            + "\n\nXoá: <code>/watch del &lt;mã|all&gt;</code>")
+
+
+async def install_self_watch() -> None:
+    oid = owner_id()
+    if not WATCH_SELF or not PROACTIVE or not oid:
+        return
+    if any(w.get("kind") == "log" and w.get("path") == str(LOG_FILE) for w in WATCHES.values()):
+        return
+    wid = _new_id("w")
+    WATCHES[wid] = {"id": wid, "kind": "log", "path": str(LOG_FILE), "chat": oid,
+                    "every": WATCH_INTERVAL, "last": 0,
+                    "offset": LOG_FILE.stat().st_size if LOG_FILE.exists() else 0,
+                    "regex": r"(?i)(lỗi không xử lý được|traceback|critical|fatal|panic|unhandled)"}
+    await watch_save()
+    log.info("Tự theo dõi log bot: %s", LOG_FILE)
+
+
+async def _scheduler_loop(app) -> None:
+    if not PROACTIVE:
+        log.info("Chế độ chủ động: tắt (AISTV_PROACTIVE=0)")
+        return
+    await asyncio.sleep(8)
+    while True:
+        try:
+            await tick_reminders(app)
+            await tick_watches(app)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("scheduler_loop: %s", oneline(str(e), 160))
+        await asyncio.sleep(REMIND_TICK)
+
+
+# ── Lệnh Telegram cho 8b ────────────────────────────────────────────
+@guard()
+async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _add_schedule(update, context, "text")
+
+
+@guard()
+async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _add_schedule(update, context, "agent")
+
+
+async def _add_schedule(update, context, kind: str) -> None:
+    msg = update.effective_message
+    text = " ".join(context.args or []).strip()
+    when, repeat, body = parse_schedule(text)
+    name = "task" if kind == "agent" else "remind"
+    if when is None or not body:
+        await msg.reply_text(
+            f"⏰ Cú pháp: /{name} &lt;thời gian&gt; &lt;nội dung&gt;\n"
+            "• <code>+30m</code> · <code>+2h</code> · <code>+1d</code>\n"
+            "• <code>20:30</code> (hôm nay, quá giờ thì mai) · <code>mai 8:00</code>\n"
+            "• <code>25/12 20:00</code> · <code>daily 8:00</code>", parse_mode=HTML)
+        return
+    rid = _new_id("r")
+    REMINDERS[rid] = {"id": rid, "chat": update.effective_chat.id, "when": float(when),
+                      "text": body[:500], "kind": kind, "repeat": repeat,
+                      "by": update.effective_user.id if update.effective_user else 0}
+    await rem_save()
+    rep = " · lặp hằng ngày" if repeat == "daily" else ""
+    label = "🤖 Việc định kỳ" if kind == "agent" else "⏰ Nhắc việc"
+    await msg.reply_text(
+        f"<b>{label} đã hẹn</b>{rep}\n• Lúc: {esc(_when_str(when))} <i>({esc(_in_str(when))})</i>\n"
+        f"• Nội dung: {esc(body[:300])}\n• Mã: <code>{rid}</code>", parse_mode=HTML)
+
+
+@guard()
+async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(build_reminders(), parse_mode=HTML)
+
+
+@guard()
+async def cmd_unremind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    arg = (context.args[0].strip().lower() if context.args else "")
+    if not arg:
+        await update.effective_message.reply_text("Dùng: /unremind <mã|all> — xem mã bằng /reminders")
+        return
+    if arg == "all":
+        n = len(REMINDERS)
+        REMINDERS.clear()
+    else:
+        n = 0
+        for k in [k for k in REMINDERS if k == arg]:
+            REMINDERS.pop(k, None)
+            n += 1
+    await rem_save()
+    await update.effective_message.reply_text(f"🗑 Đã xoá {n} nhắc việc." if n else "Không tìm thấy mã đó.")
+
+
+@guard()
+async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat = update.effective_message, update.effective_chat
+    args = context.args or []
+    if not args:
+        await msg.reply_text(build_watches(), parse_mode=HTML)
+        return
+    sub = args[0].lower()
+    if sub in ("del", "delete", "xoa", "xoá", "remove", "rm"):
+        target = args[1].strip() if len(args) > 1 else ""
+        if target == "all":
+            n = len(WATCHES)
+            WATCHES.clear()
+        else:
+            n = 0
+            for k in [k for k in WATCHES if k == target]:
+                WATCHES.pop(k, None)
+                n += 1
+        await watch_save()
+        await msg.reply_text(f"🗑 Đã xoá {n} theo dõi." if n else "Không tìm thấy mã đó.")
+        return
+    wid = _new_id("w")
+    if sub == "git":
+        if len(args) < 2:
+            await msg.reply_text("Dùng: /watch git owner/repo [nhánh]")
+            return
+        repo = _norm_repo(args[1])
+        branch = args[2] if len(args) > 2 else "main"
+        if "/" not in repo:
+            await msg.reply_text("Repo phải dạng owner/name (ví dụ Phucvncom55/AISTV).")
+            return
+        WATCHES[wid] = {"id": wid, "kind": "git", "repo": repo, "branch": branch,
+                        "chat": chat.id, "every": WATCH_GIT_INTERVAL, "sha": "", "last": 0}
+        note = f"🐙 Theo dõi <code>{esc(repo)}@{esc(branch)}</code> · mỗi {WATCH_GIT_INTERVAL}s"
+    elif sub in ("log", "file"):
+        if len(args) < 2:
+            await msg.reply_text(f"Dùng: /watch {sub} <đường dẫn>" + (" [regex]" if sub == "log" else ""))
+            return
+        path = os.path.expanduser(args[1])
+        rec = {"id": wid, "kind": sub, "path": path, "chat": chat.id,
+               "every": WATCH_INTERVAL, "last": 0}
+        if sub == "log":
+            rec["offset"] = os.path.getsize(path) if os.path.isfile(path) else 0
+            if len(args) > 2:
+                rec["regex"] = " ".join(args[2:])
+        else:
+            rec["digest"] = _path_digest(Path(path))
+        WATCHES[wid] = rec
+        note = f"👀 Theo dõi <code>{esc(oneline(path, 120))}</code> · mỗi {WATCH_INTERVAL}s"
+    else:
+        await msg.reply_text("Loại theo dõi: <code>git</code>, <code>log</code>, <code>file</code>",
+                             parse_mode=HTML)
+        return
+    await watch_save()
+    await msg.reply_text(f"{note}\nMã: <code>{wid}</code> · xem: /watch", parse_mode=HTML)
+
+
+@guard()
+async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat_id = update.effective_message, update.effective_chat.id
+    if len(load_history(chat_id)) < 6:
+        await msg.reply_text(f"🧠 Chỉ có {len(load_history(chat_id))} lượt — chưa cần tóm tắt.")
+        return
+    note = await msg.reply_text("🧠 Đang cô đọng hội thoại vào trí nhớ dài hạn…")
+    res = await summarize_chat(chat_id, force=True)
+    await note.edit_text("✅ " + (res or "Không có gì mới để tóm tắt."))
+
+
+def build_cloud(chat_id: int) -> str:
+    st = CLOUD_STAT
+    if not CLOUD_ENABLED:
+        state = "⚪ tắt"
+    elif st["ok"] is None:
+        state = "🟡 chưa kết nối"
+    elif st["ok"]:
+        state = "🟢 kết nối"
+    else:
+        state = "🔴 lỗi"
+    at = f"{int(time.time() - st['at'])}s trước" if st["at"] else "—"
+    return ("☁️ <b>Trí nhớ đám mây (Firebase)</b>\n"
+            f"• Trạng thái: {state}\n"
+            f"• Namespace: <code>{esc(CLOUD_NS)}</code>\n"
+            f"• Lần cuối: {esc(st['last'] or '—')} · {esc(at)}\n"
+            f"• Đã đẩy: {st['up']} · Lỗi: {st['err']}\n"
+            f"• Trí nhớ dài hạn: {len(memory_items())} mục\n"
+            f"• Hội thoại chat này: {len(load_history(chat_id))} lượt\n"
+            f"• Nhắc việc: {len(REMINDERS)} · Theo dõi: {len(WATCHES)}\n"
+            f"• Tóm tắt tự động: {'bật' if AUTO_SUMMARY else 'tắt'} sau {SUMMARY_MIN_ITEMS} lượt\n\n"
+            "Đồng bộ ngay: <code>/cloud sync</code>\n"
+            "⚠️ Rules của database đang mở (ai biết URL cũng đọc/ghi được) — nên siết lại.")
+
+
+@guard()
+async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat_id = update.effective_message, update.effective_chat.id
+    if context.args and context.args[0].lower() in ("sync", "dong-bo", "đồng-bộ"):
+        await cloud_push_memory()
+        await cloud_push_history(chat_id)
+        await rem_save()
+        await watch_save()
+        await msg.reply_text("☁️ Đã đẩy trí nhớ, hội thoại, nhắc việc & theo dõi lên cloud.")
+        return
+    await msg.reply_text(build_cloud(chat_id), parse_mode=HTML)
+
+
+# ════════════════════════════════════════════════════════════════════
 # 9. KHỞI CHẠY
 # ════════════════════════════════════════════════════════════════════
 COMMANDS = [
@@ -2099,6 +3070,9 @@ COMMANDS = [
     ("skills", "Danh sách skills"), ("skill", "Chạy theo skill"),
     ("think", "Bật/tắt hiện suy nghĩ"), ("activity", "Ẩn/hiện chi tiết việc đang làm"),
     ("variant", "Mức reasoning của model"),
+    ("remind", "Hẹn nhắc việc"), ("task", "Việc tự chạy theo lịch"), ("reminders", "Danh sách nhắc việc"),
+    ("unremind", "Xoá nhắc việc"), ("watch", "Theo dõi repo/log"), ("cloud", "Trí nhớ đám mây"),
+    ("summary", "Tóm tắt hội thoại vào trí nhớ"),
     ("github", "Kết nối / quản lý GitHub"), ("update", "Cập nhật bot từ GitHub"),
     ("restart", "Khởi động lại bot"),
     ("files", "File trong workspace"), ("get", "Tải file về"), ("help", "Hướng dẫn"),
@@ -2134,7 +3108,15 @@ async def post_init(app) -> None:
         log.warning("Không mở được ask_user server: %s", e)
     await app.bot.set_my_commands([BotCommand(c, d) for c, d in COMMANDS])
     me = await app.bot.get_me()
+    global CLOUD_NS
+    CLOUD_NS = f"{CLOUD_NS_BASE}/{me.id}"      # namespace riêng cho từng bot
     print(f"✅ Bot online: @{me.username}  |  model: {STATE['model']}")
+    if CLOUD_ENABLED:
+        asyncio.create_task(cloud_restore_all())
+        asyncio.create_task(cloud_loop())
+    if PROACTIVE:
+        asyncio.create_task(_scheduler_loop(app))
+    asyncio.create_task(install_self_watch())
     if github_token():
         asyncio.create_task(asyncio.to_thread(_startup_github))
     if owner_id():
@@ -2170,6 +3152,10 @@ def main() -> None:
                       (["forget"], cmd_forget), (["skills"], cmd_skills), (["skill"], cmd_skill),
                       (["think"], cmd_think), (["activity", "progress"], cmd_activity),
                       (["variant"], cmd_variant),
+                      (["remind"], cmd_remind), (["task", "cron"], cmd_task),
+                      (["reminders", "remindlist"], cmd_reminders), (["unremind"], cmd_unremind),
+                      (["watch", "monitor"], cmd_watch), (["cloud"], cmd_cloud),
+                      (["summary", "summarize"], cmd_summary),
                       (["github"], cmd_github), (["update"], cmd_update), (["restart"], cmd_restart),
                       (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny)]:
         app.add_handler(CommandHandler(names, fn))
