@@ -889,7 +889,75 @@ def restart_bot() -> bool:
 # ════════════════════════════════════════════════════════════════════
 # 5. DỰNG PROMPT + CHẠY OPENCODE (ASYNC, KHÔNG CHẶN BOT)
 # ════════════════════════════════════════════════════════════════════
-def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple] = None) -> str:
+QUOTE_LIMIT = 3000              # ký tự tối đa của tin nhắn được trả lời đưa vào prompt
+
+_MEDIA_LABEL = (("photo", "[ảnh]"), ("video", "[video]"), ("voice", "[tin nhắn thoại]"),
+                ("audio", "[âm thanh]"), ("video_note", "[video tròn]"),
+                ("sticker", "[nhãn dán]"), ("animation", "[GIF]"))
+
+
+def _msg_brief(m) -> str:
+    """Nội dung ngắn gọn của một tin nhắn Telegram (chữ, chú thích, loại tệp)."""
+    if not m:
+        return ""
+    txt = (getattr(m, "text", "") or getattr(m, "caption", "") or "").strip()
+    bits = [label for attr, label in _MEDIA_LABEL if getattr(m, attr, None)]
+    doc = getattr(m, "document", None)
+    if doc is not None:
+        bits.append("[tệp " + (getattr(doc, "file_name", "") or "không tên") + "]")
+    if getattr(m, "location", None):
+        bits.append("[vị trí]")
+    if getattr(m, "poll", None):
+        bits.append("[bình chọn]")
+    head = " ".join(bits)
+    return f"{head} {txt}".strip() if head and txt else (txt or head)
+
+
+def reply_context(msg) -> tuple:
+    """Phân tích tin nhắn đang được trả lời/trích dẫn (Reply Message / Quoting).
+
+    Trả về (khối ngữ cảnh cho prompt, nhãn ngắn để lưu vào lịch sử).
+    """
+    if msg is None:
+        return "", ""
+    ref = getattr(msg, "reply_to_message", None)
+    sel = getattr(msg, "quote", None)
+    sel_txt = (getattr(sel, "text", "") or "").strip()
+    if ref is None and not sel_txt:
+        return "", ""
+    full = _msg_brief(ref)
+    if not full and not sel_txt:
+        return "", ""
+    if len(full) > QUOTE_LIMIT:
+        full = full[:QUOTE_LIMIT] + " …[cắt bớt]"
+    sel_txt = sel_txt[:QUOTE_LIMIT]
+    who = ""
+    fu = getattr(ref, "from_user", None) if ref is not None else None
+    if fu is not None:
+        who = "AI STV" if getattr(fu, "is_bot", False) else (getattr(fu, "full_name", "") or str(getattr(fu, "id", "")))
+    lines = [
+        "## TIN NHẮN ĐANG ĐƯỢC TRẢ LỜI / TRÍCH DẪN (Reply Message)",
+        "Người dùng vừa trả lời trực tiếp tin nhắn dưới đây. Các cụm như “cái này”, “đoạn trên”, "
+        "“phần này”, “chỗ đó”, “sửa lại đi”, “ý này”… là chỉ tin nhắn/phần được trích dẫn — hãy "
+        "hiểu yêu cầu mới gắn với nội dung đó, không đoán sang việc khác.",
+    ]
+    if who:
+        lines.append(f"- Người gửi tin được trả lời: {who}")
+    full = full.replace("```", "ʼʼʼ")
+    if full:
+        lines.append("- Toàn bộ tin được trả lời:\n```text\n" + full + "\n```")
+    if sel_txt:
+        clean_sel = sel_txt.replace("```", "ʼʼʼ")
+        if clean_sel != full:
+            lines.append("- Phần người dùng bôi đen để trích dẫn (ƯU TIÊN hiểu theo phần này):\n"
+                         "```text\n" + clean_sel + "\n```")
+    label_src = sel_txt or full
+    label = "↪︎ trả lời “" + oneline(label_src, 160) + "”:"
+    return "\n".join(lines), label
+
+
+def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple] = None,
+                 quote: str = "") -> str:
     user_text = user_text[:20000]
     head = ["## HỒ SƠ AGENT\n" + read_text(WORKSPACE / "SOUL.md").strip()
             + "\n\n" + read_text(WORKSPACE / "AGENTS.md").strip()]
@@ -912,7 +980,10 @@ def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple] = None) ->
         except Exception:
             pass
     head_s = "\n\n".join(head)
-    tail = f"## YÊU CẦU MỚI\n[Người dùng]: {user_text}\n\nHãy trả lời yêu cầu mới ở trên."
+    tail = ""
+    if quote:
+        tail += quote.strip() + "\n\n"
+    tail += f"## YÊU CẦU MỚI\n[Người dùng]: {user_text}\n\nHãy trả lời yêu cầu mới ở trên."
 
     budget = MAX_PROMPT_BYTES - len(head_s.encode()) - len(tail.encode()) - 200
     lines, used = [], 0
@@ -1597,7 +1668,9 @@ async def send_new_files(message, before: dict) -> None:
         await message.reply_text(f"📂 Còn {len(changed) - 10} file khác — dùng /files và /get <tên> để tải.")
 
 
-async def respond(message, context, chat_id: int, text: str, skill: Optional[tuple] = None) -> bool:
+async def respond(message, context, chat_id: int, text: str, skill: Optional[tuple] = None,
+                  quoted_msg=None) -> bool:
+    quote, quote_label = reply_context(quoted_msg)
     lock = LOCKS[chat_id]
     if lock.locked():
         await message.reply_text("⏳ Tôi đang xử lý yêu cầu trước — yêu cầu này đã được xếp hàng.")
@@ -1606,7 +1679,7 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
             await ensure_history(chat_id)        # máy mới → lấy lại hội thoại từ cloud
             status = await message.reply_text("🧠 <i>Đang làm việc…</i>", parse_mode=HTML)
             started = time.monotonic()
-            prompt = build_prompt(chat_id, text, skill)
+            prompt = build_prompt(chat_id, text, skill, quote)
             before = snapshot()
             stop = asyncio.Event()
             ticker = asyncio.create_task(_ticker(context.bot, chat_id, status, started, stop))
@@ -1617,9 +1690,10 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
                 await ticker
             await _finish_status(status, chat_id, started, ok)
             if ok:
-                append_history(chat_id, "user", text)
+                stored = (quote_label + " " + text) if quote_label else text
+                append_history(chat_id, "user", stored)
                 append_history(chat_id, "assistant", answer[:6000])
-                log_daily(text, answer)
+                log_daily(stored, answer)
                 maybe_schedule_summary(chat_id)
             think_tok = THINK_TOKENS.get(chat_id, 0)
             foot = f"⏱ {time.monotonic() - started:.1f}s · {esc(STATE['model'].split('/')[-1])}"
@@ -1700,6 +1774,7 @@ def welcome_text() -> str:
         "• Hiện <b>suy nghĩ (thinking)</b> của model theo thời gian thực\n"
         "• Agent <b>hỏi lại bạn</b> bằng bảng nút bấm khi cần chọn phương án\n"
         "• Nhớ hội thoại bền vững, kể cả khi bot khởi động lại\n"
+        "• <b>Trả lời/trích dẫn tin nhắn</b> — reply tin nào là hiểu đúng phần đó\n"
         "• Trí nhớ dài hạn — /remember, /memory; tự tóm tắt hội thoại dài\n"
         "• <b>Trí nhớ đám mây</b> (Firebase) — restart/Colab reset vẫn còn\n"
         "• <b>Chủ động</b>: /remind hẹn giờ, /task tự chạy, /watch theo dõi repo &amp; log\n"
@@ -1729,6 +1804,9 @@ HELP_TEXT = (
     "/watch git owner/repo — báo commit mới · /watch log &lt;file&gt; — báo lỗi mới\n"
     "/watch file &lt;đường dẫn&gt; — báo khi thay đổi · /watch del &lt;mã|all&gt;\n\n"
     "<b>File</b>\nGửi file cho bot → lưu vào <code>inbox/</code> để agent đọc\n/files — file trong workspace\n/get &lt;đường dẫn&gt; — tải file về\n\n"
+    "<b>Reply / trích dẫn</b>\nTrả lời (reply) một tin nhắn rồi nhắn yêu cầu → agent hiểu “cái này/đoạn trên” là tin đó\n"
+    "Bôi đen một phần rồi reply → agent ưu tiên đúng phần được trích dẫn\n"
+    "Reply tin nhắn rồi gõ /remember → lưu chính tin đó vào trí nhớ\n\n"
     "<b>Suy nghĩ &amp; hỏi đáp</b>\n/think on|off — hiện/tắt suy nghĩ cuộn trực tiếp khi chạy\n"
     "/activity on|off — hiện/tắt chi tiết lệnh, code, output trong khung cuộn\n"
     "/variant [high|max|off] — mức reasoning của model\n"
@@ -2067,8 +2145,11 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @guard()
 async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = oneline(" ".join(context.args), 500)
+    if not text and update.effective_message.reply_to_message:
+        text = oneline(_msg_brief(update.effective_message.reply_to_message), 500)
     if not text:
-        await update.effective_message.reply_text("Dùng: /remember <điều cần nhớ>")
+        await update.effective_message.reply_text(
+            "Dùng: /remember <điều cần nhớ>\nHoặc trả lời (reply) một tin nhắn rồi gõ /remember để lưu chính tin đó.")
         return
     items = memory_items() + [f"- [{now():%d/%m/%Y}] {text}"]
     write_memory(items)
@@ -2191,7 +2272,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uname.lower() not in text.lower() and not replied:
             return
         text = re.sub(re.escape(uname), "", text, flags=re.I).strip()
-    await respond(msg, context, chat.id, text)
+    await respond(msg, context, chat.id, text, quoted_msg=msg)
 
 
 @guard()
@@ -2208,7 +2289,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await (await doc.get_file()).download_to_drive(dest)
     caption = (msg.caption or "").strip() or "Hãy đọc file này và tóm tắt nội dung chính."
     await respond(msg, context, update.effective_chat.id,
-                  f"{caption}\n\n(Người dùng vừa gửi file, đã lưu tại: inbox/{dest.name})")
+                  f"{caption}\n\n(Người dùng vừa gửi file, đã lưu tại: inbox/{dest.name})",
+                  quoted_msg=msg)
 
 
 async def _on_ask_button(q, data: str) -> None:
