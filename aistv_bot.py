@@ -65,9 +65,18 @@ def find_opencode() -> Optional[str]:
 
 
 def setup_environment() -> None:
-    print("⏳ [1/3] Cài thư viện Python (python-telegram-bot, nest_asyncio)...")
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U",
-                    "python-telegram-bot", "nest_asyncio"], check=True)
+    print("⏳ [1/3] Kiểm tra thư viện Python (python-telegram-bot, nest_asyncio)...")
+    try:
+        __import__("telegram")
+        __import__("nest_asyncio")
+    except ImportError:
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U",
+                            "python-telegram-bot", "nest_asyncio"], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            raise SystemExit("❌ Thiếu thư viện Python và không cài được.\n"
+                             "   Chạy bằng run.sh, hoặc: python3 -m pip install -r requirements.txt")
+    print("✅ [1/3] Thư viện Python OK")
 
     print("⏳ [2/3] Cài OpenCode...")
     if CLEAN_INSTALL or not find_opencode():

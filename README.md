@@ -11,7 +11,7 @@ Chạy được trên **Colab, VPS, máy cá nhân** — chỉ cần Python 3.10
 3. Dán lệnh này vào ô Colab:
 
 ```python
-!bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/AISTV/main/run.sh)
+!bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=3)
 ```
 
 ## 1. Tạo bot Telegram
@@ -41,16 +41,16 @@ git push -u origin main
 
 ## 3. Chạy bot bằng MỘT lệnh
 
-`push.sh` đã tự ghi URL repo của bạn vào `run.sh`, nên lệnh chỉ cần dán **một lần** (thay `Phucvncom55/AISTV`):
+`bootstrap.sh` luôn cập nhật repo rồi mới chạy `run.sh` bên trong, nên **không bị kẹt bản cũ do cache GitHub**:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/run.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=3)
 ```
 
-Nếu chưa sửa `run.sh`, truyền repo trực tiếp (dán link GitHub):
+Muốn dùng repo khác, truyền link GitHub trực tiếp:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/run.sh) https://github.com/Phucvncom55/AISTV
+bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=3) https://github.com/Phucvncom55/AISTV
 ```
 
 Lần đầu script sẽ: tải repo → lấy/hỏi token → tạo `.venv` → cài thư viện → cài OpenCode → chạy bot.
@@ -59,16 +59,16 @@ Token lấy theo thứ tự: `.env` → biến môi trường → Colab Secrets 
 ### Chạy trên Google Colab
 
 1. Dán link repo của bạn vào ô dưới (thay `Phucvncom55/AISTV`), **hoặc** dùng
-   `bash <(curl -fsSL .../run.sh) https://github.com/Phucvncom55/AISTV`.
+   `bash <(curl -fsSL .../bootstrap.sh) https://github.com/Phucvncom55/AISTV`.
 2. Mở 🔑 **Secrets** (cột trái) → thêm `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`),
    bật **Notebook access**.
 3. Dán vào một ô code rồi Run:
 
 ```python
-!bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/run.sh)
+!bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=3)
 ```
 
-Script tự: clone → lấy token từ Secrets → tạo `.venv` → cài thư viện → cài OpenCode → chạy bot.
+Script tự: clone/cập nhật repo → lấy token từ Secrets → chọn Python (venv → hệ thống → uv) → cài thư viện → cài OpenCode → chạy bot.
 Không có Secrets thì script báo rõ cách thêm và dừng, không cài lan man.
 
 > Colab không có terminal tương tác nên **không nhập token bằng tay** được — hãy dùng Secrets
@@ -123,6 +123,7 @@ Cấu hình nâng cao nằm ở đầu `aistv_bot.py` (model, timeout, số lị
 ```
 AISTV/
 ├── aistv_bot.py      bot hoàn chỉnh (cài đặt, agent, Telegram, định dạng)
+├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (khuyến nghị)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy
 ├── push.sh           tạo repo GitHub và push
 ├── requirements.txt

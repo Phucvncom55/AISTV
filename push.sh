@@ -26,14 +26,16 @@ git config user.email >/dev/null 2>&1 || git config user.email "$LOGIN@users.nor
 python3 - "$SLUG" "$REPO_NAME" <<'PY'
 import sys, pathlib
 slug, repo = sys.argv[1], sys.argv[2]
-raw = f"https://raw.githubusercontent.com/{slug}/main/run.sh"
-for fn in ("run.sh", "README.md"):
+raw_run = f"https://raw.githubusercontent.com/{slug}/main/run.sh"
+raw_boot = f"https://raw.githubusercontent.com/{slug}/main/bootstrap.sh"
+for fn in ("run.sh", "bootstrap.sh", "README.md"):
     p = pathlib.Path(fn)
     if not p.exists():
         continue
     s = p.read_text("utf-8")
     s = s.replace("https://github.com/USER/AISTV.git", f"https://github.com/{slug}.git")
-    s = s.replace("https://raw.githubusercontent.com/USER/AISTV/main/run.sh", raw)
+    s = s.replace("https://raw.githubusercontent.com/USER/AISTV/main/run.sh", raw_run)
+    s = s.replace("https://raw.githubusercontent.com/USER/AISTV/main/bootstrap.sh", raw_boot)
     s = s.replace("<USER>/<REPO>", slug)
     s = s.replace("<tên-repo>", repo)
     p.write_text(s, "utf-8")
@@ -51,18 +53,18 @@ else
 fi
 
 URL="https://github.com/$SLUG"
-RAW="https://raw.githubusercontent.com/$SLUG/main/run.sh"
+RAW="https://raw.githubusercontent.com/$SLUG/main/bootstrap.sh?v=3"
 
 echo
 echo "✅ Repo: $URL"
 if [[ "$VISIBILITY" == "public" ]]; then
-  echo "▶ Chạy bot (Linux / macOS / Colab):"
+  echo "▶ Chạy bot (Linux / macOS / Colab) — luôn lấy bản mới nhất:"
   echo
-  echo "   bash <(curl -fsSL $RAW)"
+  echo "   bash <(curl -fsSL '$RAW')"
   echo
   echo "▶ Colab (dán vào ô code):"
   echo
-  echo "   !bash <(curl -fsSL $RAW)"
+  echo "   !bash <(curl -fsSL '$RAW')"
 else
   echo "▶ Repo private — clone rồi chạy:"
   echo

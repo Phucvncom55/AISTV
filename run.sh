@@ -134,7 +134,9 @@ EOF
   exit 1
 fi
 
-# ── 3. Môi trường Python riêng (venv) ────────────────────────────────
+# ── 3. Môi trường Python: venv → Python hệ thống → uv ────────────────
+say "AI STV runner v3"
+
 have_pip() { "$1" -m pip --version >/dev/null 2>&1; }
 
 # Python thiếu ensurepip (bản build từ source, Debian tối giản…) vẫn có thể
@@ -144,43 +146,94 @@ ensure_pip() {
   have_pip "$py" && return 0
   "$py" -m ensurepip --upgrade >/dev/null 2>&1 || true
   have_pip "$py" && return 0
+  say "Python thiếu pip — thử cài pip bằng get-pip.py"
   tmp="$(mktemp -d)"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --max-time 60 https://bootstrap.pypa.io/get-pip.py -o "$tmp/get-pip.py" 2>/dev/null || true
+    curl -fsSL --max-time 90 https://bootstrap.pypa.io/get-pip.py -o "$tmp/get-pip.py" 2>/dev/null || true
   elif command -v wget >/dev/null 2>&1; then
-    wget -qT 60 -O "$tmp/get-pip.py" https://bootstrap.pypa.io/get-pip.py 2>/dev/null || true
+    wget -qT 90 -O "$tmp/get-pip.py" https://bootstrap.pypa.io/get-pip.py 2>/dev/null || true
   fi
   if [[ -s "$tmp/get-pip.py" ]]; then
-    say "Python thiếu pip — đang cài pip bằng get-pip.py"
-    "$py" "$tmp/get-pip.py" --quiet >/dev/null 2>&1 || true
+    "$py" "$tmp/get-pip.py" --quiet --disable-pip-version-check >/dev/null 2>&1 || true
   fi
   rm -rf "$tmp"
   have_pip "$py"
 }
 
-if [[ "${AISTV_VENV:-1}" != "0" && -z "${VIRTUAL_ENV:-}" ]]; then
-  if [[ ! -x "$APP_DIR/.venv/bin/python" ]]; then
-    say "Tạo môi trường ảo .venv"
-    "$PY" -m venv "$APP_DIR/.venv" >/dev/null 2>&1 || say "Không tạo được venv, dùng Python hệ thống."
+find_uv() {
+  if command -v uv >/dev/null 2>&1; then command -v uv; return 0; fi
+  local p
+  for p in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+    if [[ -x "$p" ]]; then printf '%s\n' "$p"; return 0; fi
+  done
+  return 1
+}
+
+ensure_uv() {
+  UV="$(find_uv || true)"
+  [[ -n "$UV" ]] && return 0
+  say "Đang tải uv (trình quản lý gói Python)…"
+  if command -v curl >/dev/null 2>&1; then
+    curl -LsSf --max-time 120 https://astral.sh/uv/install.sh | sh >/dev/null 2>&1 || true
   fi
-  if [[ -x "$APP_DIR/.venv/bin/python" ]] && ensure_pip "$APP_DIR/.venv/bin/python"; then
-    PY="$APP_DIR/.venv/bin/python"
-  else
-    say "venv không dùng được (thiếu pip/ensurepip) — chuyển sang Python hệ thống."
-    PY="${PYTHON:-python3}"
-    ensure_pip "$PY" || fail "Python hệ thống cũng thiếu pip và không tự cài được.
+  UV="$(find_uv || true)"
+  [[ -n "$UV" ]] || fail "Không cài được pip lẫn uv.
   • Debian/Ubuntu: sudo apt-get update && sudo apt-get install -y python3-pip python3-venv
+  • Hoặc: curl -LsSf https://astral.sh/uv/install.sh | sh
   • Rồi chạy lại lệnh trên."
+}
+
+# Cài requirements: chịu được thiếu pip và PEP 668 (externally-managed).
+install_requirements() {
+  local py="$1"
+  if have_pip "$py"; then
+    "$py" -m pip install -q -U pip >/dev/null 2>&1 || true
+    "$py" -m pip install -q -U -r "$APP_DIR/requirements.txt" >/dev/null 2>&1 && return 0
+    "$py" -m pip install -q -U --break-system-packages -r "$APP_DIR/requirements.txt" >/dev/null 2>&1 && return 0
+    say "pip lỗi — thử lại bằng uv."
   fi
-elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
-  ensure_pip "$PY" || fail "Python trong venv hiện tại thiếu pip. Tạo venv mới rồi thử lại:
-  python3 -m venv .venv && . .venv/bin/activate"
+  ensure_uv
+  "$UV" pip install --python "$py" -q -U -r "$APP_DIR/requirements.txt" >/dev/null 2>&1
+}
+
+VENV="$APP_DIR/.venv"
+BASE_PY="$PY"
+
+if [[ "${AISTV_VENV:-1}" != "0" && -z "${VIRTUAL_ENV:-}" ]]; then
+  if [[ -e "$VENV" ]] && ! "$VENV/bin/python" -c 'import sys' >/dev/null 2>&1; then
+    say "venv cũ không chạy được — đổi tên thành .venv.broken"
+    mv "$VENV" "$VENV.broken.$(date +%s)" 2>/dev/null || true
+  fi
+  if [[ ! -x "$VENV/bin/python" ]]; then
+    say "Tạo môi trường ảo .venv"
+    "$PY" -m venv "$VENV" >/dev/null 2>&1 || say "Không tạo được venv bằng python3 -m venv."
+  fi
+  if [[ -x "$VENV/bin/python" ]] && ensure_pip "$VENV/bin/python"; then
+    PY="$VENV/bin/python"
+  else
+    say "venv không có pip — chuyển sang Python hệ thống."
+    [[ -e "$VENV" ]] && mv "$VENV" "$VENV.broken.$(date +%s)" 2>/dev/null || true
+    PY="$BASE_PY"
+  fi
 fi
 
-say "Cài thư viện Python"
-"$PY" -m pip install -q -U pip >/dev/null 2>&1 || true
-"$PY" -m pip install -q -U -r "$APP_DIR/requirements.txt" \
-  || fail "Cài thư viện thất bại. Thử: $PY -m pip install -r requirements.txt"
+# Python đang dùng vẫn không có pip (kể cả sau get-pip) → tạo venv bằng uv.
+if ! have_pip "$PY" && ! ensure_pip "$PY"; then
+  say "Python hiện tại thiếu pip — dùng uv để tạo môi trường."
+  ensure_uv
+  [[ -e "$VENV" ]] && mv "$VENV" "$VENV.broken.$(date +%s)" 2>/dev/null || true
+  "$UV" venv --python "$BASE_PY" "$VENV" >/dev/null 2>&1 \
+    || "$UV" venv --seed --python "$BASE_PY" "$VENV" >/dev/null 2>&1 \
+    || fail "uv không tạo được môi trường Python."
+  PY="$VENV/bin/python"
+fi
+
+say "Cài thư viện Python ($PY)"
+install_requirements "$PY" || fail "Cài thư viện thất bại.
+  Thử tay: $PY -m pip install -r $APP_DIR/requirements.txt"
+"$PY" -c 'import telegram, nest_asyncio' >/dev/null 2>&1 \
+  || fail "Đã cài nhưng không import được python-telegram-bot / nest_asyncio. Xem log phía trên."
+say "Thư viện Python OK"
 
 # ── 4. Seed workspace lần đầu (SOUL, AGENTS, skills) ─────────────────
 if [[ -d "$APP_DIR/seed" ]]; then
