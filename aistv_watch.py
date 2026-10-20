@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -1576,6 +1577,73 @@ def do_image(args):
     return report, payload, 0
 
 
+# ── Tin nhắn thoại → văn bản (Gemini nghe trực tiếp, không cần Whisper) ──
+VOICE_PROMPT = (
+    "Bạn là bộ chép lời (speech-to-text) chính xác. Chép lại NGUYÊN VĂN lời nói trong âm thanh, "
+    "giữ đúng ngôn ngữ gốc, thêm dấu câu hợp lý. Không dịch, không tóm tắt, không bình luận, "
+    "không mô tả âm thanh hay cảm xúc. Chỗ nào không nghe rõ thì ghi [không rõ]. "
+    "Chỉ trả về phần văn bản đã chép, không thêm tiêu đề."
+)
+
+
+def clean_transcript(text: str) -> str:
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[A-Za-z0-9_-]*\s*\n?", "", t)
+        t = re.sub(r"\n?```\s*$", "", t).strip()
+    t = re.sub(r"^(transcript|bản chép lời|văn bản|chép lời)\s*[:\-]\s*", "", t, flags=re.I)
+    if len(t) >= 2 and t[0] in "\"'“" and t[-1] in "\"'”":
+        t = t[1:-1].strip()
+    return t.strip()
+
+
+def _audio_part(path: Path, mime: str) -> dict:
+    return {"inline_data": {"mime_type": mime,
+                            "data": base64.b64encode(path.read_bytes()).decode("ascii")}}
+
+
+def do_voice(args):
+    src = Path(args.source).expanduser()
+    if not src.is_file():
+        return "", f"không thấy file: {src}", 2
+    size = src.stat().st_size
+    if size > 20 * 1024 * 1024:
+        return "", "âm thanh quá lớn (Gemini nhận tối đa ~20MB)", 2
+    mime = (args.mime or mimetypes.guess_type(src.name)[0] or "audio/ogg").lower()
+    prompt = args.prompt or VOICE_PROMPT
+    if args.language:
+        prompt += f"\nNgôn ngữ gợi ý: {args.language}"
+    timeout = int(os.getenv("VOICE_TIMEOUT", "180") or 180)
+
+    res, err = gemini_generate([{"text": prompt}, _audio_part(src, mime)],
+                               timeout=timeout, temperature=0.0, max_output_tokens=4000)
+    first_err = err
+    if not res:
+        # Một số định dạng (ogg/opus lạ, m4a) có thể bị từ chối → đổi sang wav 16kHz mono rồi thử lại.
+        ff = find_ffmpeg()
+        if ff:
+            wav = Path(tempfile.gettempdir()) / f"aistv_voice_{uuid.uuid4().hex[:8]}.wav"
+            code, _, _ = run([ff, "-y", "-i", str(src), "-ar", "16000", "-ac", "1", str(wav)], timeout=300)
+            try:
+                if code == 0 and wav.is_file() and wav.stat().st_size > 1000:
+                    res, err = gemini_generate([{"text": prompt}, _audio_part(wav, "audio/wav")],
+                                               timeout=timeout, temperature=0.0,
+                                               max_output_tokens=4000)
+            finally:
+                try:
+                    wav.unlink()
+                except Exception:
+                    pass
+        if not res:
+            return "", f"Gemini lỗi: {err or first_err}", 1
+
+    text = clean_transcript(res.get("text", ""))
+    if not text:
+        return "", "không nhận ra nội dung (âm thanh im lặng hoặc quá ồn?)", 1
+    payload = {"text": text, "model": res.get("model"), "source": str(src), "bytes": size}
+    return text, payload, 0
+
+
 def make_workdir(source, out_dir=None):
     base = Path(out_dir).expanduser() if out_dir else Path.cwd() / "watch"
     base.mkdir(parents=True, exist_ok=True)
@@ -1902,10 +1970,26 @@ def main():
     p.add_argument("--out-dir")
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("voice", aliases=["stt", "transcribe"],
+                       help="chép lời tin nhắn thoại bằng Gemini")
+    p.add_argument("source", help="file âm thanh (ogg, opus, mp3, m4a, wav…)")
+    p.add_argument("-l", "--language", help="gợi ý ngôn ngữ, ví dụ vi")
+    p.add_argument("--mime", help="MIME do Telegram báo, ví dụ audio/ogg")
+    p.add_argument("-q", "--prompt", help="prompt riêng thay cho mặc định")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("doctor", help="kiểm tra công cụ")
     p.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
+
+    if args.cmd in ("voice", "stt", "transcribe"):
+        text, payload, code = do_voice(args)
+        if code != 0:
+            print(f"Lỗi: {payload}", file=sys.stderr)
+            return code
+        print(json.dumps(payload, ensure_ascii=False) if args.json else payload["text"])
+        return 0
 
     if args.cmd in ("image", "vision", "read-image"):
         report, payload, code = do_image(args)
