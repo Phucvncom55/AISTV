@@ -1,6 +1,6 @@
 # AI STV — Bot Telegram × OpenCode
 
-Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube, Facebook** (tìm, đọc nội dung, tải video).
+Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube, Facebook, TikTok** (tìm, đọc nội dung, tải video).
 
 Chạy được trên **Colab, VPS, Linux/macOS và Windows (cmd/PowerShell)** — chỉ cần Python 3.10+ và mạng.
 
@@ -197,6 +197,18 @@ python3 /root/AISTV/aistv_facebook.py search "từ khoá" -n 8
 
 Đọc được bài viết công khai, tiêu đề/mô tả video, reel, watch; tải video về workspace (bot tự gửi nếu ≤ 45MB). Trang cá nhân, nhóm kín và feed cần đăng nhập nên không xem được.
 
+**TikTok (thông tin / tải video / tìm kiếm / TikTok Lite):** agent tự dùng khi bạn gửi link TikTok hoặc nhờ tìm. Có thể gọi trực tiếp:
+
+```bash
+python3 /root/AISTV/aistv_tiktok.py info "URL"
+python3 /root/AISTV/aistv_tiktok.py download "URL" -q hd
+python3 /root/AISTV/aistv_tiktok.py download "URL" --audio -o .
+python3 /root/AISTV/aistv_tiktok.py search "từ khoá" -n 8
+python3 /root/AISTV/aistv_tiktok.py resolve "URL"
+```
+
+Lấy tiêu đề, tác giả, thời lượng, lượt xem/thích/bình luận/chia sẻ/lưu, nhạc nền; tải video **không watermark** (mặc định bản nét nhất, `-q h264` cho máy cũ) hoặc tách âm thanh MP3. Hỗ trợ link thường, link rút gọn `vt.`/`vm.` và **TikTok Lite** (`lite.tiktok.com/t/...`); link Lite dạng mời/nhận thưởng sẽ báo rõ là không phải video. Video công khai; video riêng tư/giới hạn vùng có thể cần cookie `TIKTOK_COOKIES`. Bài ảnh/slideshow chưa hỗ trợ tải. Gói `curl_cffi` (đã có trong `requirements.txt`) giúp TikTok không chặn IP máy chủ.
+
 Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
 
 **Reply / trích dẫn tin nhắn:** trả lời (reply) một tin nhắn rồi nhắn yêu cầu — agent hiểu các cụm như "cái này", "đoạn trên", "sửa chỗ đó" là chỉ tin nhắn vừa reply. Nếu bôi đen một phần trước khi reply, agent ưu tiên đúng phần được trích dẫn. Reply một tin rồi gõ `/remember` (không kèm nội dung) sẽ lưu chính tin đó vào trí nhớ dài hạn. Ngữ cảnh trích dẫn cũng được ghi vào lịch sử hội thoại kèm nhãn `↪︎ trả lời “…”`.
@@ -228,6 +240,9 @@ Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
 | `AISTV_WATCH_SELF` | `1` | Tự báo lỗi trong log của chính bot |
 | `AISTV_PROGRESS_TICK` | `1` | Giây giữa 2 lần cập nhật khung tiến độ |
 | `AISTV_PROGRESS_LINES` | `14` | Số dòng cuộn trong khung tiến độ (dòng cũ rơi khỏi đỉnh) |
+| `FB_COOKIES` | trống | File cookie Facebook cho nội dung cần đăng nhập |
+| `TIKTOK_COOKIES` | trống | File cookie TikTok cho video riêng tư/giới hạn vùng |
+| `JINA_API_KEY` | trống | Tăng hạn mức đọc web khi tìm kiếm |
 | `AISTV_EMAIL_ADDRESS` | trống | Địa chỉ email nhận/gửi |
 | `AISTV_EMAIL_PASSWORD` | trống | Mật khẩu ứng dụng (App Password), không phải mật khẩu đăng nhập |
 | `AISTV_EMAIL_IMAP_HOST` / `AISTV_EMAIL_IMAP_PORT` | tự nhận / `993` | Máy chủ IMAP |
