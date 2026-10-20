@@ -30,9 +30,11 @@ KIẾN TRÚC (học theo OpenClaw)
 # 0. CẤU HÌNH — chỉnh ở đây
 # ════════════════════════════════════════════════════════════════════
 import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib
+import secrets, shlex, threading, urllib.request, urllib.parse
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
 CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "1") != "0"   # 0 = giữ bản OpenCode đã cài, không xoá & cài lại
@@ -43,7 +45,13 @@ DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"   # đổi nhanh bằng /mod
 TIMEZONE = "Asia/Ho_Chi_Minh"
 MAX_HISTORY = 12                # số lượt hỏi-đáp đưa vào ngữ cảnh
 MAX_PARALLEL = 2                # số tiến trình OpenCode chạy cùng lúc
-AGENT_TIMEOUT = 600             # giây tối đa cho 1 yêu cầu
+AGENT_TIMEOUT = int(os.getenv("AISTV_AGENT_TIMEOUT", "0") or 0)
+                                # 0 = KHÔNG giới hạn thời gian (mặc định, cho dự án lớn)
+                                # >0 = số giây tối đa cho 1 yêu cầu
+ASK_TIMEOUT = int(os.getenv("AISTV_ASK_TIMEOUT", "0") or 0)
+                                # 0 = agent chờ người dùng trả lời không giới hạn
+GH_CLIENT_ID = os.getenv("AISTV_GH_CLIENT_ID", "178c6fc778ccc68e1d6a")   # GitHub CLI (public client)
+GH_SCOPES = os.getenv("AISTV_GH_SCOPES", "repo workflow read:user")
 MAX_PROMPT_BYTES = 110_000      # giới hạn an toàn cho 1 tham số dòng lệnh Linux (128KB)
 SPLIT_LIMIT = 3000              # ký tự tối đa mỗi tin nhắn Telegram (trước khi đổi sang HTML)
 PROGRESS_DETAIL = 500           # ký tự tối đa cho mỗi đoạn chi tiết (lệnh, code, output) trong tin nhắn tiến độ
@@ -148,9 +156,15 @@ SKILLS_DIR = WORKSPACE / "skills"
 INBOX = WORKSPACE / "inbox"
 SESSIONS = HOME / "sessions"
 ARCHIVE = HOME / "archive"
+SECRETS_DIR = HOME / ".secrets"
+GITHUB_TOKEN_FILE = SECRETS_DIR / "github_token"
 STATE_FILE = HOME / "state.json"
-for _d in (WORKSPACE, MEMORY_DIR, SKILLS_DIR, INBOX, SESSIONS, ARCHIVE):
+for _d in (WORKSPACE, MEMORY_DIR, SKILLS_DIR, INBOX, SESSIONS, ARCHIVE, SECRETS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
+try:
+    SECRETS_DIR.chmod(0o700)
+except Exception:
+    pass
 
 START_TIME = time.time()
 BOT_TOKEN = ""
@@ -160,6 +174,20 @@ RUNNING: dict = {}                 # chat_id -> tiến trình OpenCode đang ch�
 CANCELLED: set = set()
 LOCKS = defaultdict(asyncio.Lock)  # mỗi chat xử lý tuần tự
 SEM = asyncio.Semaphore(MAX_PARALLEL)
+
+BOT_OBJ = None                     # Application.bot (đặt trong post_init)
+BOT_LOOP: Optional[asyncio.AbstractEventLoop] = None
+ASK_SERVER = None                  # HTTP server nội bộ cho tool ask_user
+ASK_URL = ""
+ASK_TOKEN = ""
+ASK_REQUESTS: dict = {}            # ask_id -> yêu cầu đang chờ người dùng trả lời
+ASK_BY_CHAT: dict = {}             # chat_id -> ask_id
+ASK_LOCK = threading.Lock()
+
+THINKING: dict = {}                # chat_id -> [các đoạn reasoning model đã trả về]
+THINK_TOKENS: dict = {}            # chat_id -> số token reasoning
+THINKING_LAST: dict = {}           # chat_id -> thời điểm nhận reasoning gần nhất
+GH_TOKEN_CACHE = ""                # token GitHub đang dùng (để che trong log/output)
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)       # httpx in URL chứa token → tắt
@@ -178,6 +206,10 @@ STATE = _load_state()
 STATE.setdefault("owner_id", None)
 STATE.setdefault("allowed", [])
 STATE.setdefault("model", os.getenv("OPENCODE_MODEL") or DEFAULT_MODEL)
+STATE.setdefault("variant", os.getenv("OPENCODE_VARIANT", ""))
+STATE.setdefault("show_thinking", True)          # hiện phần "suy nghĩ" của model
+STATE.setdefault("show_activity", False)         # hiện chi tiết việc agent đang làm (lệnh, code, output)
+STATE.setdefault("github_user", "")
 
 
 def save_state() -> None:
@@ -264,12 +296,14 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 3. File người dùng gửi nằm trong `inbox/`.
 4. Việc phức tạp: lập kế hoạch ngắn (2-5 bước) → thực hiện → tự kiểm tra → báo kết quả.
 5. Trước thao tác phá huỷ (xoá file, ghi đè, thay đổi hệ thống) phải hỏi lại người dùng.
-6. Tuyệt đối không in ra hay gửi đi token, API key, mật khẩu hoặc biến môi trường.
-7. `MEMORY.md` chứa thông tin lâu dài về người dùng — dùng khi liên quan, đừng lặp lại vô cớ.
-8. Khi người dùng bảo "hãy nhớ…" hoặc nêu một sở thích/quy tắc lâu dài, hãy thêm MỘT dòng mới bắt đầu bằng `- ` vào cuối
+6. Cần người dùng chọn phương án / xác nhận / bổ sung thông tin → gọi tool `ask_user`
+   (có bảng nút bấm trong Telegram). Đừng đoán bừa khi yêu cầu còn mơ hồ.
+7. Tuyệt đối không in ra hay gửi đi token, API key, mật khẩu hoặc biến môi trường.
+8. `MEMORY.md` chứa thông tin lâu dài về người dùng — dùng khi liên quan, đừng lặp lại vô cớ.
+9. Khi người dùng bảo "hãy nhớ…" hoặc nêu một sở thích/quy tắc lâu dài, hãy thêm MỘT dòng mới bắt đầu bằng `- ` vào cuối
    `MEMORY.md` (ví dụ `- [20/10/2026] Thích trả lời ngắn gọn`). Không xoá hay sửa các dòng cũ trừ khi được yêu cầu.
-9. `memory/YYYY-MM-DD.md` là nhật ký theo ngày — chỉ mở khi người dùng hỏi về những gì đã làm trước đây.
-10. `skills/` chứa quy trình chuyên biệt — làm đúng theo skill khi được kích hoạt.
+10. `memory/YYYY-MM-DD.md` là nhật ký theo ngày — chỉ mở khi người dùng hỏi về những gì đã làm trước đây.
+11. `skills/` chứa quy trình chuyên biệt — làm đúng theo skill khi được kích hoạt.
 """
 
 MEMORY_HEADER = "# MEMORY — Trí nhớ dài hạn\n"
@@ -294,6 +328,52 @@ Nghiên cứu một chủ đề có hệ thống.
 4. Phân biệt rõ sự thật đã kiểm chứng và suy luận của bạn.
 """
 
+# Tool tuỳ chỉnh của OpenCode: agent gọi `ask_user` → bot gửi câu hỏi kèm nút bấm
+# trong Telegram và chờ người dùng trả lời (kể cả gõ tự do).
+ASK_TOOL_JS = r'''import { tool } from "@opencode-ai/plugin"
+
+export default tool({
+  description: [
+    "Ask the Telegram user a question and wait for their answer.",
+    "Use this when you need a decision, missing information, or confirmation",
+    "before a destructive change. Always write the question in the user's language.",
+  ].join(" "),
+  args: {
+    question: tool.schema.string().describe("Question to show the user"),
+    options: tool.schema.array(tool.schema.string()).optional()
+      .describe("Short choices rendered as buttons (2-8 recommended)"),
+    allow_free_text: tool.schema.boolean().optional()
+      .describe("Let the user type a custom answer (default true)"),
+  },
+  async execute(args) {
+    const url = process.env.AISTV_ASK_URL
+    const token = process.env.AISTV_TOOL_TOKEN || ""
+    const chat = process.env.AISTV_CHAT_ID || ""
+    if (!url) {
+      return "ask_user is unavailable. Ask your question in the final answer instead."
+    }
+    const res = await fetch(url.replace(/\/$/, "") + "/ask", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-aistv-token": token },
+      body: JSON.stringify({
+        chat_id: Number(chat) || 0,
+        question: String(args.question || ""),
+        options: Array.isArray(args.options) ? args.options : [],
+        allow_free_text: args.allow_free_text !== false,
+      }),
+    })
+    if (!res.ok) {
+      return "ask_user failed with HTTP " + res.status + ". Continue without asking."
+    }
+    const data = await res.json()
+    if (data.cancelled) {
+      return "The user skipped or cancelled the question. Use a sensible default, or stop and explain."
+    }
+    return "User answered: " + data.answer
+  },
+})
+'''
+
 
 def bootstrap_workspace() -> None:
     files = {
@@ -302,11 +382,19 @@ def bootstrap_workspace() -> None:
         WORKSPACE / "MEMORY.md": MEMORY_HEADER,
         SKILLS_DIR / "code-review" / "SKILL.md": SKILL_CODE_REVIEW,
         SKILLS_DIR / "nghien-cuu" / "SKILL.md": SKILL_RESEARCH,
+        WORKSPACE / ".opencode" / "tools" / "ask_user.js": ASK_TOOL_JS,
     }
     for path, content in files.items():
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, "utf-8")
+        elif path.name == "ask_user.js":
+            try:
+                old = path.read_text("utf-8")
+            except Exception:
+                old = ""
+            if old != content:
+                path.write_text(content, "utf-8")   # luôn cập nhật tool theo bản bot
     # Cấu hình OpenCode cho workspace (luôn ghi lại để công tắc FULL_ACCESS có hiệu lực)
     cfg = {"$schema": "https://opencode.ai/config.json"}
     if FULL_ACCESS:
@@ -413,6 +501,345 @@ def pop_last_exchange(chat_id: int) -> Optional[tuple]:
 
 
 # ════════════════════════════════════════════════════════════════════
+# 4b. HỎI LẠI NGƯỜI DÙNG TỪ TRONG AGENT (tool ask_user + nút bấm)
+# ════════════════════════════════════════════════════════════════════
+def _ask_pop(ask_id: str, answer: Optional[str] = None, cancelled: bool = False) -> Optional[dict]:
+    """Đánh dấu yêu cầu đã có câu trả lời và đánh thức luồng HTTP đang chờ."""
+    with ASK_LOCK:
+        rec = ASK_REQUESTS.pop(ask_id, None)
+        if not rec:
+            return None
+        if not rec["event"].is_set():
+            rec["answer"] = answer
+            rec["cancelled"] = cancelled
+            rec["event"].set()
+        if ASK_BY_CHAT.get(rec["chat_id"]) == ask_id:
+            ASK_BY_CHAT.pop(rec["chat_id"], None)
+        return rec
+
+
+def _cancel_chat_asks(chat_id: int) -> None:
+    with ASK_LOCK:
+        ask_id = ASK_BY_CHAT.get(chat_id)
+    if ask_id:
+        _ask_pop(ask_id, cancelled=True)
+
+
+def _ask_pending(chat_id: int) -> bool:
+    with ASK_LOCK:
+        return chat_id in ASK_BY_CHAT
+
+
+def _ask_keyboard(rec: dict) -> Optional[InlineKeyboardMarkup]:
+    options = rec.get("options") or []
+    rows, row = [], []
+    for i, opt in enumerate(options[:10]):
+        row.append(InlineKeyboardButton(opt[:38], callback_data=f"ask:{rec['id']}:{i}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    tail = [InlineKeyboardButton("⏭ Bỏ qua", callback_data=f"ask:{rec['id']}:skip")]
+    if rec.get("allow_free_text", True):
+        tail.insert(0, InlineKeyboardButton("✍️ Trả lời tự do", callback_data=f"ask:{rec['id']}:free"))
+    rows.append(tail)
+    return InlineKeyboardMarkup(rows)
+
+
+async def _deliver_ask(rec: dict) -> None:
+    """Gửi câu hỏi của agent sang Telegram kèm bảng nút bấm."""
+    if BOT_OBJ is None:
+        _ask_pop(rec["id"], cancelled=True)
+        return
+    question = _clip(clean_output(rec["question"]), 1800)
+    hint = "Chọn một phương án bên dưới hoặc nhắn câu trả lời của bạn."
+    try:
+        rec["msg"] = await BOT_OBJ.send_message(
+            rec["chat_id"], f"❓ <b>Agent hỏi</b>\n{esc(question)}\n\n<i>{hint}</i>",
+            parse_mode=HTML, reply_markup=_ask_keyboard(rec),
+            link_preview_options=NO_PREVIEW)
+    except Exception as e:
+        log.warning("Không gửi được câu hỏi ask_user: %s", e)
+        _ask_pop(rec["id"], cancelled=True)
+
+
+class _AskHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):        # không in log HTTP (tránh ồn)
+        pass
+
+    def _json(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
+        self.close_connection = True
+
+    def do_POST(self):
+        if self.path.rstrip("/") != "/ask":
+            self._json(404, {"error": "not found"})
+            return
+        got = self.headers.get("x-aistv-token", "")
+        if not ASK_TOKEN or not secrets.compare_digest(got, ASK_TOKEN):
+            self._json(403, {"error": "forbidden"})
+            return
+        try:
+            size = int(self.headers.get("content-length") or 0)
+            if size <= 0 or size > 1_000_000:
+                raise ValueError("bad size")
+            data = json.loads(self.rfile.read(size) or b"{}")
+            chat_id = int(data.get("chat_id") or 0)
+            question = str(data.get("question") or "").strip()
+            if not question or chat_id <= 0:
+                raise ValueError("missing question/chat_id")
+            raw_opts = data.get("options") or []
+            options = [str(x).strip()[:60] for x in raw_opts if str(x).strip()][:10]
+            allow_free = bool(data.get("allow_free_text", True))
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"})
+            return
+
+        rec = {"id": secrets.token_hex(4), "chat_id": chat_id, "question": question,
+               "options": options, "allow_free_text": allow_free,
+               "created": time.time(), "event": threading.Event(),
+               "answer": None, "cancelled": False, "msg": None}
+        with ASK_LOCK:
+            ASK_REQUESTS[rec["id"]] = rec
+            ASK_BY_CHAT[chat_id] = rec["id"]
+
+        try:
+            fut = asyncio.run_coroutine_threadsafe(_deliver_ask(rec), BOT_LOOP)
+            fut.result(timeout=20)
+        except Exception as e:
+            log.warning("ask_user không gửi được: %s", e)
+            _ask_pop(rec["id"], cancelled=True)
+
+        if not rec["event"].wait(ASK_TIMEOUT if ASK_TIMEOUT > 0 else None):
+            _ask_pop(rec["id"], cancelled=True)
+        self._json(200, {"answer": rec.get("answer"), "cancelled": bool(rec.get("cancelled"))})
+
+
+def start_ask_server() -> None:
+    """Mở HTTP server 127.0.0.1 để tool ask_user gọi vào bot."""
+    global ASK_SERVER, ASK_URL, ASK_TOKEN, BOT_LOOP
+    if ASK_SERVER is not None:
+        return
+    BOT_LOOP = asyncio.get_running_loop()
+    ASK_TOKEN = secrets.token_urlsafe(24)
+    ASK_SERVER = ThreadingHTTPServer(("127.0.0.1", 0), _AskHandler)
+    ASK_SERVER.daemon_threads = True
+    port = ASK_SERVER.server_address[1]
+    threading.Thread(target=ASK_SERVER.serve_forever, daemon=True).start()
+    ASK_URL = f"http://127.0.0.1:{port}/ask"
+    os.environ["AISTV_ASK_URL"] = ASK_URL
+    os.environ["AISTV_TOOL_TOKEN"] = ASK_TOKEN
+    log.info("ask_user server: %s", ASK_URL)
+
+
+# ════════════════════════════════════════════════════════════════════
+# 4c. GITHUB: ĐĂNG NHẬP MỘT LẦN, LƯU BỀN VỮNG, TỰ CẬP NHẬT BOT
+# ════════════════════════════════════════════════════════════════════
+def _gh_http(url: str, data: Optional[dict] = None, token: str = "", timeout: int = 30) -> dict:
+    headers = {"Accept": "application/json", "User-Agent": "AISTV-bot"}
+    body = None
+    if data is not None:
+        body = urllib.parse.urlencode(data).encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-GitHub-Api-Version"] = "2022-11-28"
+    req = urllib.request.Request(url, data=body, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    return json.loads(raw) if raw.strip() else {}
+
+
+def _gh_device_start() -> dict:
+    return _gh_http("https://github.com/login/device/code",
+                    {"client_id": GH_CLIENT_ID, "scope": GH_SCOPES})
+
+
+def _gh_device_poll(device_code: str) -> dict:
+    return _gh_http("https://github.com/login/oauth/access_token",
+                    {"client_id": GH_CLIENT_ID, "device_code": device_code,
+                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
+
+
+def github_token() -> str:
+    """Token theo thứ tự: env/Colab Secrets → file bền vững → gh CLI."""
+    global GH_TOKEN_CACHE
+    for name in ("GITHUB_TOKEN", "GH_TOKEN"):
+        tok = get_secret(name)
+        if tok:
+            GH_TOKEN_CACHE = tok.strip()
+            return GH_TOKEN_CACHE
+    try:
+        tok = GITHUB_TOKEN_FILE.read_text("utf-8").strip()
+        if tok:
+            GH_TOKEN_CACHE = tok
+            return tok
+    except Exception:
+        pass
+    if shutil.which("gh"):
+        try:
+            r = subprocess.run(["gh", "auth", "token", "--hostname", "github.com"],
+                               capture_output=True, text=True, timeout=15)
+            if r.returncode == 0 and r.stdout.strip():
+                GH_TOKEN_CACHE = r.stdout.strip()
+                return GH_TOKEN_CACHE
+        except Exception:
+            pass
+    return ""
+
+
+def github_token_source() -> str:
+    for name in ("GITHUB_TOKEN", "GH_TOKEN"):
+        if get_secret(name):
+            return "env / Colab Secrets"
+    try:
+        if GITHUB_TOKEN_FILE.read_text("utf-8").strip():
+            return "file bền vững (.secrets/github_token)"
+    except Exception:
+        pass
+    if shutil.which("gh"):
+        try:
+            r = subprocess.run(["gh", "auth", "token", "--hostname", "github.com"],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return "gh CLI"
+        except Exception:
+            pass
+    return "chưa có"
+
+
+def apply_github_config(token: str) -> dict:
+    """Cấu hình git credential + gh CLI + user.name/email từ token."""
+    info = {}
+    try:
+        info = _gh_http("https://api.github.com/user", token=token)
+    except Exception as e:
+        raise RuntimeError(f"Token không hợp lệ hoặc không gọi được GitHub API: {oneline(str(e), 160)}")
+
+    login = str(info.get("login") or "").strip()
+    email = str(info.get("email") or "").strip() or (f"{login}@users.noreply.github.com" if login else "")
+
+    try:
+        _sh("git config --global credential.helper store", timeout=20)
+        cred = Path.home() / ".git-credentials"
+        lines = []
+        if cred.exists():
+            lines = [l for l in cred.read_text("utf-8").splitlines()
+                     if l.strip() and "@github.com" not in l]
+        safe = urllib.parse.quote(token, safe="")
+        lines.append(f"https://x-access-token:{safe}@github.com")
+        cred.write_text("\n".join(lines) + "\n", "utf-8")
+        cred.chmod(0o600)
+        if login:
+            _sh(f'git config --global user.name {shlex.quote(login)}', timeout=20)
+            _sh(f'git config --global user.email {shlex.quote(email)}', timeout=20)
+    except Exception as e:
+        log.warning("Không cấu hình được git: %s", e)
+
+    if shutil.which("gh"):
+        try:
+            subprocess.run(["gh", "auth", "login", "--hostname", "github.com", "--with-token"],
+                           input=token + "\n", text=True, capture_output=True, timeout=40)
+            subprocess.run(["gh", "auth", "setup-git"], capture_output=True, timeout=40)
+        except Exception as e:
+            log.warning("Không cấu hình được gh CLI: %s", e)
+
+    if login:
+        STATE["github_user"] = login
+        save_state()
+    return info
+
+
+def save_github_token(token: str) -> dict:
+    """Lưu token (chmod 600) + bản sao trên Google Drive nếu đang mount."""
+    global GH_TOKEN_CACHE
+    token = (token or "").strip()
+    if not token:
+        raise RuntimeError("Token rỗng.")
+    info = apply_github_config(token)
+    GITHUB_TOKEN_FILE.write_text(token, "utf-8")
+    GITHUB_TOKEN_FILE.chmod(0o600)
+    GH_TOKEN_CACHE = token
+    drive = Path("/content/drive/MyDrive/stv_agent/.secrets/github_token")
+    if drive.parent.parent.parent.exists() and drive.parent.resolve() != GITHUB_TOKEN_FILE.parent.resolve():
+        try:
+            drive.parent.mkdir(parents=True, exist_ok=True)
+            drive.write_text(token, "utf-8")
+            drive.chmod(0o600)
+        except Exception:
+            pass
+    return info
+
+
+def clear_github_token() -> None:
+    global GH_TOKEN_CACHE
+    try:
+        GITHUB_TOKEN_FILE.unlink()
+    except Exception:
+        pass
+    try:
+        cred = Path.home() / ".git-credentials"
+        if cred.exists():
+            keep = [l for l in cred.read_text("utf-8").splitlines() if "@github.com" not in l]
+            cred.write_text("\n".join(keep) + ("\n" if keep else ""), "utf-8")
+    except Exception:
+        pass
+    if shutil.which("gh"):
+        try:
+            subprocess.run(["gh", "auth", "logout", "--hostname", "github.com"],
+                           capture_output=True, timeout=30)
+        except Exception:
+            pass
+    GH_TOKEN_CACHE = ""
+    STATE["github_user"] = ""
+    save_state()
+
+
+
+def repo_dir() -> Optional[Path]:
+    here = Path(__file__).resolve().parent
+    for cand in (here, HOME / "AISTV", Path.cwd()):
+        if (cand / ".git").exists():
+            return cand
+    return None
+
+
+def _git(args: list, cwd: Path, timeout: int = 180) -> tuple:
+    try:
+        r = subprocess.run(["git"] + args, cwd=str(cwd), capture_output=True,
+                           text=True, timeout=timeout)
+        return r.returncode, (r.stdout + r.stderr).strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+def restart_bot() -> bool:
+    """Thay tiến trình hiện tại bằng bản mới. Không làm trong notebook Colab."""
+    if "ipykernel" in sys.modules:
+        return False
+    try:
+        env = os.environ.copy()
+        env["STV_SKIP_SETUP"] = "1"
+        os.execve(sys.executable, [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:], env)
+        return True
+    except Exception as e:
+        log.error("Không khởi động lại được: %s", e)
+        return False
+
+
+# ════════════════════════════════════════════════════════════════════
 # 5. DỰNG PROMPT + CHẠY OPENCODE (ASYNC, KHÔNG CHẶN BOT)
 # ════════════════════════════════════════════════════════════════════
 def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple] = None) -> str:
@@ -451,12 +878,16 @@ _HEADER = re.compile(r"\A(?:>\s*\w[\w-]*\s*·[^\n]*\n+)+")      # dòng "> build
 
 
 _SECRET_RE = re.compile(r"(?i)\b(token|api[_-]?key|password|passwd|secret)\b\s*[=:]\s*\S+")
+_GH_SECRET_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 
 
 def _redact(s) -> str:
     s = str(s or "")
     if BOT_TOKEN:
         s = s.replace(BOT_TOKEN, "***")
+    if GH_TOKEN_CACHE:
+        s = s.replace(GH_TOKEN_CACHE, "***")
+    s = _GH_SECRET_RE.sub("***", s)
     return _SECRET_RE.sub(lambda m: f"{m.group(1)}=***", s)
 
 
@@ -494,6 +925,7 @@ _TOOL_INFO = {
     "list": ("📂", "Liệt kê"),
     "task": ("🤖", "Giao việc phụ"),
     "todowrite": ("📋", "Cập nhật kế hoạch"),
+    "ask_user": ("❓", "Hỏi bạn"),
 }
 
 
@@ -534,6 +966,11 @@ def _tool_entry(part: dict) -> Optional[dict]:
     elif tool == "todowrite":
         todos = inp.get("todos") or []
         target = f"{len(todos)} mục" if isinstance(todos, list) else ""
+    elif tool == "ask_user":
+        target = _clip(_redact(inp.get("question", "")), 160)
+        opts = inp.get("options") or []
+        if isinstance(opts, list) and opts:
+            target += f" · {len(opts)} lựa chọn"
 
     if not target and tool not in _TOOL_INFO:
         for v in inp.values():
@@ -557,13 +994,44 @@ def _status_rows(chat_id: int, limit: int = PROGRESS_KEEP) -> list:
     return rows
 
 
+def _thinking_text(chat_id: int) -> str:
+    parts = THINKING.get(chat_id) or []
+    if not parts:
+        return ""
+    return clean_output("\n\n".join(parts)).strip()
+
+
+def _thinking_tail(chat_id: int, n: int = 600) -> str:
+    t = _thinking_text(chat_id)
+    return t[-n:] if len(t) > n else t
+
+
+def _last_action(chat_id: int) -> str:
+    items = ACTIVITY.get(chat_id) or []
+    if not items:
+        return ""
+    e = items[-1]
+    return f"{e['icon']} {e['label']}"
+
+
 def _render_status(chat_id: int, started: float, frame: str = "🧠") -> str:
     secs = int(time.monotonic() - started)
+    if not STATE.get("show_activity", False):
+        # Chế độ gọn: chỉ 1 dòng, không lệnh / code / output để không chiếm chỗ.
+        head = f"{frame} <i>Đang làm việc…</i> {secs}s"
+        act = _last_action(chat_id)
+        if act:
+            head += f" · {esc(act)}"
+        return head + " · /stop để huỷ"
     head = f"{frame} <i>Đang suy nghĩ…</i> {secs}s · /stop để huỷ"
-    rows = _status_rows(chat_id)
-    if not rows:
-        return head
-    body = "\n".join([head, "", "✅ <b>Việc đã làm</b>"] + rows)
+    parts = [head]
+    think = _thinking_tail(chat_id, 600)
+    if think:
+        parts += ["", "💭 <b>Suy nghĩ</b>", f"<blockquote>{esc(think)}</blockquote>"]
+    rows = _status_rows(chat_id, limit=PROGRESS_KEEP if not think else 3)
+    if rows:
+        parts += ["", "✅ <b>Việc đã làm</b>"] + rows
+    body = "\n".join(parts)
     return body if len(body) <= 3800 else body[:3790] + "\n…"
 
 
@@ -616,6 +1084,18 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> s
                         texts.append("".join(buf))
                     buf, mid = [], m
                 buf.append(txt)
+            elif etype == "reasoning":
+                txt = part.get("text") or ""
+                if txt:
+                    THINKING.setdefault(chat_id, []).append(txt)
+                    THINKING_LAST[chat_id] = time.monotonic()
+            elif etype == "step_finish":
+                try:
+                    rt = int(((part.get("tokens") or {}).get("reasoning")) or 0)
+                except Exception:
+                    rt = 0
+                if rt:
+                    THINK_TOKENS[chat_id] = THINK_TOKENS.get(chat_id, 0) + rt
             elif etype == "tool_use":
                 entry = _tool_entry(part)
                 if entry:
@@ -664,16 +1144,21 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
     Lần 2 (nếu lần 1 trống): chế độ cũ (prompt qua tham số dòng lệnh)."""
     env = os.environ.copy()
     env.pop("TELEGRAM_BOT_TOKEN", None)          # không để agent nhìn thấy token
-    env.update(NO_COLOR="1", TERM="dumb", PWD=str(WORKSPACE))
+    env.update(NO_COLOR="1", TERM="dumb", PWD=str(WORKSPACE), AISTV_CHAT_ID=str(chat_id))
     err_text = ""
     for attempt in range(retries + 1):
         via_stdin = attempt == 0
-        cmd = [OPENCODE_BIN, "run", "--dir", str(WORKSPACE), "--model", STATE["model"], "--auto"]
+        cmd = [OPENCODE_BIN, "run", "--dir", str(WORKSPACE), "--model", STATE["model"],
+               "--auto", "--thinking"]
+        if STATE.get("variant"):
+            cmd += ["--variant", STATE["variant"]]
         if via_stdin:
             cmd += ["--format", "json"]
         else:
             cmd.append(prompt)
         ACTIVITY[chat_id] = []
+        THINKING[chat_id] = []
+        THINK_TOKENS[chat_id] = 0
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=str(WORKSPACE), env=env, limit=2 ** 20,
             stdin=asyncio.subprocess.PIPE if via_stdin else asyncio.subprocess.DEVNULL,
@@ -681,15 +1166,16 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
         RUNNING[chat_id] = proc
         err_lines: list = []
         try:
-            out = await asyncio.wait_for(
-                _talk(proc, prompt.encode("utf-8") if via_stdin else None, chat_id, err_lines),
-                timeout=AGENT_TIMEOUT)
+            coro = _talk(proc, prompt.encode("utf-8") if via_stdin else None, chat_id, err_lines)
+            out = (await asyncio.wait_for(coro, timeout=AGENT_TIMEOUT)
+                   if AGENT_TIMEOUT > 0 else await coro)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
-            return False, f"⏱ Yêu cầu vượt quá {AGENT_TIMEOUT // 60} phút nên đã bị dừng. Hãy chia nhỏ yêu cầu rồi thử lại."
+            return False, f"⏱ Yêu cầu vượt quá {AGENT_TIMEOUT} giây nên đã bị dừng. Hãy chia nhỏ yêu cầu rồi thử lại."
         finally:
             RUNNING.pop(chat_id, None)
+            _cancel_chat_asks(chat_id)
         if chat_id in CANCELLED:
             CANCELLED.discard(chat_id)
             return False, "🛑 Đã huỷ tác vụ."
@@ -844,6 +1330,28 @@ async def send_rich(message, text: str, footer: str = "", markup=None) -> None:
             await asyncio.sleep(0.4)
 
 
+async def send_thinking(message, chat_id: int) -> None:
+    """Gửi phần reasoning của model dưới dạng blockquote mở rộng được."""
+    text = _thinking_text(chat_id)
+    if not text:
+        return
+    total = len(text)
+    shown = text if total <= 3500 else text[:3500] + "\n…"
+    body = (f"💭 <b>Suy nghĩ</b> <i>({total} ký tự)</i>\n"
+            f"<blockquote expandable>{esc(shown)}</blockquote>")
+    try:
+        await message.reply_text(body, parse_mode=HTML, link_preview_options=NO_PREVIEW)
+    except BadRequest:
+        try:
+            await message.reply_text(f"💭 Suy nghĩ:\n{shown}", link_preview_options=NO_PREVIEW)
+        except Exception:
+            pass
+    except RetryAfter as e:
+        await asyncio.sleep(e.retry_after + 1)
+    except Exception as e:
+        log.warning("Không gửi được thinking: %s", e)
+
+
 # ════════════════════════════════════════════════════════════════════
 # 7. LÕI XỬ LÝ YÊU CẦU
 # ════════════════════════════════════════════════════════════════════
@@ -879,9 +1387,9 @@ async def _ticker(bot, chat_id: int, status, started: float, stop: asyncio.Event
 
 
 async def _finish_status(status, chat_id: int, started: float, ok: bool) -> None:
-    """Chốt tin nhắn tiến độ thành danh sách việc đã làm; xoá nếu agent không dùng tool."""
+    """Chốt tin nhắn tiến độ; ở chế độ gọn thì xoá hẳn để nhường chỗ cho câu trả lời."""
     rows = _status_rows(chat_id)
-    if not rows:
+    if not STATE.get("show_activity", False) or not rows:
         try:
             await status.delete()
         except Exception:
@@ -924,7 +1432,7 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
         await message.reply_text("⏳ Tôi đang xử lý yêu cầu trước — yêu cầu này đã được xếp hàng.")
     async with lock:
         async with SEM:
-            status = await message.reply_text("🧠 <i>Đang suy nghĩ…</i>", parse_mode=HTML)
+            status = await message.reply_text("🧠 <i>Đang làm việc…</i>", parse_mode=HTML)
             started = time.monotonic()
             prompt = build_prompt(chat_id, text, skill)
             before = snapshot()
@@ -940,10 +1448,18 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
                 append_history(chat_id, "user", text)
                 append_history(chat_id, "assistant", answer[:6000])
                 log_daily(text, answer)
-            footer = f"<i>⏱ {time.monotonic() - started:.1f}s · {esc(STATE['model'].split('/')[-1])}</i>"
+                if STATE.get("show_thinking", True):
+                    await send_thinking(message, chat_id)
+            think_tok = THINK_TOKENS.get(chat_id, 0)
+            foot = f"⏱ {time.monotonic() - started:.1f}s · {esc(STATE['model'].split('/')[-1])}"
+            if think_tok:
+                foot += f" · 🧠 {think_tok} tok"
+            footer = f"<i>{foot}</i>"
             await send_rich(message, answer, footer if ok else "", ANSWER_KB if ok else None)
             if ok:
                 await send_new_files(message, before)
+            THINKING.pop(chat_id, None)
+            THINK_TOKENS.pop(chat_id, None)
             return ok
 
 
@@ -952,10 +1468,18 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
 # ════════════════════════════════════════════════════════════════════
 def build_status(chat_id: int) -> str:
     up = int(time.time() - START_TIME)
+    to = "không giới hạn" if AGENT_TIMEOUT <= 0 else f"{AGENT_TIMEOUT}s"
+    gh = STATE.get("github_user") or ("đã kết nối" if github_token() else "chưa kết nối")
     return (
         "📊 <b>Trạng thái AI STV</b>\n"
-        f"• Model: <code>{esc(STATE['model'])}</code>\n"
+        f"• Model: <code>{esc(STATE['model'])}</code>"
+        + (f" · variant <code>{esc(STATE['variant'])}</code>" if STATE.get("variant") else "") + "\n"
         f"• OpenCode: <code>{esc(OPENCODE_VERSION)}</code>\n"
+        f"• Suy nghĩ: {'bật' if STATE.get('show_thinking', True) else 'tắt'} · Hỏi lại: "
+        f"{'bật' if ASK_SERVER else 'tắt'}\n"
+        f"• Chi tiết việc làm: {'bật' if STATE.get('show_activity', False) else 'tắt'}\n"
+        f"• GitHub: {esc(gh)}\n"
+        f"• Giới hạn 1 yêu cầu: {to}\n"
         f"• Hội thoại: {len(load_history(chat_id)) // 2} lượt đã lưu\n"
         f"• Trí nhớ dài hạn: {len(memory_items())} mục\n"
         f"• Skills: {len(list_skills())}\n"
@@ -986,11 +1510,13 @@ def welcome_text() -> str:
         "🤖 <b>AI STV — Agent Assistant</b>\n"
         f"Chạy bằng OpenCode · <code>{esc(STATE['model'])}</code>\n\n"
         "✨ <b>Khả năng</b>\n"
+        "• Hiện <b>suy nghĩ (thinking)</b> của model theo thời gian thực\n"
+        "• Agent <b>hỏi lại bạn</b> bằng bảng nút bấm khi cần chọn phương án\n"
         "• Nhớ hội thoại bền vững, kể cả khi bot khởi động lại\n"
         "• Trí nhớ dài hạn — /remember, /memory\n"
         "• Đọc file bạn gửi, tạo file và tự gửi lại cho bạn\n"
-        "• Skills tuỳ chỉnh — /skills\n"
-        "• Chạy nền, huỷ bất cứ lúc nào bằng /stop\n\n"
+        "• <b>Không giới hạn 10 phút</b> — dự án lớn chạy tới khi xong (/stop để huỷ)\n"
+        "• Kết nối GitHub 1 lần — /github login; tự cập nhật — /update\n\n"
         "Gửi câu hỏi hoặc yêu cầu để bắt đầu 👇"
     )
 
@@ -1002,6 +1528,13 @@ HELP_TEXT = (
     "<b>Trí nhớ &amp; Skills</b>\n/remember &lt;nội dung&gt; — ghi nhớ dài hạn\n/memory — xem trí nhớ\n"
     "/forget &lt;số|all&gt; — xoá trí nhớ\n/skills — danh sách skills\n/skill &lt;tên&gt; &lt;yêu cầu&gt; — chạy theo skill\n\n"
     "<b>File</b>\nGửi file cho bot → lưu vào <code>inbox/</code> để agent đọc\n/files — file trong workspace\n/get &lt;đường dẫn&gt; — tải file về\n\n"
+    "<b>Suy nghĩ &amp; hỏi đáp</b>\n/think on|off — hiện/tắt phần suy nghĩ của model\n"
+    "/activity on|off — hiện/tắt chi tiết lệnh &amp; sửa code khi đang chạy (mặc định tắt)\n"
+    "/variant [high|max|off] — mức reasoning của model\n"
+    "Agent tự dùng nút bấm khi cần bạn chọn/xác nhận.\n\n"
+    "<b>GitHub &amp; tự cập nhật (chủ bot)</b>\n/github login — kết nối GitHub bằng mã, lưu lâu dài\n"
+    "/github token &lt;PAT&gt; · /github status · /github repo · /github logout\n"
+    "/update — pull bản mới trên GitHub rồi khởi động lại\n/restart — khởi động lại bot\n\n"
     "<b>Hệ thống (chủ bot)</b>\n/model [provider/tên] — xem/đổi model\n/models — danh sách model\n/allow &lt;id&gt; · /deny &lt;id&gt; — cấp/thu hồi quyền"
 )
 
@@ -1072,6 +1605,262 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     free = [l for l in zen if "free" in l] or zen          # model miễn phí lên đầu
     body = esc("\n".join(free[:40])) or "(trống)"
     await msg.reply_text(f"🧠 <b>Model khả dụng</b> ({len(free)})\n<pre>{body}</pre>\nĐổi: <code>/model &lt;tên&gt;</code>", parse_mode=HTML)
+
+
+@guard()
+async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    arg = (context.args[0].lower() if context.args else "")
+    if arg in ("on", "1", "bat", "bật"):
+        STATE["show_thinking"] = True
+    elif arg in ("off", "0", "tat", "tắt"):
+        STATE["show_thinking"] = False
+    elif arg:
+        await msg.reply_text("Dùng: /think on | /think off")
+        return
+    save_state()
+    on = STATE.get("show_thinking", True)
+    await msg.reply_text(
+        f"💭 Hiển thị suy nghĩ (reasoning): <b>{'BẬT' if on else 'TẮT'}</b>\n"
+        "Model có reasoning sẽ hiện phần này khi đang chạy và gửi kèm sau khi xong.",
+        parse_mode=HTML)
+
+
+@guard()
+async def cmd_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    arg = (context.args[0].lower() if context.args else "")
+    if arg in ("on", "1", "bat", "bật"):
+        STATE["show_activity"] = True
+    elif arg in ("off", "0", "tat", "tắt"):
+        STATE["show_activity"] = False
+    elif arg:
+        await msg.reply_text("Dùng: /activity on | /activity off")
+        return
+    save_state()
+    on = STATE.get("show_activity", False)
+    await msg.reply_text(
+        f"⚙️ Chi tiết việc đang làm (lệnh, code, output): <b>{'BẬT' if on else 'TẮT'}</b>\n"
+        + ("Đang bật: tin nhắn tiến độ hiện từng lệnh/sửa file và giữ lại khi xong."
+           if on else
+           "Đang tắt: chỉ 1 dòng trạng thái ngắn và tự xoá khi xong, không chiếm chỗ."),
+        parse_mode=HTML)
+
+
+@guard()
+async def cmd_variant(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not context.args:
+        cur = STATE.get("variant") or "(mặc định của model)"
+        await msg.reply_text(
+            f"🎚 Reasoning effort/variant: <code>{esc(cur)}</code>\n"
+            "Đổi: <code>/variant high</code>, <code>/variant max</code>, <code>/variant off</code>",
+            parse_mode=HTML)
+        return
+    if not is_owner(update.effective_user.id):
+        await msg.reply_text("🔒 Chỉ chủ bot được đổi variant.")
+        return
+    val = context.args[0].strip()
+    if val.lower() in ("off", "auto", "default", "0"):
+        STATE["variant"] = ""
+    elif re.fullmatch(r"[\w.\-]{1,32}", val):
+        STATE["variant"] = val
+    else:
+        await msg.reply_text("⚠️ Tên variant không hợp lệ.")
+        return
+    save_state()
+    cur = STATE.get("variant") or "(mặc định của model)"
+    await msg.reply_text(f"✅ Variant: <code>{esc(cur)}</code>", parse_mode=HTML)
+
+
+async def _gh_poll_task(bot, chat_id: int, device: dict) -> None:
+    interval = max(5, int(device.get("interval") or 5))
+    deadline = time.time() + int(device.get("expires_in") or 900)
+    while time.time() < deadline:
+        await asyncio.sleep(interval)
+        try:
+            r = await asyncio.to_thread(_gh_device_poll, device["device_code"])
+        except Exception:
+            continue
+        err = str(r.get("error") or "")
+        if err == "authorization_pending":
+            continue
+        if err == "slow_down":
+            interval += 5
+            continue
+        if err:
+            await bot.send_message(chat_id, f"❌ Đăng nhập GitHub thất bại: <code>{esc(err)}</code>\n"
+                                            "Gửi /github login để thử lại.", parse_mode=HTML)
+            return
+        tok = str(r.get("access_token") or "")
+        if not tok:
+            continue
+        try:
+            info = await asyncio.to_thread(save_github_token, tok)
+        except Exception as e:
+            await bot.send_message(chat_id, f"❌ Không lưu được token GitHub: {esc(oneline(str(e), 300))}",
+                                   parse_mode=HTML)
+            return
+        login = info.get("login") or "?"
+        await bot.send_message(
+            chat_id,
+            "✅ <b>Đã kết nối GitHub</b>\n"
+            f"• Tài khoản: <b>{esc(login)}</b>\n"
+            "• Đã cấu hình <code>git</code> + <code>gh</code>\n"
+            f"• Lưu tại: <code>{esc(GITHUB_TOKEN_FILE)}</code>\n\n"
+            "Lần sau (kể cả Colab khác) bot tự dùng lại. Để chắc chắn 100%, thêm secret "
+            "<code>GITHUB_TOKEN</code> trong Colab Secrets hoặc bật Google Drive.",
+            parse_mode=HTML)
+        return
+    await bot.send_message(chat_id, "⌛ Mã đăng nhập đã hết hạn. Gửi /github login để lấy mã mới.")
+
+
+@guard(owner_only=True)
+async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    sub = (context.args[0].lower() if context.args else "status")
+    tok = github_token()
+
+    if sub in ("login", "connect"):
+        try:
+            d = await asyncio.to_thread(_gh_device_start)
+        except Exception as e:
+            await msg.reply_text(f"⚠️ Không tạo được mã đăng nhập: {oneline(str(e), 300)}")
+            return
+        url = d.get("verification_uri") or "https://github.com/login/device"
+        await msg.reply_text(
+            "🐙 <b>Kết nối GitHub</b>\n"
+            f"1. Mở: {esc(url)}\n"
+            f"2. Nhập mã: <code>{esc(d.get('user_code'))}</code>\n"
+            "3. Bấm <b>Authorize</b>.\n\n"
+            "Bot sẽ tự lưu token và cấu hình git/gh. Không cần làm lại lần sau.\n"
+            "<i>Mã có hiệu lực khoảng 15 phút.</i>",
+            parse_mode=HTML)
+        asyncio.create_task(_gh_poll_task(context.bot, update.effective_chat.id, d))
+        return
+
+    if sub in ("logout", "disconnect"):
+        clear_github_token()
+        await msg.reply_text("🚪 Đã xoá token GitHub khỏi máy này.")
+        return
+
+    if sub in ("token", "pat"):
+        value = " ".join(context.args[1:]).strip()
+        if not value:
+            await msg.reply_text("Dùng: /github token <PAT>  (nên dùng /github login an toàn hơn)")
+            return
+        try:
+            info = await asyncio.to_thread(save_github_token, value)
+        except Exception as e:
+            await msg.reply_text(f"❌ {oneline(str(e), 300)}")
+            return
+        await msg.reply_text(
+            f"✅ Đã lưu token GitHub cho <b>{esc(info.get('login') or '?')}</b>.\n"
+            "⚠️ Token vừa gửi nằm trong lịch sử chat Telegram — nên thu hồi nếu đã lộ.",
+            parse_mode=HTML)
+        return
+
+    if sub == "repo":
+        rd = repo_dir()
+        if not rd:
+            await msg.reply_text("⚠️ Không tìm thấy thư mục repo (.git).")
+            return
+        _, remote = _git(["remote", "-v"], rd)
+        _, branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], rd)
+        _, head = _git(["log", "-1", "--oneline"], rd)
+        await msg.reply_text(
+            f"📦 <b>Repo bot</b>\n• Thư mục: <code>{esc(rd)}</code>\n"
+            f"• Nhánh: <code>{esc(branch)}</code>\n• Commit: <code>{esc(head)}</code>\n"
+            f"<pre>{esc(remote[:1200])}</pre>",
+            parse_mode=HTML)
+        return
+
+    # status
+    lines = ["🐙 <b>GitHub</b>"]
+    if tok:
+        login = STATE.get("github_user") or "?"
+        if login == "?":
+            try:
+                info = await asyncio.to_thread(_gh_http, "https://api.github.com/user", None, tok, 15)
+                login = info.get("login") or "?"
+                STATE["github_user"] = login
+                save_state()
+            except Exception:
+                login = "?"
+        lines += [f"• Tài khoản: <b>{esc(login)}</b>",
+                  f"• Nguồn token: {esc(github_token_source())}",
+                  f"• Lưu tại: <code>{esc(GITHUB_TOKEN_FILE)}</code>"]
+    else:
+        lines += ["• Trạng thái: <b>chưa kết nối</b>"]
+    rd = repo_dir()
+    if rd:
+        _, branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], rd)
+        _, head = _git(["log", "-1", "--oneline"], rd)
+        lines.append(f"• Repo: <code>{esc(rd)}</code> · {esc(branch)} · {esc(head[:80])}")
+    lines += ["", "<b>Lệnh</b>",
+              "/github login — kết nối bằng mã (khuyến nghị)",
+              "/github token &lt;PAT&gt; — dán token có sẵn",
+              "/github repo — xem repo/nhánh/commit",
+              "/github logout — ngắt kết nối",
+              "/update — pull bản mới + khởi động lại"]
+    await msg.reply_text("\n".join(lines), parse_mode=HTML)
+
+
+@guard(owner_only=True)
+async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    rd = repo_dir()
+    if not rd:
+        await msg.reply_text("⚠️ Không tìm thấy repo (.git) để cập nhật.")
+        return
+    rc, dirty = _git(["status", "--porcelain"], rd)
+    if dirty:
+        await msg.reply_text(
+            "⚠️ Repo có thay đổi chưa commit nên không tự pull (để tránh mất code).\n"
+            f"<pre>{esc(dirty[-1200:])}</pre>\n"
+            "Hãy commit/stash rồi gửi lại /update.",
+            parse_mode=HTML)
+        return
+    await msg.reply_text("⏳ Đang kiểm tra bản mới trên GitHub…")
+    _, before = _git(["rev-parse", "HEAD"], rd)
+    rc, out = _git(["pull", "--ff-only"], rd, timeout=300)
+    if rc != 0:
+        await msg.reply_text(
+            "⚠️ Không cập nhật được (có thể do chưa đăng nhập GitHub hoặc nhánh bị lệch).\n"
+            f"<pre>{esc(out[-1500:])}</pre>\n"
+            "Kiểm tra bằng /github và /github repo.",
+            parse_mode=HTML)
+        return
+    _, after = _git(["rev-parse", "HEAD"], rd)
+    if before == after:
+        await msg.reply_text("✅ Bot đang ở bản mới nhất trên GitHub.")
+        return
+    _, changed = _git(["diff", "--name-only", before, after], rd)
+    if "requirements.txt" in changed.splitlines():
+        await msg.reply_text("📦 Có thư viện mới — đang cài…")
+        try:
+            await asyncio.to_thread(subprocess.run,
+                                    [sys.executable, "-m", "pip", "install", "-q", "-U",
+                                     "-r", str(rd / "requirements.txt")],
+                                    timeout=600)
+        except Exception as e:
+            log.warning("Cài requirements thất bại: %s", e)
+    await msg.reply_text(
+        f"✅ Đã cập nhật <code>{esc(before[:7])}</code> → <code>{esc(after[:7])}</code>.\n"
+        "🔄 Đang khởi động lại bot…",
+        parse_mode=HTML)
+    await asyncio.sleep(1)
+    if not restart_bot():
+        await msg.reply_text("ℹ️ Không tự khởi động lại được trong notebook. Hãy dừng ô và chạy lại lệnh run.")
+
+
+@guard(owner_only=True)
+async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text("🔄 Đang khởi động lại bot…")
+    await asyncio.sleep(0.5)
+    if not restart_bot():
+        await update.effective_message.reply_text(
+            "ℹ️ Không thể tự khởi động lại trong notebook Colab. Hãy dừng ô và chạy lại lệnh run.")
 
 
 @guard()
@@ -1181,6 +1970,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (msg.text or "").strip()
     if not text:
         return
+    with ASK_LOCK:
+        ask_id = ASK_BY_CHAT.get(chat.id)
+    if ask_id:                                       # đang chờ agent hỏi → tin nhắn này là câu trả lời
+        rec = _ask_pop(ask_id, text)
+        if rec:
+            try:
+                if rec.get("msg"):
+                    await rec["msg"].edit_text(
+                        f"❓ {esc(_clip(rec['question'], 1500))}\n\n✅ <b>Trả lời:</b> {esc(_clip(text, 500))}",
+                        parse_mode=HTML)
+            except Exception:
+                pass
+            return
     if chat.type != "private":                       # trong nhóm: chỉ trả lời khi được nhắc tên / reply
         uname = "@" + (context.bot.username or "")
         replied = bool(msg.reply_to_message and msg.reply_to_message.from_user
@@ -1208,11 +2010,55 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   f"{caption}\n\n(Người dùng vừa gửi file, đã lưu tại: inbox/{dest.name})")
 
 
+async def _on_ask_button(q, data: str) -> None:
+    try:
+        _, ask_id, choice = data.split(":", 2)
+    except ValueError:
+        return
+    with ASK_LOCK:
+        rec = ASK_REQUESTS.get(ask_id)
+    if not rec:
+        await q.answer("Câu hỏi đã hết hạn.")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+    head = f"❓ {esc(_clip(rec['question'], 1500))}"
+    if choice == "free":
+        await q.answer("Hãy nhắn câu trả lời của bạn.")
+        try:
+            await q.edit_message_text(f"{head}\n\n✍️ <i>Hãy nhắn câu trả lời…</i>", parse_mode=HTML)
+        except Exception:
+            pass
+        return
+    if choice == "skip":
+        _ask_pop(ask_id, cancelled=True)
+        await q.answer("Đã bỏ qua")
+        result = "⏭ Bỏ qua"
+    else:
+        try:
+            option = rec["options"][int(choice)]
+        except Exception:
+            await q.answer("Lựa chọn không hợp lệ.")
+            return
+        _ask_pop(ask_id, option)
+        await q.answer(f"Đã chọn: {option}"[:190])
+        result = f"✅ {option}"
+    try:
+        await q.edit_message_text(f"{head}\n\n<b>{esc(result)}</b>", parse_mode=HTML)
+    except Exception:
+        pass
+
+
 @guard()
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
     chat_id, data = q.message.chat_id, q.data
+    if data.startswith("ask:"):
+        await _on_ask_button(q, data)
+        return
+    await q.answer()
     if data == "status":
         await q.message.reply_text(build_status(chat_id), parse_mode=HTML)
     elif data == "skills":
@@ -1251,6 +2097,10 @@ COMMANDS = [
     ("status", "Trạng thái bot"), ("model", "Xem / đổi model"), ("models", "Danh sách model"),
     ("remember", "Ghi nhớ dài hạn"), ("memory", "Xem trí nhớ"), ("forget", "Xoá trí nhớ"),
     ("skills", "Danh sách skills"), ("skill", "Chạy theo skill"),
+    ("think", "Bật/tắt hiện suy nghĩ"), ("activity", "Ẩn/hiện chi tiết việc đang làm"),
+    ("variant", "Mức reasoning của model"),
+    ("github", "Kết nối / quản lý GitHub"), ("update", "Cập nhật bot từ GitHub"),
+    ("restart", "Khởi động lại bot"),
     ("files", "File trong workspace"), ("get", "Tải file về"), ("help", "Hướng dẫn"),
 ]
 
@@ -1264,10 +2114,29 @@ def get_token() -> str:
     return tok
 
 
+def _startup_github() -> None:
+    tok = github_token()
+    if not tok:
+        return
+    try:
+        info = apply_github_config(tok)
+        log.info("GitHub sẵn sàng: %s (%s)", info.get("login") or "?", github_token_source())
+    except Exception as e:
+        log.warning("GitHub token có sẵn nhưng không dùng được: %s", oneline(str(e), 200))
+
+
 async def post_init(app) -> None:
+    global BOT_OBJ
+    BOT_OBJ = app.bot
+    try:
+        start_ask_server()
+    except Exception as e:
+        log.warning("Không mở được ask_user server: %s", e)
     await app.bot.set_my_commands([BotCommand(c, d) for c, d in COMMANDS])
     me = await app.bot.get_me()
     print(f"✅ Bot online: @{me.username}  |  model: {STATE['model']}")
+    if github_token():
+        asyncio.create_task(asyncio.to_thread(_startup_github))
     if owner_id():
         print(f"👑 Chủ bot (user id): {owner_id()}")
         try:
@@ -1299,6 +2168,9 @@ def main() -> None:
                       (["stop"], cmd_stop), (["status"], cmd_status), (["model"], cmd_model),
                       (["models"], cmd_models), (["remember"], cmd_remember), (["memory"], cmd_memory),
                       (["forget"], cmd_forget), (["skills"], cmd_skills), (["skill"], cmd_skill),
+                      (["think"], cmd_think), (["activity", "progress"], cmd_activity),
+                      (["variant"], cmd_variant),
+                      (["github"], cmd_github), (["update"], cmd_update), (["restart"], cmd_restart),
                       (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny)]:
         app.add_handler(CommandHandler(names, fn))
     app.add_handler(CallbackQueryHandler(on_button))
