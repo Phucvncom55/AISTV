@@ -6,7 +6,7 @@
 #      bash run.sh
 #
 #  Không cần clone trước (Linux / macOS / Colab):
-#      bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/run.sh)
+#      bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/run.sh)
 #      bash <(curl -fsSL .../run.sh) https://github.com/<user>/<repo>
 #
 #  Biến môi trường tuỳ chọn:
@@ -21,7 +21,7 @@
 # ════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-REPO="${AISTV_REPO:-https://github.com/USER/AISTV.git}"
+REPO="${AISTV_REPO:-https://github.com/Phucvncom55/AISTV.git}"
 BRANCH="${AISTV_BRANCH:-main}"
 
 # Cho phép truyền repo trực tiếp: bash run.sh https://github.com/<user>/<repo>

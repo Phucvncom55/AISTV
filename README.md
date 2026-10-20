@@ -33,7 +33,7 @@ Không có `gh`? Tạo repo trống trên GitHub rồi:
 cd AISTV
 git init -b main && git add -A
 git commit -m "AI STV — bot Telegram chạy OpenCode"
-git remote add origin https://github.com/<USER>/<REPO>.git
+git remote add origin https://github.com/Phucvncom55/AISTV.git
 git push -u origin main
 ```
 
@@ -41,16 +41,16 @@ git push -u origin main
 
 ## 3. Chạy bot bằng MỘT lệnh
 
-`push.sh` đã tự ghi URL repo của bạn vào `run.sh`, nên lệnh chỉ cần dán **một lần** (thay `<USER>/<REPO>`):
+`push.sh` đã tự ghi URL repo của bạn vào `run.sh`, nên lệnh chỉ cần dán **một lần** (thay `Phucvncom55/AISTV`):
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/run.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/run.sh)
 ```
 
 Nếu chưa sửa `run.sh`, truyền repo trực tiếp (dán link GitHub):
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/run.sh) https://github.com/<USER>/<REPO>
+bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/run.sh) https://github.com/Phucvncom55/AISTV
 ```
 
 Lần đầu script sẽ: tải repo → lấy/hỏi token → tạo `.venv` → cài thư viện → cài OpenCode → chạy bot.
@@ -58,14 +58,14 @@ Token lấy theo thứ tự: `.env` → biến môi trường → Colab Secrets 
 
 ### Chạy trên Google Colab
 
-1. Dán link repo của bạn vào ô dưới (thay `<USER>/<REPO>`), **hoặc** dùng
-   `bash <(curl -fsSL .../run.sh) https://github.com/<USER>/<REPO>`.
+1. Dán link repo của bạn vào ô dưới (thay `Phucvncom55/AISTV`), **hoặc** dùng
+   `bash <(curl -fsSL .../run.sh) https://github.com/Phucvncom55/AISTV`.
 2. Mở 🔑 **Secrets** (cột trái) → thêm `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`),
    bật **Notebook access**.
 3. Dán vào một ô code rồi Run:
 
 ```python
-!bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/run.sh)
+!bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/run.sh)
 ```
 
 Script tự: clone → lấy token từ Secrets → tạo `.venv` → cài thư viện → cài OpenCode → chạy bot.
