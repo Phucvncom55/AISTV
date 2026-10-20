@@ -3753,7 +3753,11 @@ async def cloud_push_secrets() -> bool:
     global SECRETS_DIRTY
     if not CLOUD_ENABLED:
         return False
-    data = _local_secret_values()
+    try:
+        data = await asyncio.to_thread(_local_secret_values)
+    except Exception as e:
+        log.warning("Không đọc được bí mật cục bộ: %s", oneline(str(e), 120))
+        return False
     if not data:
         return False
     try:
