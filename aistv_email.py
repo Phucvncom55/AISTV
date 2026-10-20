@@ -197,8 +197,11 @@ def _friendly(e: Exception) -> str:
 
 
 def _imap(cfg: dict):
-    if not cfg.get("address") or not cfg.get("password") or not cfg.get("imap_host"):
-        raise EmailError("Chưa cấu hình email. Xem /email.")
+    missing = [label for key, label in (("address", "địa chỉ email"),
+                                        ("password", "mật khẩu ứng dụng"),
+                                        ("imap_host", "IMAP host")) if not cfg.get(key)]
+    if missing:
+        raise EmailError("Thiếu " + ", ".join(missing) + " — đặt bằng /email setup.")
     try:
         if cfg.get("imap_ssl", True):
             conn = imaplib.IMAP4_SSL(cfg["imap_host"], cfg["imap_port"],
@@ -361,8 +364,10 @@ def send(to: str, subject: str, body: str) -> None:
 
 def test() -> dict:
     cfg = load()
-    if not cfg.get("address") or not cfg.get("password"):
-        raise EmailError("Chưa cấu hình email. Xem /email.")
+    missing = [label for key, label in (("address", "địa chỉ email"),
+                                        ("password", "mật khẩu ứng dụng")) if not cfg.get(key)]
+    if missing:
+        raise EmailError("Thiếu " + ", ".join(missing) + " — đặt bằng /email setup.")
     conn = _imap(cfg)
     try:
         typ, data = conn.select("INBOX", readonly=True)

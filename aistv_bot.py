@@ -100,6 +100,7 @@ _load_dotenv()
 # Bí mật được đồng bộ lên Firebase (mã hoá bằng token bot) để sang máy/terminal
 # khác không phải đăng nhập lại. Thêm tên biến vào đây nếu muốn sync thêm.
 SECRETS_DIRTY = False
+SECRETS_CLOUD_KEYS: set = set()       # tên bí mật đang có trên cloud (lần đọc gần nhất)
 SECRET_SYNC_KEYS = (
     "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "JINA_API_KEY",
     "AISTV_EMAIL_ADDRESS", "AISTV_EMAIL_PASSWORD",
@@ -3784,6 +3785,8 @@ async def cloud_restore_secrets() -> int:
         log.warning("Bí mật trên cloud không giải mã được (đổi bot token?): %s",
                     oneline(str(e), 120))
         return 0
+    SECRETS_CLOUD_KEYS.clear()
+    SECRETS_CLOUD_KEYS.update(str(k) for k in data)
     restored = 0
     for name, value in data.items():
         value = str(value or "").strip()
@@ -4581,7 +4584,14 @@ async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Email (IMAP/SMTP) ────────────────────────────────────────────────
 EMAIL_LAST: dict = {}                  # chat_id -> [uid, ...] theo thứ tự đã liệt kê
-EMAIL_STAT = {"ok": None, "at": 0.0, "err": ""}
+EMAIL_STAT = {"ok": None, "at": 0.0, "err": "", "fp": ""}
+
+
+def _email_fp(cfg: dict) -> str:
+    """Vân tay cấu hình: đổi email/mật khẩu/host → kết quả test cũ không còn giá trị."""
+    raw = "|".join(str(cfg.get(k) or "") for k in
+                   ("address", "password", "imap_host", "imap_port", "smtp_host", "smtp_port"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def build_email() -> str:
@@ -4591,19 +4601,22 @@ def build_email() -> str:
     if not cfg.get("address"):
         return mail.HELP
     pw = "đã đặt" if cfg.get("password") else "⚠️ thiếu"
+    fp = _email_fp(cfg)
+    if EMAIL_STAT.get("fp") and EMAIL_STAT["fp"] != fp:
+        EMAIL_STAT.update(ok=None, at=0.0, err="", fp="")   # cấu hình đã đổi → bỏ kết quả cũ
     if EMAIL_STAT["ok"] is True:
         login = f"🟢 OK · {int(time.time() - EMAIL_STAT['at'])}s trước"
     elif EMAIL_STAT["ok"] is False:
         login = "🔴 " + esc(oneline(EMAIL_STAT["err"], 120))
     else:
-        login = "🟡 chưa kiểm tra"
+        login = "🟡 chưa kiểm tra — chạy /email test"
     return (
         "📧 <b>Email</b>\n"
         f"• Hộp thư: <code>{esc(cfg['address'])}</code>\n"
         f"• Mật khẩu ứng dụng: {pw}\n"
         f"• IMAP: <code>{esc(cfg['imap_host'])}:{cfg['imap_port']}</code>\n"
         f"• SMTP: <code>{esc(cfg['smtp_host'])}:{cfg['smtp_port']}</code>\n"
-        f"• Đăng nhập: {login}\n\n"
+        f"• Lần kiểm tra: {login}\n\n"
         "<b>Dùng</b>\n"
         "/email test — kiểm tra kết nối\n"
         "/email inbox [n] — hộp thư · /email unread [n] — chưa đọc\n"
@@ -4650,6 +4663,7 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode=HTML)
                 return
             cfg = mail.save(args[1], args[2])
+            EMAIL_STAT.update(ok=None, at=0.0, err="", fp="")   # cấu hình mới → chưa kiểm tra
             if CLOUD_ENABLED:
                 asyncio.create_task(cloud_push_secrets())
             try:
@@ -4669,7 +4683,7 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             removed = mail.clear()
             EMAIL_LAST.pop(chat_id, None)
-            EMAIL_STAT.update(ok=None, at=0.0, err="")
+            EMAIL_STAT.update(ok=None, at=0.0, err="", fp="")
             await msg.reply_text("🗑 Đã xoá cấu hình email đã lưu." if removed
                                  else "ℹ️ Không có cấu hình email nào đã lưu.")
             return
@@ -4678,7 +4692,7 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 mail.load(force=True)
                 info = await asyncio.to_thread(mail.test)
-                EMAIL_STAT.update(ok=True, at=time.time(), err="")
+                EMAIL_STAT.update(ok=True, at=time.time(), err="", fp=_email_fp(mail.load()))
                 await note.edit_text(
                     f"✅ <b>Email hoạt động</b>\n"
                     f"• Hộp thư: <code>{esc(info['address'])}</code>\n"
@@ -4686,7 +4700,7 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"• IMAP <code>{esc(info['imap'])}</code> · SMTP <code>{esc(info['smtp'])}</code>",
                     parse_mode=HTML)
             except Exception as e:
-                EMAIL_STAT.update(ok=False, at=time.time(), err=str(e))
+                EMAIL_STAT.update(ok=False, at=time.time(), err=str(e), fp=_email_fp(mail.load()))
                 await note.edit_text(f"❌ {esc(str(e))}\n\nXem lại /email.", parse_mode=HTML)
             return
         if sub in ("inbox", "unread"):
@@ -4696,7 +4710,7 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
             note = await msg.reply_text("📬 Đang tải hộp thư…")
             rows = await asyncio.to_thread(mail.list_messages, limit, sub == "unread")
             EMAIL_LAST[chat_id] = [r["uid"] for r in rows]
-            EMAIL_STAT.update(ok=True, at=time.time(), err="")
+            EMAIL_STAT.update(ok=True, at=time.time(), err="", fp=_email_fp(mail.load()))
             if not rows:
                 await note.edit_text("📭 Không có thư nào.")
                 return
@@ -4817,6 +4831,9 @@ async def post_init(app) -> None:
     if CLOUD_ENABLED:
         try:
             await cloud_restore_secrets()          # phải xong trước khi nhận tin nhắn
+            local = await asyncio.to_thread(_local_secret_values)
+            if any(k not in SECRETS_CLOUD_KEYS for k in local):
+                await cloud_push_secrets()         # máy này có bí mật cloud chưa biết (vd. email)
         except Exception as e:
             log.warning("Khôi phục bí mật từ cloud: %s", oneline(str(e), 160))
         asyncio.create_task(cloud_restore_all())
