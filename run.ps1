@@ -1,4 +1,4 @@
-﻿#requires -version 5.1
+#requires -version 5.1
 <#
   AI STV — chạy bot Telegram trên Windows (PowerShell 5.1+ / PowerShell 7)
   Tương đương run.sh trên Linux/macOS.
@@ -17,6 +17,7 @@
 param([string]$Repo = "")
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $ProgressPreference = "SilentlyContinue"
 
@@ -27,6 +28,22 @@ $script:AppDir = ""
 function Say([string]$Message) { Write-Host "> $Message" -ForegroundColor Cyan }
 function Warn([string]$Message) { Write-Host "! $Message" -ForegroundColor Yellow }
 function Fail([string]$Message) { Write-Host "x $Message" -ForegroundColor Red; exit 1 }
+
+function Invoke-Native {
+    param([string]$Exe, [string[]]$Arguments)
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $lines = & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } catch {
+        $lines = @("$_")
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    [pscustomobject]@{ Code = $code; Output = (@($lines) -join [Environment]::NewLine) }
+}
 
 function Normalize-Repo([string]$Url) {
     $Url = ($Url -as [string]).Trim().TrimEnd("/")
@@ -65,8 +82,8 @@ function Initialize-Python {
         $pre = @()
         if ($cand.Count -gt 1) { $pre = $cand[1..($cand.Count - 1)] }
         try {
-            & $exe @pre -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
-            if ($LASTEXITCODE -eq 0) {
+            $probe = Invoke-Native $exe (@($pre) + @("-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"))
+            if ($probe.Code -eq 0) {
                 $script:PyExe = $exe
                 $script:PyPre = $pre
                 return (& $exe @pre -c "import platform; print(platform.python_version())").Trim()
@@ -123,12 +140,15 @@ if ($scriptDir -and (Test-Path -LiteralPath (Join-Path $scriptDir "aistv_bot.py"
     }
     if (Test-Path -LiteralPath (Join-Path $script:AppDir ".git")) {
         Say "Cập nhật mã nguồn trong $script:AppDir"
-        & git -C $script:AppDir pull --ff-only 2>$null
-        if ($LASTEXITCODE -ne 0) { Warn "Không cập nhật được (bỏ qua), dùng bản hiện có." }
+        $pull = Invoke-Native git @("-C", $script:AppDir, "pull", "--ff-only")
+        if ($pull.Code -ne 0) { Warn "Không cập nhật được (bỏ qua), dùng bản hiện có." }
     } else {
         Say "Tải mã nguồn từ $Repo"
-        & git clone --depth 1 --branch $Branch $Repo $script:AppDir
-        if ($LASTEXITCODE -ne 0) { Fail "Không clone được $Repo — kiểm tra URL repo / AISTV_REPO." }
+        $clone = Invoke-Native git @("clone", "--depth", "1", "--branch", $Branch, $Repo, $script:AppDir)
+        if ($clone.Code -ne 0) {
+            if ($clone.Output) { Write-Host $clone.Output -ForegroundColor DarkGray }
+            Fail "Không clone được $Repo — kiểm tra URL repo / AISTV_REPO."
+        }
     }
     if (-not (Test-Path -LiteralPath (Join-Path $script:AppDir "aistv_bot.py"))) {
         Fail "Repo thiếu aistv_bot.py."
@@ -216,10 +236,10 @@ if ($env:AISTV_VENV -ne "0" -and -not $env:VIRTUAL_ENV) {
     }
 }
 
-Invoke-Py "-m" "pip" "--version" *> $null
-if ($LASTEXITCODE -ne 0) {
+$pipCheck = Invoke-Native $script:PyExe (@($script:PyPre) + @("-m", "pip", "--version"))
+if ($pipCheck.Code -ne 0) {
     Say "Python thiếu pip — chạy ensurepip"
-    Invoke-Py "-m" "ensurepip" "--upgrade" *> $null
+    $null = Invoke-Native $script:PyExe (@($script:PyPre) + @("-m", "ensurepip", "--upgrade"))
 }
 
 Say "Cài thư viện Python"
@@ -230,8 +250,9 @@ if ($LASTEXITCODE -ne 0) {
     Fail "Cài thư viện thất bại.
   Thử tay: $script:PyExe -m pip install -r $requirements"
 }
-Invoke-Py "-c" "import telegram, nest_asyncio" 2>$null
-if ($LASTEXITCODE -ne 0) {
+$importCheck = Invoke-Native $script:PyExe (@($script:PyPre) + @("-c", "import telegram, nest_asyncio"))
+if ($importCheck.Code -ne 0) {
+    if ($importCheck.Output) { Write-Host $importCheck.Output -ForegroundColor DarkGray }
     Fail "Đã cài nhưng không import được python-telegram-bot / nest_asyncio."
 }
 Say "Thư viện Python OK"
