@@ -176,6 +176,26 @@ Muốn buộc script hỏi trong terminal: `AISTV_ASK_GEMINI=1 bash run.sh`.
 
 Trên Colab, nếu đã mount Drive (`/content/drive/MyDrive`), `run.sh` tự dùng `MyDrive/aistv/config.env` → token + key sống qua các phiên, không phải nhập lại. Đổi bằng `AISTV_CONFIG_DIR=/duong/dan/khac`.
 
+### Chạy 1 lệnh, không nhập gì (config trong repo private)
+
+**GitHub Actions secrets không dùng được** cho `bash <(curl ...)`: chúng chỉ tồn tại bên trong runner của Actions, script chạy trên VPS/Colab không đọc được.
+
+Cách chạy được: để `config.env` trong một **repo private**, cho `run.sh` tải về bằng PAT chỉ-đọc:
+
+```bash
+AISTV_CONFIG_REPO=Phucvncom55/AISTV-secrets \
+AISTV_CONFIG_TOKEN=github_pat_xxx \
+bash <(curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=8')
+```
+
+- Repo private đã có sẵn: **`Phucvncom55/AISTV-secrets`** (đang chứa `GEMINI_API_KEY`).
+- Thêm `TELEGRAM_BOT_TOKEN=...` vào `config.env` của repo đó (sửa trên web GitHub) là đủ để bot tự chạy.
+- PAT: *Settings → Developer settings → Fine-grained tokens* → chỉ chọn repo `AISTV-secrets`, quyền **Contents: Read-only**.
+- Lưu lệnh trên vào ghi chú/alias → các lần sau chạy là bot lên, không hỏi gì. Chỉ PAT nằm trong lệnh, không phải token bot.
+- Nếu để config ở nơi khác: `AISTV_ENV_URL=https://.../config.env` (tải trực tiếp, không cần token).
+
+Đổi lại: lệnh có chứa PAT. Ai đọc được lệnh thì đọc được đúng repo đó — nên đặt *Contents: Read-only* và chỉ chọn 1 repo.
+
 ### Chạy lại / VPS
 
 ```bash
@@ -323,6 +343,10 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `AISTV_PAIR_TIMEOUT` | `180` | Số giây chờ xác nhận chủ bot trước khi chạy tiếp |
 | `AISTV_PROMPT_TIMEOUT` | `180` | Số giây chờ nhập token/key (chống treo) |
 | `AISTV_ASK_GEMINI` | `0` | `1` = hỏi Gemini key trong terminal; mặc định không hỏi |
+| `AISTV_CONFIG_REPO` | trống | `user/repo` private chứa `config.env` để tự nạp |
+| `AISTV_CONFIG_TOKEN` | trống | PAT chỉ-đọc dùng để tải `config.env` từ repo private |
+| `AISTV_CONFIG_PATH` | `config.env` | Đường dẫn file cấu hình trong repo private |
+| `AISTV_ENV_URL` | trống | URL tải thẳng `config.env` (không cần token) |
 | `STV_HOME` | `~/stv_agent` (`%USERPROFILE%\stv_agent`) | Nơi lưu `workspace/`, `sessions/`, `archive/` |
 | `OPENCODE_BIN` | tự tìm | Đường dẫn `opencode` |
 | `AISTV_CLEAN_INSTALL` | `1` | `0` = không xoá & cài lại OpenCode mỗi lần chạy |
