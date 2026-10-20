@@ -32,7 +32,7 @@ KIẾN TRÚC (học theo OpenClaw)
 # ════════════════════════════════════════════════════════════════════
 # 0. CẤU HÌNH — chỉnh ở đây
 # ════════════════════════════════════════════════════════════════════
-import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib
+import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib, importlib.util
 import secrets, threading, textwrap, urllib.request, urllib.parse, urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -208,10 +208,9 @@ def _install_opencode_windows() -> Optional[str]:
 
 def setup_environment() -> None:
     print("⏳ [1/3] Kiểm tra thư viện Python (python-telegram-bot, nest_asyncio)...")
-    try:
-        __import__("telegram")
-        __import__("nest_asyncio")
-    except ImportError:
+    missing = [name for name in ("telegram", "nest_asyncio")
+               if importlib.util.find_spec(name) is None]
+    if missing:
         try:
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-U",
                             "python-telegram-bot", "nest_asyncio"], check=True)
@@ -244,6 +243,20 @@ if os.getenv("STV_SKIP_SETUP") != "1":
 
 import nest_asyncio
 nest_asyncio.apply()
+
+# --- Tương thích Python 3.14 + nest_asyncio ---------------------------------
+# nest_asyncio 1.6.0 đổi asyncio.Task sang bản Python thuần, nhưng từ Python
+# 3.14 asyncio.current_task/all_tasks vẫn là bản C nên không thấy các task đó
+# (current_task() trả về None). anyio/httpx dùng current_task() để lấy task
+# hiện tại, nên sẽ nổ: "cannot create weak reference to 'NoneType' object".
+# Trỏ lại về bản Python thuần để mọi thứ hoạt động với nest_asyncio.
+if sys.version_info >= (3, 14):
+    _py_current_task = getattr(asyncio.tasks, "_py_current_task", None)
+    _py_all_tasks = getattr(asyncio.tasks, "_py_all_tasks", None)
+    if _py_current_task is not None:
+        asyncio.current_task = asyncio.tasks.current_task = _py_current_task
+    if _py_all_tasks is not None:
+        asyncio.all_tasks = asyncio.tasks.all_tasks = _py_all_tasks
 
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
                       BotCommand, LinkPreviewOptions)
