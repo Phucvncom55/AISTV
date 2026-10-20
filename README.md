@@ -190,6 +190,11 @@ bash <(curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/boot
 
 - Repo private đã có sẵn: **`Phucvncom55/AISTV-secrets`** (đang chứa `GEMINI_API_KEY`).
 - Thêm `TELEGRAM_BOT_TOKEN=...` vào `config.env` của repo đó (sửa trên web GitHub) là đủ để bot tự chạy.
+- **Máy đã đăng nhập `gh` thì không cần PAT**: `run.sh` tự dùng `gh auth token` để tải repo private. Lệnh chỉ còn:
+  ```bash
+  bash <(curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9')
+  ```
+  (`AISTV_CONFIG_REPO=0` để tắt việc tự tải.)
 - PAT: *Settings → Developer settings → Fine-grained tokens* → chỉ chọn repo `AISTV-secrets`, quyền **Contents: Read-only**.
 - Lưu lệnh trên vào ghi chú/alias → các lần sau chạy là bot lên, không hỏi gì. Chỉ PAT nằm trong lệnh, không phải token bot.
 - Nếu để config ở nơi khác: `AISTV_ENV_URL=https://.../config.env` (tải trực tiếp, không cần token).
@@ -343,8 +348,8 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `AISTV_PAIR_TIMEOUT` | `180` | Số giây chờ xác nhận chủ bot trước khi chạy tiếp |
 | `AISTV_PROMPT_TIMEOUT` | `180` | Số giây chờ nhập token/key (chống treo) |
 | `AISTV_ASK_GEMINI` | `0` | `1` = hỏi Gemini key trong terminal; mặc định không hỏi |
-| `AISTV_CONFIG_REPO` | trống | `user/repo` private chứa `config.env` để tự nạp |
-| `AISTV_CONFIG_TOKEN` | trống | PAT chỉ-đọc dùng để tải `config.env` từ repo private |
+| `AISTV_CONFIG_REPO` | `Phucvncom55/AISTV-secrets` | `user/repo` private chứa `config.env`; `0` = tắt |
+| `AISTV_CONFIG_TOKEN` | tự lấy từ `gh` | PAT chỉ-đọc để tải `config.env` từ repo private |
 | `AISTV_CONFIG_PATH` | `config.env` | Đường dẫn file cấu hình trong repo private |
 | `AISTV_ENV_URL` | trống | URL tải thẳng `config.env` (không cần token) |
 | `STV_HOME` | `~/stv_agent` (`%USERPROFILE%\stv_agent`) | Nơi lưu `workspace/`, `sessions/`, `archive/` |
