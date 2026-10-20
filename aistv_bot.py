@@ -4594,13 +4594,30 @@ def _email_fp(cfg: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _clean_app_password(parts) -> str:
+    """Gmail hiển thị App Password dạng 'abcd efgh ijkl mnop' — bỏ hết khoảng trắng.
+
+    Nếu không gộp, lệnh /email setup chỉ lấy được 4 ký tự đầu (bug cũ).
+    """
+    return re.sub(r"\s+", "", " ".join(parts or []))
+
+
+def _email_pw_label(cfg: dict) -> str:
+    pw = cfg.get("password") or ""
+    if not pw:
+        return "⚠️ thiếu"
+    if cfg.get("domain") in ("gmail.com", "googlemail.com") and len(pw) != 16:
+        return f"⚠️ đã đặt nhưng chỉ {len(pw)} ký tự (Gmail cần đủ 16)"
+    return "đã đặt"
+
+
 def build_email() -> str:
     if not mail:
         return "⚠️ Bản bot này thiếu <code>aistv_email.py</code> nên chưa dùng được email."
     cfg = mail.load(force=True)
     if not cfg.get("address"):
         return mail.HELP
-    pw = "đã đặt" if cfg.get("password") else "⚠️ thiếu"
+    pw = _email_pw_label(cfg)
     fp = _email_fp(cfg)
     if EMAIL_STAT.get("fp") and EMAIL_STAT["fp"] != fp:
         EMAIL_STAT.update(ok=None, at=0.0, err="", fp="")   # cấu hình đã đổi → bỏ kết quả cũ
@@ -4662,7 +4679,7 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Nên dùng <b>App Password</b> 16 ký tự. Bot sẽ xoá tin nhắn chứa mật khẩu.",
                     parse_mode=HTML)
                 return
-            cfg = mail.save(args[1], args[2])
+            cfg = mail.save(args[1], _clean_app_password(args[2:]))
             EMAIL_STAT.update(ok=None, at=0.0, err="", fp="")   # cấu hình mới → chưa kiểm tra
             if CLOUD_ENABLED:
                 asyncio.create_task(cloud_push_secrets())
@@ -4672,6 +4689,11 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             note = (f"✅ Đã lưu email <code>{esc(cfg['address'])}</code>.\n"
                     "Thử ngay: /email test")
+            if cfg.get("domain") in ("gmail.com", "googlemail.com") and len(cfg.get("password") or "") != 16:
+                note += ("\n⚠️ App Password Gmail phải đủ <b>16 ký tự</b> — bạn vừa nhập "
+                         f"{len(cfg.get('password') or '')}. Tạo tại "
+                         "myaccount.google.com/apppasswords rồi dán cả 16 ký tự "
+                         "(có khoảng trắng cũng được).")
             if mail.get_secret("AISTV_EMAIL_ADDRESS") or mail.get_secret("AISTV_EMAIL_PASSWORD"):
                 note += ("\n⚠️ Biến môi trường/Colab Secrets đang ghi đè cấu hình này — "
                          "xoá secret nếu muốn dùng bản vừa lưu.")
