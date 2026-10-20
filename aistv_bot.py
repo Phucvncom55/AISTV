@@ -2934,6 +2934,78 @@ async def cmd_deny(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"🚫 Đã thu hồi quyền của {uid}.")
 
 
+_KEY_ALIASES = {
+    "gemini": "GEMINI_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "jina": "JINA_API_KEY",
+}
+
+
+def _mask_secret(value: str) -> str:
+    value = (value or "").strip()
+    return f"{value[:4]}…{value[-3:]}" if len(value) > 8 else "…"
+
+
+@guard(owner_only=True)
+async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xem / đặt API key ngay trong chat — không cần mở terminal."""
+    global GEMINI_READY
+    msg = update.effective_message
+    args = list(context.args or [])
+
+    if not args:
+        lines = ["🔑 <b>API key đang dùng</b>"]
+        for name in dict.fromkeys(_KEY_ALIASES.values()):
+            value = get_secret(name)
+            state = f"✅ {esc(_mask_secret(value))}" if value else "— chưa có"
+            lines.append(f"• <code>{name}</code>: {state}")
+        lines.append("\nĐặt: <code>/key gemini &lt;key&gt;</code> (tin nhắn chứa key sẽ bị xoá ngay).")
+        await msg.reply_text("\n".join(lines), parse_mode="HTML")
+        return
+
+    alias = args[0].lower().lstrip("-")
+    name = _KEY_ALIASES.get(alias) or (args[0].upper() if args[0].upper() in _KEY_ALIASES.values() else "")
+    if not name:
+        await msg.reply_text(
+            "Dùng: <code>/key gemini|groq|openai|jina &lt;giá trị&gt;</code>\n"
+            "Xem trạng thái: <code>/key</code>", parse_mode="HTML")
+        return
+
+    value = " ".join(args[1:]).strip().strip("\"'")
+    if not value:
+        await msg.reply_text(f"Dùng: <code>/key {alias} &lt;giá trị&gt;</code>", parse_mode="HTML")
+        return
+
+    try:
+        path = save_env_var(name, value)
+    except Exception as e:
+        await msg.reply_text(f"❌ Không lưu được: {esc(oneline(str(e), 200))}", parse_mode="HTML")
+        return
+
+    os.environ[name] = value
+    if name == "GEMINI_API_KEY":
+        GEMINI_READY = True
+
+    # Xoá tin nhắn gốc để key không nằm lại trong lịch sử chat.
+    gone = False
+    try:
+        await msg.delete()
+        gone = True
+    except Exception:
+        pass
+
+    note = ("\n🗑 Đã xoá tin nhắn chứa key." if gone
+            else "\n⚠️ Không xoá được tin nhắn của bạn — nên tự xoá để tránh lộ key.")
+    await update.effective_chat.send_message(
+        f"✅ Đã lưu <code>{name}</code> = <code>{esc(_mask_secret(value))}</code>\n"
+        f"<i>{esc(str(path))}</i>{note}\n"
+        + ("Dùng ngay: gửi ảnh hoặc <code>/image &lt;đường dẫn&gt;</code>."
+           if name == "GEMINI_API_KEY" else "Đã áp dụng cho phiên này."),
+        parse_mode="HTML")
+
+
 @guard()
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
@@ -4386,6 +4458,7 @@ COMMANDS = [
     ("summary", "Tóm tắt hội thoại vào trí nhớ"), ("email", "Đọc / gửi email"),
     ("github", "Kết nối / quản lý GitHub"), ("update", "Cập nhật bot từ GitHub"),
     ("restart", "Khởi động lại bot"),
+    ("key", "Xem / đặt API key"),
     ("files", "File trong workspace"), ("get", "Tải file về"), ("help", "Hướng dẫn"),
 ]
 
@@ -4486,7 +4559,8 @@ def main() -> None:
                       (["image", "vision", "anh"], cmd_image), (["video"], cmd_video),
                       (["summary", "summarize"], cmd_summary), (["email", "mail"], cmd_email),
                       (["github"], cmd_github), (["update"], cmd_update), (["restart"], cmd_restart),
-                      (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny)]:
+                      (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny),
+                      (["key", "keys"], cmd_key)]:
         app.add_handler(CommandHandler(names, fn))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.PHOTO & filters.UpdateType.MESSAGE, handle_photo))

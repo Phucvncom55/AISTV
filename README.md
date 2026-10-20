@@ -157,6 +157,25 @@ AISTV_PAIR=0 bash run.sh                  # bỏ qua, người nhắn đầu ti�
 
 Hết thời gian chờ → bot vẫn khởi động bình thường (không treo ở bước này).
 
+### Gemini key: không bắt nhập khi chạy
+
+Gemini là **tuỳ chọn** — thiếu key thì bot vẫn chạy, chỉ mất phần đọc ảnh/xem video không phụ đề. `run.sh` **không hỏi** key nữa; có 3 cách thêm:
+
+```bash
+# 1. Ngay trong chat Telegram (nhanh nhất, tin nhắn chứa key tự bị xoá)
+/key gemini AIza...
+
+# 2. Một dòng lệnh trên máy chủ
+echo 'GEMINI_API_KEY=AIza...' >> ~/.config/aistv/config.env
+
+# 3. Truyền lúc chạy — script tự lưu lại
+GEMINI_API_KEY=AIza... bash run.sh
+```
+
+Muốn buộc script hỏi trong terminal: `AISTV_ASK_GEMINI=1 bash run.sh`.
+
+Trên Colab, nếu đã mount Drive (`/content/drive/MyDrive`), `run.sh` tự dùng `MyDrive/aistv/config.env` → token + key sống qua các phiên, không phải nhập lại. Đổi bằng `AISTV_CONFIG_DIR=/duong/dan/khac`.
+
 ### Chạy lại / VPS
 
 ```bash
@@ -189,6 +208,7 @@ cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
 | `/skills` `/skill <tên> <yêu cầu>` | Kỹ năng chuyên biệt |
 | `/files` `/get <đường dẫn>` | Liệt kê / tải file agent tạo |
 | `/allow <id>` `/deny <id>` | Cấp / thu hồi quyền (chủ bot) |
+| `/key [gemini\|groq\|openai\|jina] [giá trị]` | Xem / đặt API key ngay trong chat (chủ bot); tin nhắn chứa key tự xoá |
 
 **Chủ động & trí nhớ**
 
@@ -302,6 +322,7 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `AISTV_PAIR` | `1` | `0` = bỏ bước chờ bấm Start xác nhận chủ bot |
 | `AISTV_PAIR_TIMEOUT` | `180` | Số giây chờ xác nhận chủ bot trước khi chạy tiếp |
 | `AISTV_PROMPT_TIMEOUT` | `180` | Số giây chờ nhập token/key (chống treo) |
+| `AISTV_ASK_GEMINI` | `0` | `1` = hỏi Gemini key trong terminal; mặc định không hỏi |
 | `STV_HOME` | `~/stv_agent` (`%USERPROFILE%\stv_agent`) | Nơi lưu `workspace/`, `sessions/`, `archive/` |
 | `OPENCODE_BIN` | tự tìm | Đường dẫn `opencode` |
 | `AISTV_CLEAN_INSTALL` | `1` | `0` = không xoá & cài lại OpenCode mỗi lần chạy |
