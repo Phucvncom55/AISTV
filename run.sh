@@ -100,8 +100,8 @@ _load_env_file() {
 # AISTV_CONFIG_REPO=user/repo [+ AISTV_CONFIG_TOKEN=...]  → repo private
 # Nhờ vậy một lệnh duy nhất có thể tự lấy token/key, không hỏi gì.
 _fetch_config() {
-  local url="$1" label="$2"
-  shift 2
+  local url="$1" label="$2" quiet="${3:-0}"
+  shift 3
   mkdir -p "$CONFIG_DIR" 2>/dev/null || true
   if curl -fsSL --max-time 25 "$@" "$url" -o "$CONFIG_FILE.tmp" 2>/dev/null \
      && [[ -s "$CONFIG_FILE.tmp" ]] && grep -q '=' "$CONFIG_FILE.tmp" 2>/dev/null; then
@@ -110,19 +110,29 @@ _fetch_config() {
     say "Đã nạp cấu hình từ $label."
   else
     rm -f "$CONFIG_FILE.tmp" 2>/dev/null || true
-    say "Không nạp được cấu hình từ $label — dùng cấu hình sẵn có."
+    [[ "$quiet" == "1" ]] || say "Không nạp được cấu hình từ $label — dùng cấu hình sẵn có."
   fi
 }
 
-if [[ -n "${AISTV_CONFIG_REPO:-}" ]]; then
+# Mặc định lấy config từ repo private của chủ bot, nếu máy đã đăng nhập gh
+# thì dùng luôn token của gh — không cần PAT, không cần nhập gì.
+# Tắt bằng: AISTV_CONFIG_REPO=0 bash run.sh
+CONFIG_REPO="${AISTV_CONFIG_REPO-Phucvncom55/AISTV-secrets}"
+CONFIG_TOKEN="${AISTV_CONFIG_TOKEN:-}"
+if [[ -z "$CONFIG_TOKEN" ]] && command -v gh >/dev/null 2>&1; then
+  CONFIG_TOKEN="$(gh auth token 2>/dev/null || true)"
+fi
+if [[ -n "$CONFIG_REPO" && "$CONFIG_REPO" != "0" && "$CONFIG_REPO" != "off" ]]; then
   _hdr=(-H "Accept: application/vnd.github.raw")
-  [[ -n "${AISTV_CONFIG_TOKEN:-}" ]] && _hdr+=(-H "Authorization: Bearer ${AISTV_CONFIG_TOKEN}")
+  [[ -n "$CONFIG_TOKEN" ]] && _hdr+=(-H "Authorization: Bearer ${CONFIG_TOKEN}")
+  _quiet=0
+  [[ -z "${AISTV_CONFIG_REPO:-}" ]] && _quiet=1
   _fetch_config \
-    "https://api.github.com/repos/${AISTV_CONFIG_REPO}/contents/${AISTV_CONFIG_PATH:-config.env}" \
-    "repo ${AISTV_CONFIG_REPO}" "${_hdr[@]}"
-  unset _hdr
+    "https://api.github.com/repos/${CONFIG_REPO}/contents/${AISTV_CONFIG_PATH:-config.env}" \
+    "repo ${CONFIG_REPO}" "$_quiet" "${_hdr[@]}"
+  unset _hdr _quiet
 elif [[ -n "${AISTV_ENV_URL:-}" ]]; then
-  _fetch_config "$AISTV_ENV_URL" "AISTV_ENV_URL"
+  _fetch_config "$AISTV_ENV_URL" "AISTV_ENV_URL" 0
 fi
 
 _load_env_file "$CONFIG_FILE"
