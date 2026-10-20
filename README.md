@@ -1,13 +1,13 @@
 # AI STV — Bot Telegram × OpenCode
 
-Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube, Facebook, TikTok, xem video bằng hình ảnh + âm thanh, đọc tài liệu GitHub** (tìm, đọc nội dung, tải video).
+Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube, Facebook, TikTok, xem video + đọc ảnh bằng Gemini, đọc tài liệu GitHub** (tìm, đọc nội dung, tải video).
 
 Chạy được trên **Colab, VPS, Linux/macOS và Windows (cmd/PowerShell)** — chỉ cần Python 3.10+ và mạng.
 
 ## ⚡ 3 bước
 
 1. `bash push.sh` → quét repo của tài khoản GitHub, cho **chọn repo có sẵn** hoặc tạo mới, rồi push.
-2. Thêm `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`) vào 🔑 Secrets của Colab.
+2. Thêm `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`) vào 🔑 Secrets của Colab. Muốn bot đọc ảnh/video bằng Gemini thì thêm `GEMINI_API_KEY` (lấy tại [AI Studio](https://aistudio.google.com/apikey)).
 3. Dán lệnh này vào ô Colab:
 
 ```python
@@ -117,6 +117,21 @@ Dữ liệu vẫn ở `%USERPROFILE%\stv_agent` (đổi bằng `STV_HOME`).
 > OpenCode khuyến nghị WSL2 để đầy đủ tính năng; bản Windows native (cmd/PowerShell) vẫn chạy được.
 > Nếu dùng WSL thì làm theo hướng dẫn Linux ở trên.
 
+### Token bot: nhập một lần, không hỏi lại
+
+Tạo file `.env` **cùng thư mục với `aistv_bot.py`** (file này đã nằm trong `.gitignore`, không bị push):
+
+```dotenv
+TELEGRAM_BOT_TOKEN=123456:ABC...
+ALLOWED_USER_IDS=123456789
+GEMINI_API_KEY=AIza...
+```
+
+- `run.sh`, `run.bat` và cả `python aistv_bot.py` đều tự đọc `.env` (không cần `export`).
+- Nếu chạy `run.sh`/`run.bat` mà chưa có token, lần đầu script hỏi rồi **tự ghi vào `.env`**.
+- Trên Colab: dùng 🔑 **Secrets** (`TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`) và bật *Notebook access* — Colab không có terminal để nhập tay.
+- Muốn đổi token: sửa trực tiếp dòng `TELEGRAM_BOT_TOKEN=` trong `.env` rồi khởi động lại bot.
+
 ### Chạy lại / VPS
 
 ```bash
@@ -186,10 +201,18 @@ python3 /root/AISTV/aistv_youtube.py transcript "URL" --timestamps
 
 Lấy tiêu đề, kênh, thời lượng, lượt xem, mô tả, chương và phụ đề (ưu tiên tiếng Việt, fallback tiếng Anh). Chỉ tải metadata + phụ đề, không tải video.
 
-**Watch (xem video bằng hình ảnh + âm thanh):** agent tự dùng khi bạn gửi link hoặc file video và hỏi nội dung. Có thể gọi trực tiếp:
+**Gemini — mắt + tai cho ảnh/video (miễn phí):** thêm `GEMINI_API_KEY` vào `.env` hoặc Colab Secrets. Bot dùng **Gemini 3 Flash (preview)** mặc định, tự chuyển sang **Gemini 2.5 Flash** / `gemini-3.5-flash-lite` nếu model chính chưa mở hoặc hết hạn mức. Hạn mức miễn phí tham khảo: **10 RPM, 1500 RPD**; bot tự giữ nhịp và báo khi chạm giới hạn, không treo.
 
 ```bash
 python3 /root/AISTV/aistv_watch.py doctor
+python3 /root/AISTV/aistv_watch.py doctor --json
+```
+
+Gửi **ảnh** cho bot kèm câu hỏi → Gemini mô tả, đọc chữ (OCR), phân tích chi tiết; gửi **video** hoặc link YouTube → Gemini xem cả hình ảnh + âm thanh và trả lời kèm mốc thời gian. Có thể gọi trực tiếp:
+
+```bash
+python3 /root/AISTV/aistv_watch.py image "inbox/anh.jpg" --question "Ảnh này có gì?"
+python3 /root/AISTV/aistv_watch.py image "https://.../anh.png" --question "Đọc chữ trong ảnh"
 python3 /root/AISTV/aistv_watch.py info "URL"
 python3 /root/AISTV/aistv_watch.py watch "URL" --question "Tóm tắt video" --detail balanced
 python3 /root/AISTV/aistv_watch.py watch "inbox/video.mp4" --question "..." --detail balanced
@@ -197,7 +220,9 @@ python3 /root/AISTV/aistv_watch.py transcript "URL" --timestamps
 python3 /root/AISTV/aistv_watch.py frames "URL" --max-frames 24 --at "1:23,4:56"
 ```
 
-Tải video, lấy phụ đề (hoặc Whisper dự phòng), cắt frames theo cảnh/mốc thời gian rồi tạo `report.md` + `report.json` để agent đọc. Có `GEMINI_API_KEY` thì Gemini xem toàn bộ video (hình ảnh + âm thanh) và trả lời kèm mốc thời gian; không có key thì agent đọc từng frame bằng công cụ Read và kết hợp transcript. `--start/--end` giới hạn đoạn, `--resolution 1024` để đọc chữ, `--ocr` cho video quay màn hình. Video riêng tư cần `--cookies`; không tải video/audio lên chat.
+Hoặc dùng lệnh trong chat: `/image <url|đường dẫn> [câu hỏi]` và `/video <url|đường dẫn> [câu hỏi]`.
+
+**Watch (xem video bằng hình ảnh + âm thanh):** agent tự dùng khi bạn gửi link hoặc file video và hỏi nội dung. Tải video, lấy phụ đề (hoặc Whisper dự phòng), cắt frames theo cảnh/mốc thời gian rồi tạo `report.md` + `report.json` để agent đọc. Có `GEMINI_API_KEY` thì Gemini xem toàn bộ video (hình ảnh + âm thanh) và trả lời kèm mốc thời gian; không có key thì agent đọc từng frame bằng công cụ Read và kết hợp transcript. `--start/--end` giới hạn đoạn, `--resolution 1024` để đọc chữ, `--ocr` cho video quay màn hình. Video riêng tư cần `--cookies`; không tải video/audio lên chat.
 
 **Facebook (bài công khai / video / reel):** agent tự dùng khi bạn gửi link Facebook hoặc nhờ tìm. Có thể gọi trực tiếp:
 
@@ -269,9 +294,15 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `AISTV_PROGRESS_LINES` | `14` | Số dòng cuộn trong khung tiến độ (dòng cũ rơi khỏi đỉnh) |
 | `FB_COOKIES` | trống | File cookie Facebook cho nội dung cần đăng nhập |
 | `TIKTOK_COOKIES` | trống | File cookie TikTok cho video riêng tư/giới hạn vùng |
-| `GEMINI_API_KEY` | trống | Gemini xem toàn bộ video (AI Studio, miễn phí) |
+| `GEMINI_API_KEY` | trống | Gemini đọc ảnh + xem video (AI Studio, miễn phí) |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | trống | Transcript dự phòng cho video không có phụ đề |
-| `WATCH_GEMINI_MODEL` | `gemini-3.7-flash` | Model Gemini dùng cho watch |
+| `WATCH_GEMINI_MODEL` | `gemini-3-flash-preview` | Model Gemini chính (`gemini-2.5-flash` nếu tài khoản chưa mở 3 Flash) |
+| `WATCH_GEMINI_FALLBACKS` | `gemini-2.5-flash,gemini-3.5-flash-lite` | Model dự phòng khi model chính lỗi/hết hạn mức |
+| `GEMINI_RPM` / `GEMINI_RPD` | `10` / `1500` | Tự giữ nhịp request/phút và request/ngày |
+| `GEMINI_MAX_RETRIES` | `2` | Số lần thử lại khi Gemini trả 429 |
+| `GEMINI_QUOTA_DISABLE` | `0` | `1` = tắt theo dõi hạn mức cục bộ |
+| `WATCH_MAX_IMAGE_MB` | `50` | Giới hạn ảnh tải từ URL |
+| `AISTV_IMAGE_TIMEOUT` / `AISTV_VIDEO_TIMEOUT` | `600` / `900` | Giới hạn thời gian đọc ảnh/video trong chat (giây) |
 | `WATCH_MAX_MB` | `600` | Giới hạn dung lượng video tải về |
 | `JINA_API_KEY` | trống | Tăng hạn mức đọc web khi tìm kiếm |
 | `AISTV_EMAIL_ADDRESS` | trống | Địa chỉ email nhận/gửi |
@@ -290,7 +321,7 @@ AISTV/
 ├── aistv_youtube.py  tìm video, thông tin, transcript YouTube
 ├── aistv_facebook.py đọc bài công khai, video/reel, tải video Facebook
 ├── aistv_tiktok.py   thông tin, tải video không watermark, tìm kiếm TikTok
-├── aistv_watch.py    xem video: transcript + frames + Gemini (tuỳ chọn)
+├── aistv_watch.py    đọc ảnh + xem video bằng Gemini, transcript + frames
 ├── aistv_github_docs.py  đọc README/docs, tìm trong tài liệu và mã GitHub
 ├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)

@@ -32,7 +32,7 @@ KIẾN TRÚC (học theo OpenClaw)
 # ════════════════════════════════════════════════════════════════════
 # 0. CẤU HÌNH — chỉnh ở đây
 # ════════════════════════════════════════════════════════════════════
-import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib, importlib.util
+import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib, importlib.util, mimetypes
 import secrets, threading, textwrap, urllib.request, urllib.parse, urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -42,6 +42,91 @@ from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 IS_WINDOWS = os.name == "nt"
+
+
+# ── .env: đọc ngay khi bot khởi động, để chạy `python aistv_bot.py` trực tiếp
+#    cũng không phải nhập token lại. Không ghi đè biến môi trường đã có.
+def _env_files():
+    override = os.getenv("AISTV_ENV_FILE", "").strip()
+    if override:
+        return [Path(override).expanduser()]       # file chỉ định: chỉ đọc file này
+    files = [
+        Path(__file__).resolve().parent / ".env",
+        Path.cwd() / ".env",
+        Path.home() / ".env",
+        Path(os.getenv("STV_HOME", "")) / ".env" if os.getenv("STV_HOME") else None,
+    ]
+    seen, result = set(), []
+    for path in files:
+        if path is None:
+            continue
+        try:
+            key = str(path.resolve())
+        except Exception:
+            key = str(path)
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def _load_dotenv():
+    for path in _env_files():
+        try:
+            if not path.is_file():
+                continue
+            for raw in path.read_text("utf-8", "replace").splitlines():
+                line = raw.strip()
+                if line.startswith("export "):
+                    line = line[7:].lstrip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                name = name.strip()
+                value = value.strip().strip("'\"")
+                if name and value and name not in os.environ:
+                    os.environ[name] = value
+        except Exception:
+            continue
+
+
+_load_dotenv()
+
+
+def save_env_var(name: str, value: str) -> Path:
+    """Lưu một biến vào .env (không in giá trị). Dùng khi người dùng nhập token lần đầu."""
+    path = Path(os.getenv("AISTV_ENV_FILE", "") or (Path(__file__).resolve().parent / ".env"))
+    path = path.expanduser()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = path.read_text("utf-8", "replace").splitlines() if path.is_file() else []
+        found = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("export "):
+                stripped = stripped[7:].lstrip()
+            if stripped.startswith(name + "="):
+                lines[i] = f"{name}={value}"
+                found = True
+                break
+        if not found:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append(f"{name}={value}")
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text("\n".join(lines).rstrip() + "\n", "utf-8")
+        tmp.replace(path)
+        try:
+            if not IS_WINDOWS:
+                path.chmod(0o600)
+        except Exception:
+            pass
+        os.environ[name] = value
+        return path
+    except Exception:
+        os.environ[name] = value
+        return path
+
 
 # Windows: console mặc định không phải UTF-8 (cp1252/cp437) → in tiếng Việt/emoji sẽ lỗi.
 if IS_WINDOWS:
@@ -306,6 +391,9 @@ WORKSPACE = HOME / "workspace"
 MEMORY_DIR = WORKSPACE / "memory"
 SKILLS_DIR = WORKSPACE / "skills"
 INBOX = WORKSPACE / "inbox"
+WATCH_CLI = Path(__file__).resolve().parent / "aistv_watch.py"
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp", ".gif", ".tif", ".tiff"}
+VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv", ".3gp"}
 SESSIONS = HOME / "sessions"
 ARCHIVE = HOME / "archive"
 SECRETS_DIR = HOME / ".secrets"
@@ -334,6 +422,7 @@ RUNNING: dict = {}                 # chat_id -> tiến trình OpenCode đang ch�
 CANCELLED: set = set()
 LOCKS = defaultdict(asyncio.Lock)  # mỗi chat xử lý tuần tự
 SEM = asyncio.Semaphore(MAX_PARALLEL)
+GEMINI_MEDIA_LOCK = asyncio.Lock()      # xếp hàng ảnh/video để không vượt 10 RPM
 
 BOT_OBJ = None                     # Application.bot (đặt trong post_init)
 BOT_LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -397,6 +486,17 @@ def get_secret(name: str) -> str:
 
 
 ENV_ALLOWED = [int(x) for x in re.findall(r"\d+", get_secret("ALLOWED_USER_IDS"))]
+# Colab Secrets không tự có trong môi trường tiến trình con → đưa key vào env
+# để aistv_watch.py (chạy bằng subprocess) cũng đọc được.
+for _key in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+    if not os.getenv(_key):
+        try:
+            _val = get_secret(_key)
+            if _val:
+                os.environ[_key] = _val
+        except Exception:
+            pass
+GEMINI_READY = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
 
 
 def owner_id() -> Optional[int]:
@@ -474,6 +574,7 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 11. `skills/` chứa quy trình chuyên biệt — làm đúng theo skill khi được kích hoạt.
 12. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
 13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`); đọc frames bằng công cụ Read rồi trả lời kèm mốc thời gian.
+14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh (mô tả + OCR chữ) rồi trả lời.
 """
 
 MEMORY_HEADER = "# MEMORY — Trí nhớ dài hạn\n"
@@ -573,6 +674,31 @@ def bootstrap_workspace() -> None:
             if not dst.exists():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
+    # Nâng cấp workspace cũ: thêm hướng dẫn đọc ảnh nếu bản cũ chưa có.
+    try:
+        watch_skill = SKILLS_DIR / "watch" / "SKILL.md"
+        if watch_skill.is_file():
+            old = watch_skill.read_text("utf-8")
+            if "aistv_watch.py image" not in old:
+                old = old.rstrip() + (
+                    "\n\n## Đọc ảnh (Gemini)\n"
+                    "- Gửi ảnh/URL ảnh: `python3 aistv_watch.py image <path|url> "
+                    "--question \"...\" --json`.\n"
+                    "- Script mô tả ảnh, OCR chữ và lưu report; trả lời tiếng Việt, không bịa.\n"
+                )
+                watch_skill.write_text(old, "utf-8")
+        agents = WORKSPACE / "AGENTS.md"
+        if agents.is_file():
+            old = agents.read_text("utf-8")
+            if "aistv_watch.py image" not in old:
+                old = old.rstrip() + (
+                    "\n13. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng "
+                    "`python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh "
+                    "(mô tả + OCR chữ) rồi trả lời.\n"
+                )
+                agents.write_text(old, "utf-8")
+    except Exception:
+        pass
     # Cấu hình OpenCode cho workspace (luôn ghi lại để công tắc FULL_ACCESS có hiệu lực)
     cfg = {"$schema": "https://opencode.ai/config.json"}
     if FULL_ACCESS:
@@ -2138,6 +2264,7 @@ def build_status(chat_id: int) -> str:
         f"• Chi tiết việc làm: {'bật' if STATE.get('show_activity', False) else 'tắt'}\n"
         f"• GitHub: {esc(gh)}\n"
         f"• Email: {esc(email_line())}\n"
+        f"• Gemini (ảnh/video): {'✅ sẵn sàng' if GEMINI_READY else '⚠️ thiếu GEMINI_API_KEY'}\n"
         f"• Giới hạn 1 yêu cầu: {to}\n"
         f"• Hội thoại: {len(load_history(chat_id)) // 2} lượt đã lưu\n"
         f"• Trí nhớ dài hạn: {len(memory_items())} mục"
@@ -2180,7 +2307,8 @@ def welcome_text() -> str:
         "• <b>Chủ động</b>: /remind hẹn giờ, /task tự chạy, /watch theo dõi repo &amp; log\n"
         "• <b>Email</b>: /email đọc &amp; gửi thư (IMAP/SMTP) ngay trong chat\n"
         "• Đọc file bạn gửi, tạo file và tự gửi lại cho bạn\n"
-        "• Xem video: gửi link/file + câu hỏi → tóm tắt kèm mốc thời gian\n"
+        "• <b>Gemini đọc ảnh</b>: gửi ảnh + câu hỏi → mô tả, OCR chữ, phân tích\n"
+        "• <b>Gemini xem video</b>: gửi link/file + câu hỏi → tóm tắt kèm mốc thời gian\n"
         "• <b>Không giới hạn 10 phút</b> — dự án lớn chạy tới khi xong (/stop để huỷ)\n"
         "• Kết nối GitHub 1 lần — /github login; tự cập nhật — /update\n\n"
         "Gửi câu hỏi hoặc yêu cầu để bắt đầu 👇"
@@ -2205,7 +2333,10 @@ HELP_TEXT = (
     "/watch git owner/repo — báo commit mới · /watch log &lt;file&gt; — báo lỗi mới\n"
     "/watch file &lt;đường dẫn&gt; — báo khi thay đổi · /watch del &lt;mã|all&gt;\n\n"
     "<b>File &amp; Video</b>\nGửi file cho bot → lưu vào <code>inbox/</code> để agent đọc\n/files — file trong workspace\n/get &lt;đường dẫn&gt; — tải file về\n"
-    "Gửi link/file video + câu hỏi → skill <code>watch</code> xem frames + transcript, trả lời kèm mốc thời gian\n\n"
+    "Gửi ảnh + câu hỏi → Gemini đọc ảnh, mô tả và chép chữ (OCR)\n"
+    "/image &lt;url|đường dẫn&gt; [câu hỏi] — đọc ảnh bằng Gemini\n"
+    "Gửi link/file video + câu hỏi → Gemini xem hình ảnh + âm thanh, trả lời kèm mốc thời gian\n"
+    "/video &lt;url|đường dẫn&gt; [câu hỏi] — xem video bằng Gemini\n\n"
     "<b>Reply / trích dẫn</b>\nTrả lời (reply) một tin nhắn rồi nhắn yêu cầu → agent hiểu “cái này/đoạn trên” là tin đó\n"
     "Bôi đen một phần rồi reply → agent ưu tiên đúng phần được trích dẫn\n"
     "Reply tin nhắn rồi gõ /remember → lưu chính tin đó vào trí nhớ\n\n"
@@ -2816,22 +2947,222 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await respond(msg, context, chat.id, text, quoted_msg=msg)
 
 
+def _redact_secrets(text: str) -> str:
+    text = str(text or "")
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "TELEGRAM_BOT_TOKEN"):
+        value = get_secret(name)
+        if value:
+            text = text.replace(value, "***")
+    text = re.sub(r"\bAIza[0-9A-Za-z_-]{20,}\b", "***", text)
+    text = re.sub(r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b", "***", text)
+    return text
+
+
+def _watch_cli(args: list, timeout: int = 900):
+    """Chạy aistv_watch.py bằng đúng Python của bot; trả về (code, stdout, stderr)."""
+    if not WATCH_CLI.is_file():
+        return 127, "", f"thiếu {WATCH_CLI.name}"
+    cmd = [sys.executable, str(WATCH_CLI)] + [str(x) for x in args]
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout, cwd=str(WORKSPACE), env=env)
+        return p.returncode, p.stdout or "", p.stderr or ""
+    except subprocess.TimeoutExpired:
+        return 124, "", f"quá thời gian chờ ({timeout}s)"
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def _resolve_media_source(source: str) -> str:
+    source = (source or "").strip().strip("<>")
+    if re.match(r"^https?://", source, re.I):
+        return source
+    path = Path(source).expanduser()
+    if path.is_file():
+        return str(path.resolve())
+    for base in (WORKSPACE, Path.cwd(), Path(__file__).resolve().parent):
+        candidate = base / source
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return str(path)
+
+
+async def gemini_media_reply(message, chat_id: int, source, question: str, kind: str) -> bool:
+    """Đọc ảnh/video bằng Gemini rồi trả lời trực tiếp (không qua OpenCode)."""
+    label = "ảnh" if kind == "image" else "video"
+    status = await message.reply_text(f"👁️ <i>Gemini đang đọc {label}…</i>", parse_mode=HTML)
+    if kind == "image":
+        cli_args = ["image", source, "--json"]
+        timeout = int(os.getenv("AISTV_IMAGE_TIMEOUT", "600"))
+    else:
+        cli_args = ["watch", source, "--engine", "gemini", "--detail", "balanced", "--json"]
+        timeout = int(os.getenv("AISTV_VIDEO_TIMEOUT", "900"))
+    if question:
+        cli_args += ["--question", question]
+    async with GEMINI_MEDIA_LOCK:
+        rc, out, err = await asyncio.to_thread(_watch_cli, cli_args, timeout)
+    if rc != 0:
+        lines = [x.strip() for x in (err or out or "").splitlines() if x.strip()]
+        detail = _redact_secrets(lines[-1] if lines else "lỗi không rõ")
+        try:
+            await status.edit_text(
+                f"⚠️ Gemini chưa đọc được {label}.\n<code>{esc(detail[:1800])}</code>",
+                parse_mode=HTML)
+        except Exception:
+            pass
+        return True
+    try:
+        data = json.loads(out)
+        gem = data.get("gemini") or {}
+        text = (gem.get("text") or "").strip()
+        model = (gem.get("model") or "Gemini").strip()
+    except Exception:
+        data, gem, text, model = {}, {}, "", "Gemini"
+    if not text:
+        lines = [x.strip() for x in (err or out or "").splitlines() if x.strip()]
+        detail = _redact_secrets(lines[-1] if lines else "không có nội dung trả về")
+        try:
+            await status.edit_text(f"⚠️ Gemini không trả lời.\n<code>{esc(detail[:1800])}</code>",
+                                   parse_mode=HTML)
+        except Exception:
+            pass
+        return True
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    footer = f"<i>👁️ {esc(model)}</i>"
+    try:
+        await send_rich(message, text, footer)
+    except Exception:
+        await message.reply_text(text[:3900])
+    stored_q = f"[{label}] {question}".strip()
+    append_history(chat_id, "user", stored_q)
+    append_history(chat_id, "assistant", text[:6000])
+    log_daily(stored_q, text)
+    return True
+
+
+async def _download_telegram_file(message, file_obj, name: str, mime: str = "") -> Optional[Path]:
+    if getattr(file_obj, "file_size", None) and file_obj.file_size > 20 * 1024 * 1024:
+        await message.reply_text("⚠️ File quá lớn (giới hạn 20MB của Telegram Bot API).")
+        return None
+    safe = re.sub(r"[^\w.\- ]", "_", name or f"file_{getattr(file_obj, 'file_unique_id', int(time.time()))}")
+    ext = Path(safe).suffix.lower()
+    if mime.startswith("image/") and ext not in IMAGE_EXTS:
+        safe += mimetypes.guess_extension(mime) or ".jpg"
+    elif mime.startswith("video/") and ext not in VIDEO_EXTS:
+        safe += ".mp4"
+    dest = INBOX / f"{int(time.time())}_{safe}"
+    await (await file_obj.get_file()).download_to_drive(dest)
+    return dest
+
+
+@guard()
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if update.effective_chat.type != "private" or not msg.photo:
+        return
+    photo = msg.photo[-1]
+    dest = await _download_telegram_file(msg, photo, f"photo_{photo.file_unique_id}.jpg", "image/jpeg")
+    if not dest:
+        return
+    caption = (msg.caption or "").strip()
+    if GEMINI_READY:
+        await gemini_media_reply(msg, update.effective_chat.id, str(dest), caption, "image")
+        return
+    prompt = caption or "Hãy cho tôi biết nội dung chính của ảnh này."
+    await respond(msg, context, update.effective_chat.id,
+                  f"{prompt}\n\n(Người dùng vừa gửi ảnh, đã lưu tại: inbox/{dest.name}. "
+                  "Chưa cấu hình GEMINI_API_KEY nên không đọc ảnh bằng Gemini.)",
+                  quoted_msg=msg)
+
+
+@guard()
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if update.effective_chat.type != "private":
+        return
+    media = msg.video or msg.video_note or msg.animation
+    if not media:
+        return
+    mime = getattr(media, "mime_type", "") or "video/mp4"
+    name = getattr(media, "file_name", "") or f"video_{getattr(media, 'file_unique_id', int(time.time()))}.mp4"
+    dest = await _download_telegram_file(msg, media, name, mime)
+    if not dest:
+        return
+    caption = (msg.caption or "").strip()
+    if GEMINI_READY:
+        await gemini_media_reply(msg, update.effective_chat.id, str(dest), caption, "video")
+        return
+    prompt = caption or "Hãy xem video này và tóm tắt nội dung chính kèm mốc thời gian."
+    await respond(msg, context, update.effective_chat.id,
+                  f"{prompt}\n\n(Người dùng vừa gửi video, đã lưu tại: inbox/{dest.name}. "
+                  "Dùng skill watch với aistv_watch.py để xem; chưa có GEMINI_API_KEY nên ưu tiên "
+                  "transcript + frames.)",
+                  quoted_msg=msg)
+
+
 @guard()
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if update.effective_chat.type != "private" or not msg.document:
         return
     doc = msg.document
-    if doc.file_size and doc.file_size > 20 * 1024 * 1024:
-        await msg.reply_text("⚠️ File quá lớn (giới hạn 20MB của Telegram Bot API).")
+    mime = (doc.mime_type or "").lower()
+    name = doc.file_name or f"file_{doc.file_unique_id}"
+    ext = Path(name).suffix.lower()
+    is_image = mime.startswith("image/") or ext in IMAGE_EXTS
+    is_video = mime.startswith("video/") or ext in VIDEO_EXTS
+    dest = await _download_telegram_file(msg, doc, name, mime)
+    if not dest:
         return
-    name = re.sub(r"[^\w.\- ]", "_", doc.file_name or f"file_{doc.file_unique_id}")
-    dest = INBOX / f"{int(time.time())}_{name}"
-    await (await doc.get_file()).download_to_drive(dest)
-    caption = (msg.caption or "").strip() or "Hãy đọc file này và tóm tắt nội dung chính."
+    caption = (msg.caption or "").strip()
+    if GEMINI_READY and is_image:
+        await gemini_media_reply(msg, update.effective_chat.id, str(dest), caption, "image")
+        return
+    if GEMINI_READY and is_video:
+        await gemini_media_reply(msg, update.effective_chat.id, str(dest), caption, "video")
+        return
+    prompt = caption or "Hãy đọc file này và tóm tắt nội dung chính."
     await respond(msg, context, update.effective_chat.id,
-                  f"{caption}\n\n(Người dùng vừa gửi file, đã lưu tại: inbox/{dest.name})",
+                  f"{prompt}\n\n(Người dùng vừa gửi file, đã lưu tại: inbox/{dest.name})",
                   quoted_msg=msg)
+
+
+async def _cmd_gemini_media(update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str):
+    msg = update.effective_message
+    args = list(context.args or [])
+    label = "ảnh" if kind == "image" else "video"
+    if not args:
+        example = ("/image inbox/anh.jpg mô tả ảnh này" if kind == "image"
+                   else "/video https://youtu.be/... tóm tắt video")
+        await msg.reply_text(f"Dùng: <code>{example}</code>", parse_mode=HTML)
+        return
+    if not GEMINI_READY:
+        await msg.reply_text(
+            "⚠️ Chưa có <code>GEMINI_API_KEY</code>.\n"
+            "Thêm vào <code>.env</code> (hoặc Colab Secrets) rồi khởi động lại bot:\n"
+            "<code>GEMINI_API_KEY=AIza...</code>", parse_mode=HTML)
+        return
+    source = _resolve_media_source(args[0])
+    question = " ".join(args[1:]).strip()
+    if not re.match(r"^https?://", source, re.I) and not Path(source).is_file():
+        await msg.reply_text(f"❌ Không tìm thấy {label}: <code>{esc(source)}</code>", parse_mode=HTML)
+        return
+    await gemini_media_reply(msg, update.effective_chat.id, source, question, kind)
+
+
+@guard()
+async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _cmd_gemini_media(update, context, "image")
+
+
+@guard()
+async def cmd_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _cmd_gemini_media(update, context, "video")
 
 
 async def _on_ask_button(q, data: str) -> None:
@@ -4035,6 +4366,7 @@ COMMANDS = [
     ("variant", "Mức reasoning của model"),
     ("remind", "Hẹn nhắc việc"), ("task", "Việc tự chạy theo lịch"), ("reminders", "Danh sách nhắc việc"),
     ("unremind", "Xoá nhắc việc"), ("watch", "Theo dõi repo/log"), ("cloud", "Trí nhớ đám mây"),
+    ("image", "Đọc ảnh bằng Gemini"), ("video", "Xem video bằng Gemini"),
     ("summary", "Tóm tắt hội thoại vào trí nhớ"), ("email", "Đọc / gửi email"),
     ("github", "Kết nối / quản lý GitHub"), ("update", "Cập nhật bot từ GitHub"),
     ("restart", "Khởi động lại bot"),
@@ -4045,9 +4377,24 @@ COMMANDS = [
 def get_token() -> str:
     tok = get_secret("TELEGRAM_BOT_TOKEN")
     if not tok:
-        tok = getpass.getpass("🔑 Dán Telegram Bot Token (lấy từ @BotFather): ").strip()
+        try:
+            tok = getpass.getpass("🔑 Dán Telegram Bot Token (lấy từ @BotFather): ").strip()
+        except (EOFError, OSError):
+            tok = ""
+        if tok:
+            try:
+                path = save_env_var("TELEGRAM_BOT_TOKEN", tok)
+                print(f"✅ Đã lưu token vào {path} — lần sau không cần nhập lại.")
+            except Exception:
+                pass
     if not tok:
-        raise SystemExit("❌ Thiếu TELEGRAM_BOT_TOKEN.")
+        raise SystemExit(
+            "❌ Thiếu TELEGRAM_BOT_TOKEN.\n"
+            "   • Cách nhanh: tạo file .env trong thư mục AISTV với dòng:\n"
+            "       TELEGRAM_BOT_TOKEN=123456:ABC...\n"
+            "   • Hoặc thêm TELEGRAM_BOT_TOKEN vào Colab Secrets (bật Notebook access).\n"
+            "   • Hoặc chạy run.bat / run.sh — script sẽ hỏi một lần rồi lưu vào .env."
+        )
     return tok
 
 
@@ -4120,11 +4467,16 @@ def main() -> None:
                       (["remind"], cmd_remind), (["task", "cron"], cmd_task),
                       (["reminders", "remindlist"], cmd_reminders), (["unremind"], cmd_unremind),
                       (["watch", "monitor"], cmd_watch), (["cloud"], cmd_cloud),
+                      (["image", "vision", "anh"], cmd_image), (["video"], cmd_video),
                       (["summary", "summarize"], cmd_summary), (["email", "mail"], cmd_email),
                       (["github"], cmd_github), (["update"], cmd_update), (["restart"], cmd_restart),
                       (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny)]:
         app.add_handler(CommandHandler(names, fn))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.UpdateType.MESSAGE, handle_photo))
+    app.add_handler(MessageHandler(
+        (filters.VIDEO | filters.VIDEO_NOTE | filters.ANIMATION) & filters.UpdateType.MESSAGE,
+        handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL & filters.UpdateType.MESSAGE, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.UpdateType.MESSAGE, handle_text))
     app.add_error_handler(on_error)
