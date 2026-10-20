@@ -71,6 +71,7 @@ cd "$APP_DIR"
 # Biến môi trường truyền vào (Colab Secrets, dòng lệnh) được ưu tiên hơn .env.
 _ENV_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 _ENV_IDS="${ALLOWED_USER_IDS:-}"
+_ENV_GEMINI="${GEMINI_API_KEY:-}"
 if [[ -f "$APP_DIR/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
@@ -79,9 +80,10 @@ if [[ -f "$APP_DIR/.env" ]]; then
 fi
 [[ -n "$_ENV_TOKEN" ]] && TELEGRAM_BOT_TOKEN="$_ENV_TOKEN" && export TELEGRAM_BOT_TOKEN
 [[ -n "$_ENV_IDS" ]]   && ALLOWED_USER_IDS="$_ENV_IDS"     && export ALLOWED_USER_IDS
-unset _ENV_TOKEN _ENV_IDS
+[[ -n "$_ENV_GEMINI" ]] && GEMINI_API_KEY="$_ENV_GEMINI"   && export GEMINI_API_KEY
+unset _ENV_TOKEN _ENV_IDS _ENV_GEMINI
 
-if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${ALLOWED_USER_IDS:-}" ]]; then
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${ALLOWED_USER_IDS:-}" || -z "${GEMINI_API_KEY:-}" ]]; then
   _sec() { "$PY" -c "from google.colab import userdata; print(userdata.get('$1') or '', end='')" 2>/dev/null || true; }
   if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
     _tok="$(_sec TELEGRAM_BOT_TOKEN)"
@@ -97,6 +99,14 @@ if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${ALLOWED_USER_IDS:-}" ]]; then
       ALLOWED_USER_IDS="$_ids"
       export ALLOWED_USER_IDS
       say "Đã lấy ALLOWED_USER_IDS từ Colab Secrets."
+    fi
+  fi
+  if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+    _gk="$(_sec GEMINI_API_KEY)"
+    if [[ -n "$_gk" ]]; then
+      GEMINI_API_KEY="$_gk"
+      export GEMINI_API_KEY
+      say "Đã lấy GEMINI_API_KEY từ Colab Secrets."
     fi
   fi
 fi
