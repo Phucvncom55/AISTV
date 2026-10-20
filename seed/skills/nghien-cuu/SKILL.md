@@ -1,3 +1,7 @@
+---
+name: nghien-cuu
+description: Nghiên cứu một chủ đề có hệ thống — làm rõ câu hỏi, thu thập nguồn, đối chiếu và tổng hợp.
+---
 # nghien-cuu
 Nghiên cứu một chủ đề có hệ thống.
 

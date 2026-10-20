@@ -1,3 +1,7 @@
+---
+name: tiktok
+description: Xem thông tin, tải video không watermark, tách âm thanh và tìm video TikTok — gồm cả link TikTok Lite.
+---
 # tiktok
 Xem thông tin, tải video không watermark, tách âm thanh và tìm video TikTok — gồm cả link TikTok Lite.
 
