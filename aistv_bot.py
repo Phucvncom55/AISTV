@@ -8,7 +8,10 @@ CÁCH DÙNG
   • Chạy 1 lệnh từ GitHub (repo public):
       bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/run.sh)
   • Trong repo đã clone:
-      bash run.sh
+      bash run.sh                    (Linux / macOS / Colab)
+      run.bat                        (Windows — cmd hoặc PowerShell)
+  • Windows, chưa clone:
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.ps1 | iex"
   • Trên Colab: dán TOÀN BỘ file này vào MỘT ô code → Run (tự cài đặt),
     hoặc thêm secret TELEGRAM_BOT_TOKEN rồi chạy lệnh run.sh ở trên.
   • Token: đặt TELEGRAM_BOT_TOKEN (env / Colab Secrets / .env). Nếu thiếu, bot sẽ hỏi.
@@ -30,13 +33,23 @@ KIẾN TRÚC (học theo OpenClaw)
 # 0. CẤU HÌNH — chỉnh ở đây
 # ════════════════════════════════════════════════════════════════════
 import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib
-import secrets, shlex, threading, textwrap, urllib.request, urllib.parse, urllib.error
+import secrets, threading, textwrap, urllib.request, urllib.parse, urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from typing import Optional
+
+IS_WINDOWS = os.name == "nt"
+
+# Windows: console mặc định không phải UTF-8 (cp1252/cp437) → in tiếng Việt/emoji sẽ lỗi.
+if IS_WINDOWS:
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 try:
     import aistv_email as mail
@@ -58,7 +71,7 @@ ASK_TIMEOUT = int(os.getenv("AISTV_ASK_TIMEOUT", "0") or 0)
                                 # 0 = agent chờ người dùng trả lời không giới hạn
 GH_CLIENT_ID = os.getenv("AISTV_GH_CLIENT_ID", "178c6fc778ccc68e1d6a")   # GitHub CLI (public client)
 GH_SCOPES = os.getenv("AISTV_GH_SCOPES", "repo workflow read:user")
-MAX_PROMPT_BYTES = 110_000      # giới hạn an toàn cho 1 tham số dòng lệnh Linux (128KB)
+MAX_PROMPT_BYTES = 28_000 if IS_WINDOWS else 110_000   # Windows giới hạn dòng lệnh 32K ký tự
 SPLIT_LIMIT = 3000              # ký tự tối đa mỗi tin nhắn Telegram (trước khi đổi sang HTML)
 PROGRESS_DETAIL = 500           # ký tự tối đa cho mỗi đoạn chi tiết (lệnh, code, output) trong tin nhắn tiến độ
 PROGRESS_KEEP = 6               # số việc gần nhất hiển thị trong tin nhắn tiến độ
@@ -91,17 +104,106 @@ PROACTIVE = os.getenv("AISTV_PROACTIVE", "1") != "0"
 # ════════════════════════════════════════════════════════════════════
 # 1. TỰ ĐỘNG CÀI ĐẶT MÔI TRƯỜNG
 # ════════════════════════════════════════════════════════════════════
+def _shell_prefix() -> list:
+    """Lệnh shell phù hợp hệ điều hành: bash trên Linux/macOS, PowerShell/cmd trên Windows."""
+    if IS_WINDOWS:
+        for name in ("pwsh", "powershell"):
+            exe = shutil.which(name)
+            if exe:
+                return [exe, "-NoProfile", "-NonInteractive", "-Command"]
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c"]
+    bash = shutil.which("bash") or "bash"
+    return [bash, "-c"]
+
+
 def _sh(cmd: str, timeout: int = 900) -> subprocess.CompletedProcess:
-    return subprocess.run(["bash", "-c", "set -o pipefail; " + cmd],
+    full = cmd if IS_WINDOWS else "set -o pipefail; " + cmd
+    return subprocess.run(_shell_prefix() + [full],
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, timeout=timeout)
+                          text=True, encoding="utf-8", errors="replace", timeout=timeout)
+
+
+def _opencode_dirs() -> list:
+    home = Path.home()
+    dirs = [home / ".opencode" / "bin", home / ".local" / "bin", home / ".bun" / "bin"]
+    if IS_WINDOWS:
+        for var, parts in (("APPDATA", ("npm",)), ("LOCALAPPDATA", ("opencode", "bin")),
+                           ("LOCALAPPDATA", ("Programs", "opencode")),
+                           ("USERPROFILE", ("scoop", "shims")),
+                           ("ProgramData", ("chocolatey", "bin"))):
+            base = os.getenv(var)
+            if base:
+                dirs.append(Path(base).joinpath(*parts))
+    else:
+        dirs.append(Path("/root/.opencode/bin"))
+    return dirs
 
 
 def find_opencode() -> Optional[str]:
-    for p in (os.path.expanduser("~/.opencode/bin"), "/root/.opencode/bin"):
-        if os.path.isdir(p) and p not in os.environ.get("PATH", ""):
-            os.environ["PATH"] += os.pathsep + p
-    return os.getenv("OPENCODE_BIN") or shutil.which("opencode")
+    for p in _opencode_dirs():
+        sp = str(p)
+        if p.is_dir() and sp not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = sp + os.pathsep + os.environ.get("PATH", "")
+    binary = os.getenv("OPENCODE_BIN")
+    if binary and Path(binary).exists():
+        return binary
+    return shutil.which("opencode")
+
+
+def _install_opencode_windows() -> Optional[str]:
+    """Windows: npm → tải binary chính thức từ GitHub Releases."""
+    if shutil.which("npm"):
+        print("   • Thử cài bằng npm…")
+        _sh("npm install -g opencode-ai", timeout=900)
+        if find_opencode():
+            return find_opencode()
+    print("   • Tải bản Windows từ GitHub Releases…")
+    import platform
+    import tempfile
+    import zipfile
+    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+    api = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
+    req = urllib.request.Request(api, headers={"User-Agent": "AISTV-bot",
+                                              "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+    except Exception as e:
+        print(f"   ⚠️ Không lấy được thông tin bản phát hành: {e}")
+        return None
+    assets = {a.get("name"): a.get("browser_download_url") for a in data.get("assets") or []}
+    url = assets.get(f"opencode-windows-{arch}.zip") or assets.get("opencode-windows-x64.zip")
+    if not url:
+        print("   ⚠️ Bản phát hành không có file Windows.")
+        return None
+    dest = Path.home() / ".opencode" / "bin"
+    dest.mkdir(parents=True, exist_ok=True)
+    tmp_zip = None
+    try:
+        with urllib.request.urlopen(url, timeout=600) as resp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as fh:
+                tmp_zip = fh.name
+                shutil.copyfileobj(resp, fh)
+        with zipfile.ZipFile(tmp_zip) as zf:
+            zf.extractall(dest)
+    except Exception as e:
+        print(f"   ⚠️ Tải/cài OpenCode thất bại: {e}")
+        return None
+    finally:
+        if tmp_zip:
+            try:
+                os.unlink(tmp_zip)
+            except Exception:
+                pass
+    for exe in dest.rglob("opencode.exe"):
+        if exe.parent != dest:
+            try:
+                shutil.copy2(exe, dest / "opencode.exe")
+            except Exception:
+                pass
+        break
+    find_opencode()
+    return find_opencode()
 
 
 def setup_environment() -> None:
@@ -115,18 +217,25 @@ def setup_environment() -> None:
                             "python-telegram-bot", "nest_asyncio"], check=True)
         except (subprocess.CalledProcessError, FileNotFoundError):
             raise SystemExit("❌ Thiếu thư viện Python và không cài được.\n"
-                             "   Chạy bằng run.sh, hoặc: python3 -m pip install -r requirements.txt")
+                             "   Chạy bằng run.sh / run.bat, hoặc: python -m pip install -r requirements.txt")
     print("✅ [1/3] Thư viện Python OK")
 
     print("⏳ [2/3] Cài OpenCode...")
-    if CLEAN_INSTALL or not find_opencode():
+    if IS_WINDOWS:
+        if CLEAN_INSTALL or not find_opencode():
+            for d in (Path.home() / ".local" / "share" / "opencode", Path.home() / ".opencode"):
+                shutil.rmtree(d, ignore_errors=True)
+            _install_opencode_windows()
+    elif CLEAN_INSTALL or not find_opencode():
         _sh("rm -rf ~/.local/share/opencode ~/.opencode")
         res = _sh("curl -fsSL https://opencode.ai/install | bash")
         if res.returncode != 0:
             print("\n".join(res.stdout.splitlines()[-15:]))
     binary = find_opencode()
     if not binary:
-        raise SystemExit("❌ Không cài được OpenCode. Chạy lại ô này hoặc kiểm tra mạng Colab.")
+        raise SystemExit("❌ Không cài được OpenCode.\n"
+                         + ("   Cài thủ công: npm install -g opencode-ai  (hoặc choco/scoop install opencode)"
+                            if IS_WINDOWS else "   Chạy lại ô này hoặc kiểm tra mạng Colab."))
     print(f"✅ [3/3] OpenCode sẵn sàng: {binary}")
 
 
@@ -781,7 +890,8 @@ def apply_github_config(token: str) -> dict:
     email = str(info.get("email") or "").strip() or (f"{login}@users.noreply.github.com" if login else "")
 
     try:
-        _sh("git config --global credential.helper store", timeout=20)
+        subprocess.run(["git", "config", "--global", "credential.helper", "store"],
+                       capture_output=True, timeout=20)
         cred = Path.home() / ".git-credentials"
         lines = []
         if cred.exists():
@@ -792,8 +902,10 @@ def apply_github_config(token: str) -> dict:
         cred.write_text("\n".join(lines) + "\n", "utf-8")
         cred.chmod(0o600)
         if login:
-            _sh(f'git config --global user.name {shlex.quote(login)}', timeout=20)
-            _sh(f'git config --global user.email {shlex.quote(email)}', timeout=20)
+            subprocess.run(["git", "config", "--global", "user.name", login],
+                           capture_output=True, timeout=20)
+            subprocess.run(["git", "config", "--global", "user.email", email],
+                           capture_output=True, timeout=20)
     except Exception as e:
         log.warning("Không cấu hình được git: %s", e)
 
@@ -1131,7 +1243,17 @@ def restart_bot() -> bool:
     try:
         env = os.environ.copy()
         env["STV_SKIP_SETUP"] = "1"
-        os.execve(sys.executable, [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:], env)
+        argv = [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:]
+        if IS_WINDOWS:
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | \
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            with open(LOG_FILE, "ab") as logf:
+                subprocess.Popen(argv, env=env, close_fds=True, creationflags=flags,
+                                 cwd=str(Path(__file__).resolve().parent),
+                                 stdin=subprocess.DEVNULL, stdout=logf,
+                                 stderr=subprocess.STDOUT)
+            os._exit(0)
+        os.execve(sys.executable, argv, env)
         return True
     except Exception as e:
         log.error("Không khởi động lại được: %s", e)
@@ -3952,7 +4074,9 @@ def main() -> None:
     if not OPENCODE_BIN:
         raise SystemExit("❌ Không tìm thấy lệnh opencode.")
     try:
-        OPENCODE_VERSION = _sh(f'"{OPENCODE_BIN}" --version', timeout=20).stdout.strip().splitlines()[-1]
+        _r = subprocess.run([OPENCODE_BIN, "--version"], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=20)
+        OPENCODE_VERSION = (_r.stdout or "").strip().splitlines()[-1]
     except Exception:
         pass
 

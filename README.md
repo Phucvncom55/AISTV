@@ -2,7 +2,7 @@
 
 Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file và lịch sử hội thoại bền vững.
 
-Chạy được trên **Colab, VPS, máy cá nhân** — chỉ cần Python 3.10+ và mạng.
+Chạy được trên **Colab, VPS, Linux/macOS và Windows (cmd/PowerShell)** — chỉ cần Python 3.10+ và mạng.
 
 ## ⚡ 3 bước
 
@@ -29,6 +29,8 @@ bash push.sh owner/repo public   # hoặc chỉ định đúng repo
 
 `push.sh` lấy token theo thứ tự: `GITHUB_TOKEN` / `GH_TOKEN` → `.secrets/github_token`
 (bot lưu sau `/github login`) → `gh auth token` nếu có. **Không cần cài `gh`.**
+
+> Trên Windows, dùng lệnh git ở dưới hoặc `/github` trong bot (repo chưa có `push.ps1`).
 
 Trong bot Telegram (chủ bot):
 
@@ -89,10 +91,39 @@ Không có Secrets thì script báo rõ cách thêm và dừng, không cài lan 
 > Colab không có terminal tương tác nên **không nhập token bằng tay** được — hãy dùng Secrets
 > (hoặc `!TELEGRAM_BOT_TOKEN=123:abc bash <(curl ...)` nếu không ngại lộ token trong notebook).
 
+### Chạy trên Windows (cmd / PowerShell)
+
+**Cách nhanh — dán 1 dòng vào cmd:**
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.ps1 | iex"
+```
+
+Hoặc trong thư mục repo: nhấp đôi `run.bat` (dùng `bootstrap.bat` nếu muốn tự cập nhật code trước).
+
+**Cần có sẵn:**
+
+- Python 3.10+: `winget install --id Python.Python.3.12 -e` (nhớ chọn *Add python.exe to PATH*)
+- Git: `winget install --id Git.Git -e`
+- OpenCode: script tự cài (npm nếu có, không thì tải bản Windows chính thức từ GitHub Releases)
+
+Script tự tạo `.venv`, cài thư viện, hỏi token lần đầu (lưu vào `.env`), rồi chạy bot.
+Dữ liệu vẫn ở `%USERPROFILE%\stv_agent` (đổi bằng `STV_HOME`).
+
+> OpenCode khuyến nghị WSL2 để đầy đủ tính năng; bản Windows native (cmd/PowerShell) vẫn chạy được.
+> Nếu dùng WSL thì làm theo hướng dẫn Linux ở trên.
+
 ### Chạy lại / VPS
 
 ```bash
 cd ~/AISTV && bash run.sh          # đã có .env thì chạy thẳng
+```
+
+Windows:
+
+```bat
+cd /d "%USERPROFILE%\AISTV"
+run.bat
 ```
 
 Muốn chạy nền trên VPS:
@@ -153,12 +184,12 @@ Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | Token từ BotFather (bắt buộc) |
 | `ALLOWED_USER_IDS` | trống | Danh sách user id được phép, cách nhau `,` |
-| `STV_HOME` | `~/stv_agent` | Nơi lưu `workspace/`, `sessions/`, `archive/` |
+| `STV_HOME` | `~/stv_agent` (`%USERPROFILE%\stv_agent`) | Nơi lưu `workspace/`, `sessions/`, `archive/` |
 | `OPENCODE_BIN` | tự tìm | Đường dẫn `opencode` |
 | `AISTV_CLEAN_INSTALL` | `1` | `0` = không xoá & cài lại OpenCode mỗi lần chạy |
 | `AISTV_VENV` | `1` | `0` = dùng Python hệ thống, không tạo `.venv` |
-| `AISTV_REPO` | URL trong `run.sh` | Repo khác để tải mã nguồn |
-| `AISTV_DIR` | `~/AISTV` | Nơi clone khi chạy one-liner |
+| `AISTV_REPO` | URL trong `run.sh` / `run.ps1` | Repo khác để tải mã nguồn |
+| `AISTV_DIR` | `~/AISTV` (`%USERPROFILE%\AISTV`) | Nơi clone khi chạy one-liner |
 | `AISTV_BRANCH` | `main` | Nhánh cần tải |
 | `AISTV_FIREBASE_URL` | RTDB mặc định | URL Firebase Realtime Database cho trí nhớ đám mây |
 | `AISTV_CLOUD` | `1` | `0` = tắt đồng bộ cloud (chỉ lưu cục bộ) |
@@ -185,9 +216,13 @@ Cấu hình nâng cao nằm ở đầu `aistv_bot.py` (model, timeout, số lị
 AISTV/
 ├── aistv_bot.py      bot hoàn chỉnh (cài đặt, agent, Telegram, định dạng)
 ├── aistv_email.py    đọc/gửi email IMAP·SMTP + CLI cho agent
-├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (khuyến nghị)
-├── run.sh            chạy 1 lệnh: clone → cài → chạy
-├── push.sh           tạo repo GitHub và push
+├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
+├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)
+├── bootstrap.ps1     như bootstrap.sh nhưng cho Windows (PowerShell)
+├── run.ps1           như run.sh nhưng cho Windows (PowerShell)
+├── bootstrap.bat     nhấp đôi để chạy bootstrap.ps1 trên Windows
+├── run.bat           nhấp đôi để chạy run.ps1 trên Windows
+├── push.sh           tạo repo GitHub và push (Linux/macOS)
 ├── requirements.txt
 ├── .env.example
 ├── seed/             SOUL.md, AGENTS.md, skills mặc định
