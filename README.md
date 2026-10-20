@@ -1,6 +1,6 @@
 # AI STV — Bot Telegram × OpenCode
 
-Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube, Facebook, TikTok** (tìm, đọc nội dung, tải video).
+Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube, Facebook, TikTok, đọc tài liệu GitHub** (tìm, đọc nội dung, tải video).
 
 Chạy được trên **Colab, VPS, Linux/macOS và Windows (cmd/PowerShell)** — chỉ cần Python 3.10+ và mạng.
 
@@ -211,6 +211,20 @@ Lấy tiêu đề, tác giả, thời lượng, lượt xem/thích/bình luận/
 
 Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
 
+**GitHub docs (đọc tài liệu / mã nguồn):** agent dùng token `/github login` sẵn có để đọc repo, README, thư mục `docs/`, tìm trong tài liệu hoặc mã nguồn — không cần clone. Có thể gọi trực tiếp:
+
+```bash
+python3 /root/AISTV/aistv_github_docs.py info owner/repo
+python3 /root/AISTV/aistv_github_docs.py docs owner/repo -n 40
+python3 /root/AISTV/aistv_github_docs.py read owner/repo docs/install.md --section "Quick Start"
+python3 /root/AISTV/aistv_github_docs.py search owner/repo "rate limit"
+python3 /root/AISTV/aistv_github_docs.py code owner/repo "def handler"
+python3 /root/AISTV/aistv_github_docs.py find "vector database" -n 5
+python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
+```
+
+Đọc được repo công khai và private (nếu token có quyền), hỗ trợ `--ref` để xem đúng tag/nhánh, `--outline`/`--section`/`--lines` cho tài liệu dài và `--json` cho dữ liệu có cấu trúc. Skill `github-docs` hướng dẫn agent chọn đúng tệp, trích nguồn và tránh đổ cả tài liệu vào chat.
+
 **Reply / trích dẫn tin nhắn:** trả lời (reply) một tin nhắn rồi nhắn yêu cầu — agent hiểu các cụm như "cái này", "đoạn trên", "sửa chỗ đó" là chỉ tin nhắn vừa reply. Nếu bôi đen một phần trước khi reply, agent ưu tiên đúng phần được trích dẫn. Reply một tin rồi gõ `/remember` (không kèm nội dung) sẽ lưu chính tin đó vào trí nhớ dài hạn. Ngữ cảnh trích dẫn cũng được ghi vào lịch sử hội thoại kèm nhãn `↪︎ trả lời “…”`.
 
 **Tiến độ kiểu terminal:** trong lúc chạy, tin nhắn "Đang làm việc" tự cập nhật ~1 giây/lần trong một **trích dẫn thu gọn/mở rộng** (`blockquote expandable`); lệnh và code nằm trong khối mã nên dễ đọc trên điện thoại. Dòng cũ rơi khỏi đỉnh khi đầy. `/think off` ẩn suy nghĩ; `/activity on` hiện thêm output chi tiết.
@@ -256,6 +270,10 @@ Cấu hình nâng cao nằm ở đầu `aistv_bot.py` (model, timeout, số lị
 AISTV/
 ├── aistv_bot.py      bot hoàn chỉnh (cài đặt, agent, Telegram, định dạng)
 ├── aistv_email.py    đọc/gửi email IMAP·SMTP + CLI cho agent
+├── aistv_youtube.py  tìm video, thông tin, transcript YouTube
+├── aistv_facebook.py đọc bài công khai, video/reel, tải video Facebook
+├── aistv_tiktok.py   thông tin, tải video không watermark, tìm kiếm TikTok
+├── aistv_github_docs.py  đọc README/docs, tìm trong tài liệu và mã GitHub
 ├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)
 ├── bootstrap.bat     như bootstrap.sh nhưng cho Windows (cmd thuần, khuyên dùng)

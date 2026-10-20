@@ -472,6 +472,7 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
    `MEMORY.md` (ví dụ `- [20/10/2026] Thích trả lời ngắn gọn`). Không xoá hay sửa các dòng cũ trừ khi được yêu cầu.
 10. `memory/YYYY-MM-DD.md` là nhật ký theo ngày — chỉ mở khi người dùng hỏi về những gì đã làm trước đây.
 11. `skills/` chứa quy trình chuyên biệt — làm đúng theo skill khi được kích hoạt.
+12. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
 """
 
 MEMORY_HEADER = "# MEMORY — Trí nhớ dài hạn\n"
@@ -563,6 +564,14 @@ def bootstrap_workspace() -> None:
                 old = ""
             if old != content:
                 path.write_text(content, "utf-8")   # luôn cập nhật tool theo bản bot
+    # Đồng bộ skill mặc định từ repo (chỉ thêm, không ghi đè skill người dùng đã sửa)
+    seed_skills = Path(__file__).resolve().parent / "seed" / "skills"
+    if seed_skills.is_dir():
+        for src in seed_skills.rglob("SKILL.md"):
+            dst = SKILLS_DIR / src.relative_to(seed_skills)
+            if not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
     # Cấu hình OpenCode cho workspace (luôn ghi lại để công tắc FULL_ACCESS có hiệu lực)
     cfg = {"$schema": "https://opencode.ai/config.json"}
     if FULL_ACCESS:
