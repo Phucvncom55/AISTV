@@ -109,6 +109,8 @@ Trong ô code của DataCamp thì thêm `!` ở đầu:
 
 Lưu ý:
 
+- **Chỉ cần `TELEGRAM_BOT_TOKEN`** nếu bí mật đã đồng bộ lên cloud (mặc định bot tự đẩy lên):
+  `GEMINI_API_KEY`, GitHub token, email… sẽ tự khôi phục khi khởi động, không phải nhập lại.
 - Dùng `curl | bash`, **không** dùng `bash <(curl ...)` — notebook chạy bằng `sh` nên
   process substitution bị lỗi cú pháp.
 - Script tự lưu token vào `~/.config/aistv/config.env`; workspace còn file thì lần sau chỉ cần
@@ -303,6 +305,7 @@ cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
 | `/email reset` | Xoá cấu hình đã lưu |
 
 - **Trí nhớ đám mây (Firebase RTDB):** `MEMORY.md`, lịch sử chat, nhắc việc và watch được lưu trên cloud nên **restart bot / Colab reset vẫn còn**. Mỗi bot dùng namespace riêng `AISTV_CLOUD_NS/<bot id>`.
+- **Bí mật đồng bộ, không phải đăng nhập lại:** Gemini/Groq/OpenAI/Jina key, GitHub token, email, `ALLOWED_USER_IDS`, cấu hình model… được **mã hoá** (PBKDF2-HMAC-SHA256 từ token bot + HMAC-SHA256 + keystream) rồi lưu ở `aistv/<bot id>/secrets`. Chạy bot ở terminal/máy khác chỉ cần đúng bot token là tự khôi phục. Đổi bot token thì blob cũ không giải mã được và bot tự bỏ qua. Đồng bộ ngay: `/cloud sync`.
 - **Tự tóm tắt:** sau ~20 lượt hỏi–đáp, bot tự cô đọng phần cũ thành gạch đầu dòng trong `MEMORY.md` rồi cắt bớt lịch sử (giữ ngữ cảnh gần).
 - **Nhắc việc/việc định kỳ** sống qua restart; việc định kỳ dùng đúng model và workspace hiện tại.
 
@@ -485,6 +488,7 @@ Dữ liệu chạy nằm ngoài repo tại `STV_HOME` (mặc định `~/stv_agen
 - `FULL_ACCESS = False` mặc định: agent chỉ ghi trong workspace và bị OpenCode chặn thao tác cần quyền.
 - Repo public **không chứa bí mật**; đừng commit `.env`.
 - **Firebase Rules:** mặc định bot chỉ lưu URL database, không nhúng API key. Nếu Rules đang `true` (mở), **ai biết URL cũng đọc/ghi/xoá được** — hãy siết Rules và chỉ cho phép đúng namespace `aistv/<bot id>`, hoặc bật `AISTV_FIREBASE_SECRET`. Không lưu dữ liệu nhạy cảm (mật khẩu, token) vào trí nhớ.
+- **Bí mật đồng bộ luôn được mã hoá trước khi gửi cloud** (PBKDF2 + HMAC-SHA256, khoá suy ra từ token bot), nên kể cả Rules mở thì token/API key cũng không đọc được nếu không có token bot. Hội thoại/trí nhớ thì vẫn là văn bản thô — đừng dán mật khẩu vào chat.
 
 ## Giấy phép
 
