@@ -3133,7 +3133,7 @@ EMAIL_STAT = {"ok": None, "at": 0.0, "err": ""}
 def build_email() -> str:
     if not mail:
         return "⚠️ Bản bot này thiếu <code>aistv_email.py</code> nên chưa dùng được email."
-    cfg = mail.load()
+    cfg = mail.load(force=True)
     if not cfg.get("address"):
         return mail.HELP
     pw = "đã đặt" if cfg.get("password") else "⚠️ thiếu"
@@ -3220,6 +3220,7 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sub == "test":
             note = await msg.reply_text("📧 Đang kiểm tra kết nối email…")
             try:
+                mail.load(force=True)
                 info = await asyncio.to_thread(mail.test)
                 EMAIL_STAT.update(ok=True, at=time.time(), err="")
                 await note.edit_text(
