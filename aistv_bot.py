@@ -2423,6 +2423,7 @@ HELP_TEXT = (
     "/watch file &lt;đường dẫn&gt; — báo khi thay đổi · /watch del &lt;mã|all&gt;\n\n"
     "<b>File &amp; Video</b>\nGửi file cho bot → lưu vào <code>inbox/</code> để agent đọc\n/files — file trong workspace\n/get &lt;đường dẫn&gt; — tải file về\n"
     "Gửi ảnh + câu hỏi → Gemini đọc ảnh, mô tả và chép chữ (OCR)\n"
+    "Gửi tin nhắn thoại → bot tự nghe rồi làm theo lời bạn (tiếng Việt/Anh)\n"
     "/image &lt;url|đường dẫn&gt; [câu hỏi] — đọc ảnh bằng Gemini\n"
     "Gửi link/file video + câu hỏi → Gemini xem hình ảnh + âm thanh, trả lời kèm mốc thời gian\n"
     "/video &lt;url|đường dẫn&gt; [câu hỏi] — xem video bằng Gemini\n\n"
@@ -3080,9 +3081,9 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @guard()
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg, chat = update.effective_message, update.effective_chat
-    text = (msg.text or "").strip()
+async def _dispatch_text(msg, context, chat, text: str):
+    """Dùng chung cho tin nhắn gõ tay và tin nhắn thoại đã chép lời."""
+    text = (text or "").strip()
     if not text:
         return
     with ASK_LOCK:
@@ -3106,6 +3107,77 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         text = re.sub(re.escape(uname), "", text, flags=re.I).strip()
     await respond(msg, context, chat.id, text, quoted_msg=msg)
+
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat = update.effective_message, update.effective_chat
+    await _dispatch_text(msg, context, chat, msg.text or "")
+
+
+_VOICE_EXTS = {
+    "audio/ogg": ".ogg", "audio/opus": ".ogg", "audio/mpeg": ".mp3", "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/aac": ".aac", "audio/wav": ".wav",
+    "audio/x-wav": ".wav", "audio/webm": ".webm", "audio/flac": ".flac", "audio/x-flac": ".flac",
+}
+
+
+@guard()
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tin nhắn thoại / file âm thanh → chép lời bằng Gemini → xử lý như tin nhắn chữ."""
+    msg = update.effective_message
+    if update.effective_chat.type != "private":
+        return
+    media = msg.voice or msg.audio
+    if not media:
+        return
+    mime = (getattr(media, "mime_type", "") or ("audio/ogg" if msg.voice else "audio/mpeg")).lower()
+    name = getattr(media, "file_name", "") or ""
+    if not Path(name).suffix:
+        ext = _VOICE_EXTS.get(mime, ".ogg")
+        name = f"voice_{getattr(media, 'file_unique_id', int(time.time()))}{ext}"
+
+    status = await msg.reply_text("🎙️ <i>Đang nghe…</i>", parse_mode=HTML)
+    dest = await _download_telegram_file(msg, media, name, mime)
+    if not dest:
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        return
+    if not GEMINI_READY:
+        try:
+            await status.edit_text(
+                "⚠️ Cần GEMINI_API_KEY để nghe tin nhắn thoại.\n"
+                "Gửi: <code>/key gemini &lt;key&gt;</code>", parse_mode=HTML)
+        except Exception:
+            pass
+        return
+
+    timeout = int(os.getenv("VOICE_TIMEOUT", "330") or 330)
+    rc, out, err = await asyncio.to_thread(
+        _watch_cli, ["voice", str(dest), "--mime", mime, "--json"], timeout)
+    text = ""
+    if rc == 0:
+        try:
+            text = (json.loads(out or "{}").get("text") or "").strip()
+        except Exception:
+            text = (out or "").strip()
+    if not text:
+        lines = [x.strip() for x in (err or out or "").splitlines() if x.strip()]
+        detail = _redact_secrets(lines[-1] if lines else "lỗi không rõ")
+        try:
+            await status.edit_text(
+                f"⚠️ Không nghe được tin nhắn thoại.\n<code>{esc(detail[:1500])}</code>",
+                parse_mode=HTML)
+        except Exception:
+            pass
+        return
+
+    try:
+        await status.edit_text(f"🎙️ <b>Nghe được:</b> {esc(_clip(text, 1200))}", parse_mode=HTML)
+    except Exception:
+        pass
+    await _dispatch_text(msg, context, update.effective_chat, text)
 
 
 def _redact_secrets(text: str) -> str:
@@ -4641,6 +4713,8 @@ def main() -> None:
         (filters.VIDEO | filters.VIDEO_NOTE | filters.ANIMATION) & filters.UpdateType.MESSAGE,
         handle_video))
     app.add_handler(MessageHandler(filters.Document.ALL & filters.UpdateType.MESSAGE, handle_document))
+    app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO) & filters.UpdateType.MESSAGE,
+                                   handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.UpdateType.MESSAGE, handle_text))
     app.add_error_handler(on_error)
 

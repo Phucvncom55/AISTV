@@ -116,6 +116,28 @@ Lưu ý:
 - Không có TTY nên bước "xác nhận chủ bot" tự bỏ qua (không treo 180s). Muốn khoá bot thì
   đặt `ALLOWED_USER_IDS` — nếu để trống, người nhắn riêng đầu tiên sẽ thành chủ bot.
 
+### Chạy trên Termux (Android)?
+
+**Không nên chạy bot trực tiếp trong Termux.** OpenCode chỉ phát hành binary cho Linux
+(glibc/musl), macOS và Windows — **không có bản Android**. Termux dùng libc riêng (bionic) nên
+`npm install -g opencode-ai` cài xong sẽ báo lỗi kiểu `cannot execute: required file not found`,
+và `aistv_bot.py` sẽ dừng ở bước `Không tìm thấy lệnh opencode`.
+
+Nếu vẫn muốn dùng điện thoại làm server, phải chạy trong **proot-distro Ubuntu**:
+
+```bash
+pkg update && pkg install -y proot-distro
+proot-distro install ubuntu
+proot-distro login ubuntu
+# trong Ubuntu: cài python3, git, curl, ffmpeg rồi chạy như Linux bình thường
+```
+
+Kèm `termux-wake-lock` và tắt tối ưu pin cho Termux. Tuy vậy Android vẫn hay kill tiến trình
+nền, tốn pin/nóng máy — không phù hợp cho bot chạy 24/7.
+
+Cách đúng: bot chạy trên **VPS/cloud free** (Oracle Cloud ARM free tier, Google Cloud e2-micro…),
+còn điện thoại chỉ mở Telegram để **ra lệnh bằng giọng nói** — không cần Termux.
+
 ### Chạy trên Windows (cmd / PowerShell)
 
 **Cách nhanh — dán 1 dòng vào cmd (không cần PowerShell):**
@@ -316,6 +338,16 @@ python3 /root/AISTV/aistv_watch.py frames "URL" --max-frames 24 --at "1:23,4:56"
 ```
 
 Hoặc dùng lệnh trong chat: `/image <url|đường dẫn> [câu hỏi]` và `/video <url|đường dẫn> [câu hỏi]`.
+
+**Tin nhắn thoại (nói thay vì gõ):** gửi voice message (hoặc file âm thanh) cho bot → Gemini chép lời
+ngay, bot hiện `🎙️ Nghe được: …` rồi xử lý y như tin nhắn chữ (kể cả khi agent đang hỏi lại).
+Không cần Whisper, không cần cài thêm gì; `audio/ogg` của Telegram được Gemini đọc trực tiếp,
+nếu định dạng lạ thì tự chuyển sang WAV bằng ffmpeg. Giới hạn 20MB/lần của Telegram Bot API.
+
+```bash
+python3 /root/AISTV/aistv_watch.py voice "inbox/voice.ogg" --json
+python3 /root/AISTV/aistv_watch.py voice "inbox/ghi-am.m4a" -l vi
+```
 
 **Watch (xem video bằng hình ảnh + âm thanh):** agent tự dùng khi bạn gửi link hoặc file video và hỏi nội dung. Tải video, lấy phụ đề (hoặc Whisper dự phòng), cắt frames theo cảnh/mốc thời gian rồi tạo `report.md` + `report.json` để agent đọc. Có `GEMINI_API_KEY` thì Gemini xem toàn bộ video (hình ảnh + âm thanh) và trả lời kèm mốc thời gian; không có key thì agent đọc từng frame bằng công cụ Read và kết hợp transcript. `--start/--end` giới hạn đoạn, `--resolution 1024` để đọc chữ, `--ocr` cho video quay màn hình. Video riêng tư cần `--cookies`; không tải video/audio lên chat.
 
