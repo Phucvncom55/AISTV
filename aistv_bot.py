@@ -33,6 +33,7 @@ KIẾN TRÚC (học theo OpenClaw)
 # 0. CẤU HÌNH — chỉnh ở đây
 # ════════════════════════════════════════════════════════════════════
 import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib, importlib.util, mimetypes
+import base64, hmac
 import secrets, threading, textwrap, urllib.request, urllib.parse, urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -96,6 +97,15 @@ def _load_dotenv():
 
 _load_dotenv()
 
+# Bí mật được đồng bộ lên Firebase (mã hoá bằng token bot) để sang máy/terminal
+# khác không phải đăng nhập lại. Thêm tên biến vào đây nếu muốn sync thêm.
+SECRETS_DIRTY = False
+SECRET_SYNC_KEYS = (
+    "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "JINA_API_KEY",
+    "AISTV_EMAIL_ADDRESS", "AISTV_EMAIL_PASSWORD",
+    "ALLOWED_USER_IDS", "WATCH_GEMINI_MODEL", "WATCH_GEMINI_FALLBACKS",
+)
+
 
 def _write_env_var(path: Path, name: str, value: str) -> Path:
     """Ghi/ cập nhật một biến trong file .env kiểu KEY=VALUE."""
@@ -132,6 +142,7 @@ def save_env_var(name: str, value: str) -> Path:
     Nhờ file dùng chung (~/.config/aistv/config.env) token không mất khi
     clone lại repo hay đổi AISTV_DIR — lần sau chạy không phải nhập lại.
     """
+    global SECRETS_DIRTY
     primary = Path(os.getenv("AISTV_ENV_FILE", "") or (Path(__file__).resolve().parent / ".env"))
     shared = Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
                   or (Path.home() / ".config" / "aistv")) / "config.env"
@@ -141,6 +152,8 @@ def save_env_var(name: str, value: str) -> Path:
         except Exception:
             continue
     os.environ[name] = value
+    if name in SECRET_SYNC_KEYS:
+        SECRETS_DIRTY = True                  # cloud_loop sẽ đẩy lên Firebase
     return primary
 
 
@@ -1165,7 +1178,7 @@ def apply_github_config(token: str) -> dict:
 
 def save_github_token(token: str) -> dict:
     """Lưu token (chmod 600) + bản sao trên Google Drive nếu đang mount."""
-    global GH_TOKEN_CACHE
+    global GH_TOKEN_CACHE, SECRETS_DIRTY
     token = (token or "").strip()
     if not token:
         raise RuntimeError("Token rỗng.")
@@ -1173,6 +1186,7 @@ def save_github_token(token: str) -> dict:
     GITHUB_TOKEN_FILE.write_text(token, "utf-8")
     GITHUB_TOKEN_FILE.chmod(0o600)
     GH_TOKEN_CACHE = token
+    SECRETS_DIRTY = True
     drive = Path("/content/drive/MyDrive/stv_agent/.secrets/github_token")
     if drive.parent.parent.parent.exists() and drive.parent.resolve() != GITHUB_TOKEN_FILE.parent.resolve():
         try:
@@ -3061,6 +3075,8 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.environ[name] = value
     if name == "GEMINI_API_KEY":
         GEMINI_READY = True
+    if CLOUD_ENABLED:
+        asyncio.create_task(cloud_push_secrets())      # mã hoá + đẩy lên cloud ngay
 
     # Xoá tin nhắn gốc để key không nằm lại trong lịch sử chat.
     gone = False
@@ -3080,7 +3096,6 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML")
 
 
-@guard()
 async def _dispatch_text(msg, context, chat, text: str):
     """Dùng chung cho tin nhắn gõ tay và tin nhắn thoại đã chép lời."""
     text = (text or "").strip()
@@ -3109,6 +3124,7 @@ async def _dispatch_text(msg, context, chat, text: str):
     await respond(msg, context, chat.id, text, quoted_msg=msg)
 
 
+@guard()
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
     await _dispatch_text(msg, context, chat, msg.text or "")
@@ -3668,6 +3684,138 @@ def _load_json(path: Path) -> dict:
         return {}
 
 
+# ── Bí mật đồng bộ qua cloud, mã hoá bằng token bot ─────────────────
+# Database Firebase đang để public nên KHÔNG bao giờ ghi token/key ở dạng thô:
+# blob = nonce(16) + HMAC-SHA256(32) + ciphertext (XOR với keystream HMAC).
+def _secret_master_key() -> bytes:
+    tok = (globals().get("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").encode("utf-8")
+    if not tok:
+        raise RuntimeError("thiếu bot token để mã hoá")
+    return hashlib.pbkdf2_hmac("sha256", tok, b"aistv-secrets-v1", 120_000)
+
+
+def _keystream(key: bytes, nonce: bytes, size: int) -> bytes:
+    out = bytearray()
+    block = 0
+    while len(out) < size:
+        out += hmac.new(key, nonce + block.to_bytes(8, "big"), hashlib.sha256).digest()
+        block += 1
+    return bytes(out[:size])
+
+
+def encrypt_secrets(data: dict) -> str:
+    master = _secret_master_key()
+    enc_key = hmac.new(master, b"enc", hashlib.sha256).digest()
+    mac_key = hmac.new(master, b"mac", hashlib.sha256).digest()
+    raw = json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    nonce = os.urandom(16)
+    ct = bytes(a ^ b for a, b in zip(raw, _keystream(enc_key, nonce, len(raw))))
+    tag = hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()
+    return base64.b64encode(nonce + tag + ct).decode("ascii")
+
+
+def decrypt_secrets(blob: str) -> dict:
+    raw = base64.b64decode(blob)
+    if len(raw) < 48:
+        raise ValueError("dữ liệu quá ngắn")
+    nonce, tag, ct = raw[:16], raw[16:48], raw[48:]
+    master = _secret_master_key()
+    enc_key = hmac.new(master, b"enc", hashlib.sha256).digest()
+    mac_key = hmac.new(master, b"mac", hashlib.sha256).digest()
+    if not hmac.compare_digest(tag, hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()):
+        raise ValueError("sai khoá hoặc dữ liệu bị sửa")
+    plain = bytes(a ^ b for a, b in zip(ct, _keystream(enc_key, nonce, len(ct))))
+    data = json.loads(plain.decode("utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def _local_secret_values() -> dict:
+    data = {}
+    for name in SECRET_SYNC_KEYS:
+        val = get_secret(name)
+        if val:
+            data[name] = val
+    gh = github_token()
+    if gh:
+        data["GITHUB_TOKEN"] = gh
+    if mail:
+        try:
+            cfg = mail.load()
+            if cfg.get("address") and cfg.get("password"):
+                data.setdefault("AISTV_EMAIL_ADDRESS", cfg["address"])
+                data.setdefault("AISTV_EMAIL_PASSWORD", cfg["password"])
+        except Exception:
+            pass
+    return data
+
+
+async def cloud_push_secrets() -> bool:
+    global SECRETS_DIRTY
+    if not CLOUD_ENABLED:
+        return False
+    data = _local_secret_values()
+    if not data:
+        return False
+    try:
+        blob = encrypt_secrets(data)
+    except Exception as e:
+        log.warning("Không mã hoá được bí mật: %s", oneline(str(e), 120))
+        return False
+    await fb("PUT", "secrets", {"v": 1, "at": int(time.time()), "blob": blob})
+    SECRETS_DIRTY = False
+    return True
+
+
+async def cloud_restore_secrets() -> int:
+    """Máy mới: giải mã bí mật trên cloud và ghi vào config.env (không ghi đè cái đã có)."""
+    global ENV_ALLOWED, GEMINI_READY
+    if not CLOUD_ENABLED:
+        return 0
+    payload = await fb("GET", "secrets")
+    if not isinstance(payload, dict) or not payload.get("blob"):
+        return 0
+    try:
+        data = decrypt_secrets(str(payload["blob"]))
+    except Exception as e:
+        log.warning("Bí mật trên cloud không giải mã được (đổi bot token?): %s",
+                    oneline(str(e), 120))
+        return 0
+    restored = 0
+    for name, value in data.items():
+        value = str(value or "").strip()
+        if not value:
+            continue
+        if name == "GITHUB_TOKEN":
+            if github_token():
+                continue
+            try:
+                await asyncio.to_thread(save_github_token, value)
+                restored += 1
+            except Exception as e:
+                log.warning("Không khôi phục được GitHub token: %s", oneline(str(e), 120))
+            continue
+        if get_secret(name):
+            continue
+        try:
+            save_env_var(name, value)
+            restored += 1
+        except Exception:
+            continue
+    if restored:
+        ids = [int(x) for x in re.findall(r"\d+", get_secret("ALLOWED_USER_IDS"))]
+        if ids:
+            ENV_ALLOWED = ids
+        if get_secret("GEMINI_API_KEY") or get_secret("GOOGLE_API_KEY"):
+            GEMINI_READY = True
+        if mail:
+            try:
+                mail.load(force=True)
+            except Exception:
+                pass
+        log.info("Khôi phục %d bí mật từ cloud (%s)", restored, ", ".join(sorted(data)))
+    return restored
+
+
 # ── Trí nhớ dài hạn + lịch sử hội thoại đồng bộ 2 chiều ─────────────
 async def cloud_merge_memory() -> str:
     """Gộp MEMORY.md cục bộ với bản trên cloud (giữ thứ tự, không trùng)."""
@@ -3754,6 +3902,8 @@ async def cloud_loop() -> None:
     await asyncio.sleep(3)
     while True:
         try:
+            if SECRETS_DIRTY:
+                await cloud_push_secrets()
             if MEM_DIRTY:
                 MEM_DIRTY = False
                 await cloud_push_memory()
@@ -4404,6 +4554,7 @@ def build_cloud(chat_id: int) -> str:
             f"• Trí nhớ dài hạn: {len(memory_items())} mục\n"
             f"• Hội thoại chat này: {len(load_history(chat_id))} lượt\n"
             f"• Nhắc việc: {len(REMINDERS)} · Theo dõi: {len(WATCHES)}\n"
+            f"• Bí mật đồng bộ: {sum(1 for n in SECRET_SYNC_KEYS if get_secret(n))} mục (mã hoá bằng token bot)\n"
             f"• Tóm tắt tự động: {'bật' if AUTO_SUMMARY else 'tắt'} sau {SUMMARY_MIN_ITEMS} lượt\n\n"
             "Đồng bộ ngay: <code>/cloud sync</code>\n"
             "⚠️ Rules của database đang mở (ai biết URL cũng đọc/ghi được) — nên siết lại.")
@@ -4417,7 +4568,9 @@ async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cloud_push_history(chat_id)
         await rem_save()
         await watch_save()
-        await msg.reply_text("☁️ Đã đẩy trí nhớ, hội thoại, nhắc việc & theo dõi lên cloud.")
+        secrets_ok = await cloud_push_secrets()
+        await msg.reply_text("☁️ Đã đẩy trí nhớ, hội thoại, nhắc việc & theo dõi lên cloud."
+                             + ("\n🔐 Bí mật (token/API key) đã mã hoá và đồng bộ." if secrets_ok else ""))
         return
     await msg.reply_text(build_cloud(chat_id), parse_mode=HTML)
 
@@ -4493,6 +4646,8 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode=HTML)
                 return
             cfg = mail.save(args[1], args[2])
+            if CLOUD_ENABLED:
+                asyncio.create_task(cloud_push_secrets())
             try:
                 await msg.delete()
             except Exception:
@@ -4656,6 +4811,10 @@ async def post_init(app) -> None:
     CLOUD_NS = f"{CLOUD_NS_BASE}/{me.id}"      # namespace riêng cho từng bot
     print(f"✅ Bot online: @{me.username}  |  model: {STATE['model']}")
     if CLOUD_ENABLED:
+        try:
+            await cloud_restore_secrets()          # phải xong trước khi nhận tin nhắn
+        except Exception as e:
+            log.warning("Khôi phục bí mật từ cloud: %s", oneline(str(e), 160))
         asyncio.create_task(cloud_restore_all())
         asyncio.create_task(cloud_loop())
     if PROACTIVE:
