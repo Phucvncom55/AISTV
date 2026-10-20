@@ -75,6 +75,10 @@ cd "$APP_DIR"
 # config.env giúp token/key không mất khi clone lại repo hoặc đổi AISTV_DIR,
 # nên các lần chạy sau không phải nhập tay lần nào nữa.
 CONFIG_DIR="${AISTV_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aistv}"
+# Colab có Google Drive đã mount → để token/key sống qua các phiên.
+if [[ -z "${AISTV_CONFIG_DIR:-}" && -d /content/drive/MyDrive ]]; then
+  CONFIG_DIR="/content/drive/MyDrive/aistv"
+fi
 CONFIG_FILE="$CONFIG_DIR/config.env"
 ENV_FILE="$APP_DIR/.env"
 
@@ -201,8 +205,17 @@ EOF
   exit 1
 fi
 
-# ── 2b. Gemini = mắt + tai cho ảnh/video (tuỳ chọn, hỏi một lần) ─────
-if [[ -z "${GEMINI_API_KEY:-}" && -t 0 && "${AISTV_ASK_GEMINI:-1}" != "0" ]]; then
+# ── 2b. Gemini = mắt + tai cho ảnh/video (tuỳ chọn, KHÔNG bắt buộc) ──
+# Mặc định không hỏi: thiếu key thì bot vẫn chạy, chỉ mất phần đọc ảnh.
+# Muốn nhập ngay trong terminal: AISTV_ASK_GEMINI=1 bash run.sh
+# Cách gọn hơn: nhắn /key gemini <key> cho bot, hoặc thêm vào config.env.
+if [[ -z "${GEMINI_API_KEY:-}" ]]; then
+  say "Chưa có GEMINI_API_KEY — bỏ qua phần đọc ảnh (không hỏi, không chờ)."
+  say "  Thêm sau bằng: /key gemini <key> trong chat, hoặc:"
+  say "  echo 'GEMINI_API_KEY=<key>' >> $CONFIG_FILE"
+fi
+
+if [[ -z "${GEMINI_API_KEY:-}" && "${AISTV_ASK_GEMINI:-0}" == "1" && -t 0 ]]; then
   printf '🧠 Gemini API key (Enter để bỏ qua — lấy tại https://aistudio.google.com/apikey): '
   _gk=""
   if IFS= read -r -t "${AISTV_PROMPT_TIMEOUT:-180}" _gk && [[ -n "${_gk// /}" ]]; then
@@ -210,8 +223,6 @@ if [[ -z "${GEMINI_API_KEY:-}" && -t 0 && "${AISTV_ASK_GEMINI:-1}" != "0" ]]; th
     export GEMINI_API_KEY
     persist_secret GEMINI_API_KEY "$GEMINI_API_KEY"
     say "Đã lưu GEMINI_API_KEY — bot xem được video và đọc được ảnh."
-  else
-    say "Bỏ qua Gemini — vẫn xem được video có phụ đề, nhưng chưa đọc được ảnh."
   fi
   unset _gk
 fi
