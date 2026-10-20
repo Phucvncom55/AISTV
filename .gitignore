@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Bí mật — KHÔNG commit
+.env
+*.token
+
+# Dữ liệu chạy (workspace, lịch sử, trạng thái)
+workspace/
+sessions/
+archive/
+state.json
+.venv/
+
+# Hệ điều hành / công cụ
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
