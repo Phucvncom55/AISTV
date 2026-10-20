@@ -267,9 +267,18 @@ if [[ -z "${GEMINI_API_KEY:-}" && "${AISTV_ASK_GEMINI:-0}" == "1" && -t 0 ]]; th
   unset _gk
 fi
 
-# ── 2c. Xác nhận chủ bot: in link → chờ bạn bấm Start → lưu user id ──# Giống device flow của GitHub: bạn không phải chép id thủ công, script chờ
+# ── 2c. Xác nhận chủ bot: in link → chờ bạn bấm Start → lưu user id ──
+# Giống device flow của GitHub: bạn không phải chép id thủ công, script chờ
 # tối đa AISTV_PAIR_TIMEOUT giây rồi tự chạy tiếp (không treo vô hạn).
-if [[ -z "${ALLOWED_USER_IDS:-}" && "${AISTV_PAIR:-1}" != "0" && -f "$APP_DIR/aistv_pair.py" ]]; then
+# Chỉ chờ khi có terminal (Colab/DataCamp không nhập được → bỏ qua luôn).
+# Ép chờ ở môi trường không có TTY: AISTV_PAIR=1
+_pair_wait=0
+if [[ -t 0 || "${AISTV_PAIR:-}" == "1" ]]; then
+  _pair_wait=1
+fi
+
+if [[ -z "${ALLOWED_USER_IDS:-}" && "$_pair_wait" == "1" \
+      && "${AISTV_PAIR:-1}" != "0" && -f "$APP_DIR/aistv_pair.py" ]]; then
   say "Xác nhận chủ bot qua Telegram (tối đa ${AISTV_PAIR_TIMEOUT:-180}s, Ctrl+C để bỏ qua)…"
   if "$PY" "$APP_DIR/aistv_pair.py" --timeout "${AISTV_PAIR_TIMEOUT:-180}"; then
     _load_env_file "$CONFIG_FILE"
@@ -279,6 +288,7 @@ if [[ -z "${ALLOWED_USER_IDS:-}" && "${AISTV_PAIR:-1}" != "0" && -f "$APP_DIR/ai
     say "Chưa xác nhận — bot vẫn chạy, người nhắn đầu tiên sẽ thành chủ bot."
   fi
 fi
+unset _pair_wait
 
 # ── 2d. Bí mật đến từ biến môi trường → lưu lại cho lần chạy sau ────
 _have_secret() {

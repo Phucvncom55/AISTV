@@ -91,6 +91,31 @@ Không có Secrets thì script báo rõ cách thêm và dừng, không cài lan 
 > Colab không có terminal tương tác nên **không nhập token bằng tay** được — hãy dùng Secrets
 > (hoặc `!TELEGRAM_BOT_TOKEN=123:abc bash <(curl ...)` nếu không ngại lộ token trong notebook).
 
+### Chạy trên DataCamp (log không nhập được gì)
+
+DataCamp Workspace là notebook, **không có stdin** — mọi prompt bị bỏ qua, script không bao giờ
+chờ nhập liệu. Chỉ cần truyền bí mật bằng biến môi trường, một dòng duy nhất:
+
+```bash
+TELEGRAM_BOT_TOKEN=123456:ABC... GEMINI_API_KEY=AQ... ALLOWED_USER_IDS=123456789 \
+  bash -c "curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9' | bash"
+```
+
+Trong ô code của DataCamp thì thêm `!` ở đầu:
+
+```python
+!TELEGRAM_BOT_TOKEN=123456:ABC... GEMINI_API_KEY=AQ... ALLOWED_USER_IDS=123456789 bash -c "curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9' | bash"
+```
+
+Lưu ý:
+
+- Dùng `curl | bash`, **không** dùng `bash <(curl ...)` — notebook chạy bằng `sh` nên
+  process substitution bị lỗi cú pháp.
+- Script tự lưu token vào `~/.config/aistv/config.env`; workspace còn file thì lần sau chỉ cần
+  `!bash -c "curl -fsSL ... | bash"`.
+- Không có TTY nên bước "xác nhận chủ bot" tự bỏ qua (không treo 180s). Muốn khoá bot thì
+  đặt `ALLOWED_USER_IDS` — nếu để trống, người nhắn riêng đầu tiên sẽ thành chủ bot.
+
 ### Chạy trên Windows (cmd / PowerShell)
 
 **Cách nhanh — dán 1 dòng vào cmd (không cần PowerShell):**
