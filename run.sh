@@ -206,7 +206,9 @@ if [[ "${AISTV_VENV:-1}" != "0" && -z "${VIRTUAL_ENV:-}" ]]; then
   fi
   if [[ ! -x "$VENV/bin/python" ]]; then
     say "Tạo môi trường ảo .venv"
-    "$PY" -m venv "$VENV" >/dev/null 2>&1 || say "Không tạo được venv bằng python3 -m venv."
+    "$PY" -m venv --without-pip "$VENV" >/dev/null 2>&1 \
+      || "$PY" -m venv "$VENV" >/dev/null 2>&1 \
+      || say "Không tạo được venv bằng python3 -m venv."
   fi
   if [[ -x "$VENV/bin/python" ]] && ensure_pip "$VENV/bin/python"; then
     PY="$VENV/bin/python"
