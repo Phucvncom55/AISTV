@@ -30,7 +30,7 @@ KIẾN TRÚC (học theo OpenClaw)
 # 0. CẤU HÌNH — chỉnh ở đây
 # ════════════════════════════════════════════════════════════════════
 import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib
-import secrets, shlex, threading, textwrap, urllib.request, urllib.parse
+import secrets, shlex, threading, textwrap, urllib.request, urllib.parse, urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -188,6 +188,7 @@ SESSIONS = HOME / "sessions"
 ARCHIVE = HOME / "archive"
 SECRETS_DIR = HOME / ".secrets"
 GITHUB_TOKEN_FILE = SECRETS_DIR / "github_token"
+GITHUB_REPO_FILE = SECRETS_DIR / "github_repo"      # owner/name đang dùng (đổi bằng /github repo)
 STATE_FILE = HOME / "state.json"
 LOG_DIR = HOME / "logs"
 LOG_FILE = LOG_DIR / "aistv.log"
@@ -254,6 +255,7 @@ STATE.setdefault("variant", os.getenv("OPENCODE_VARIANT", ""))
 STATE.setdefault("show_thinking", True)          # hiện phần "suy nghĩ" của model
 STATE.setdefault("show_activity", False)         # hiện chi tiết việc agent đang làm (lệnh, code, output)
 STATE.setdefault("github_user", "")
+STATE.setdefault("github_repo", "")              # repo đích: owner/name (quét & chọn bằng /github repos)
 
 
 def save_state() -> None:
@@ -853,6 +855,256 @@ def clear_github_token() -> None:
     STATE["github_user"] = ""
     save_state()
 
+
+# ── Quét repo của tài khoản đang dùng token & chọn repo đích ──
+GH_REPOS_CACHE: dict = {"token": "", "items": [], "at": 0.0}
+GH_REPO_PICK: dict = {}            # chat_id -> [owner/name] của trang đang hiển thị
+
+
+def _gh_api(path: str, token: str, method: str = "GET", payload: Optional[dict] = None,
+            timeout: int = 30) -> dict:
+    url = path if path.startswith("http") else "https://api.github.com" + path
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "AISTV-bot"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = str(json.loads(e.read().decode("utf-8", "replace")).get("message") or "")
+        except Exception:
+            pass
+        raise RuntimeError(f"GitHub {e.code}: {detail or e.reason}")
+    except Exception as e:
+        raise RuntimeError(f"Không gọi được GitHub API: {oneline(str(e), 160)}")
+    return json.loads(raw) if raw.strip() else {}
+
+
+def gh_all_repos(token: str, refresh: bool = False) -> list:
+    """Toàn bộ repo token nhìn thấy (chủ, cộng tác, tổ chức), mới đẩy lên trước."""
+    if (not refresh and GH_REPOS_CACHE["token"] == token
+            and time.time() - GH_REPOS_CACHE["at"] < 180):
+        return GH_REPOS_CACHE["items"]
+    items: list = []
+    for page in (1, 2):
+        batch = _gh_api("/user/repos?per_page=100&page=%d&sort=updated"
+                        "&affiliation=owner,collaborator,organization_member" % page,
+                        token, timeout=40)
+        if not isinstance(batch, list):
+            break
+        items += batch
+        if len(batch) < 100:
+            break
+    repos = []
+    for r in items:
+        slug = str(r.get("full_name") or "").strip()
+        if not slug:
+            continue
+        repos.append({"slug": slug, "private": bool(r.get("private")),
+                      "pushed": str(r.get("pushed_at") or ""),
+                      "fork": bool(r.get("fork")),
+                      "can_push": bool((r.get("permissions") or {}).get("push"))})
+    repos.sort(key=lambda r: (r["can_push"], r["pushed"]), reverse=True)
+    GH_REPOS_CACHE.update({"token": token, "items": repos, "at": time.time()})
+    return repos
+
+
+def gh_repo_meta(slug: str, token: str) -> Optional[dict]:
+    try:
+        d = _gh_api(f"/repos/{_norm_repo(slug)}", token, timeout=25)
+    except Exception:
+        return None
+    return d if isinstance(d, dict) and d.get("full_name") else None
+
+
+def gh_repo_has_bot(slug: str, token: str) -> bool:
+    try:
+        d = _gh_api(f"/repos/{_norm_repo(slug)}/contents/aistv_bot.py", token, timeout=25)
+    except Exception:
+        return False
+    return isinstance(d, dict) and d.get("type") == "file"
+
+
+def current_repo_slug() -> str:
+    """Repo đích: env → file .secrets/github_repo → state → origin của bản clone."""
+    for name in ("AISTV_GITHUB_REPO", "AISTV_REPO"):
+        val = get_secret(name)
+        if val:
+            return _norm_repo(val)
+    try:
+        val = GITHUB_REPO_FILE.read_text("utf-8").strip()
+        if val:
+            return _norm_repo(val)
+    except Exception:
+        pass
+    val = _norm_repo(str(STATE.get("github_repo") or ""))
+    if val:
+        return val
+    return repo_remote_slug()
+
+
+def repo_remote_slug() -> str:
+    rd = repo_dir()
+    if not rd:
+        return ""
+    rc, out = _git(["remote", "get-url", "origin"], rd, timeout=15)
+    return _norm_repo(out.splitlines()[0]) if rc == 0 and out else ""
+
+
+def set_repo_slug(slug: str) -> str:
+    slug = _norm_repo(slug)
+    parts = slug.split("/")
+    if len(parts) != 2 or not all(re.fullmatch(r"[\w.-]+", p) for p in parts):
+        raise RuntimeError("Repo phải dạng owner/name (ví dụ Phucvncom55/AISTV).")
+    STATE["github_repo"] = slug
+    save_state()
+    try:
+        GITHUB_REPO_FILE.write_text(slug + "\n", "utf-8")
+        GITHUB_REPO_FILE.chmod(0o600)
+    except Exception:
+        pass
+    return slug
+
+
+def gh_repo_picker(chat_id: int, token: str, page: int = 0, refresh: bool = False) -> tuple:
+    repos = gh_all_repos(token, refresh)
+    if not repos:
+        raise RuntimeError("Tài khoản này chưa có repo nào — tạo mới bằng "
+                           "/github repo create <ten> [private].")
+    per = 6
+    pages = max(1, (len(repos) + per - 1) // per)
+    page = max(0, min(page, pages - 1))
+    chunk = repos[page * per:(page + 1) * per]
+    GH_REPO_PICK[chat_id] = [r["slug"] for r in chunk]
+    cur = current_repo_slug()
+    lines = [f"🗂 <b>Repo của tài khoản</b> · {len(repos)} repo",
+             f"Trang {page + 1}/{pages}"]
+    if cur:
+        lines.append(f"Đang dùng: <code>{esc(cur)}</code>")
+    lines.append("")
+    rows = []
+    for i, r in enumerate(chunk):
+        mark = "✅ " if r["slug"] == cur else ""
+        lock = "🔒 " if r["private"] else "🌐 "
+        lines.append(f"{mark}{lock}<code>{esc(r['slug'])}</code>"
+                     + ("" if r["can_push"] else " · chỉ đọc"))
+        rows.append([InlineKeyboardButton(f"{mark}{lock}{r['slug']}"[:60],
+                                          callback_data=f"ghr:s:{i}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ Trước", callback_data=f"ghr:p:{page - 1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("Sau ▶️", callback_data=f"ghr:p:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("🔄 Quét lại", callback_data="ghr:r"),
+                 InlineKeyboardButton("➕ Tạo repo", callback_data="ghr:new")])
+    lines += ["", "Bấm một repo để đặt làm repo đích."]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def gh_repo_detail(chat_id: int, idx: int) -> tuple:
+    slugs = GH_REPO_PICK.get(chat_id) or []
+    if not (0 <= idx < len(slugs)):
+        raise RuntimeError("Danh sách đã cũ — gửi /github repos để quét lại.")
+    slug = slugs[idx]
+    token = github_token()
+    meta = gh_repo_meta(slug, token)
+    if not meta:
+        raise RuntimeError(f"Không truy cập được {slug} bằng token hiện tại.")
+    has_bot = gh_repo_has_bot(slug, token)
+    set_repo_slug(slug)
+    origin = repo_remote_slug()
+    perms = meta.get("permissions") or {}
+    lines = [f"✅ <b>Đã chọn repo đích</b> <code>{esc(slug)}</code>",
+             f"• Quyền: {'đẩy code' if perms.get('push') else 'chỉ đọc'}",
+             f"• Code bot: {'có' if has_bot else 'chưa có'}",
+             f"• Origin máy này: <code>{esc(origin or 'chưa có')}</code>"]
+    rows = []
+    if has_bot and repo_dir() and origin != slug:
+        rows.append([InlineKeyboardButton("🔀 Đổi origin + pull repo này",
+                                          callback_data=f"ghr:o:{idx}")])
+    if perms.get("push") and repo_dir():
+        rows.append([InlineKeyboardButton(
+            "⬆️ Đẩy code lên repo này" if not has_bot else "⬆️ Push code hiện tại",
+            callback_data=f"ghr:up:{idx}")])
+    rows.append([InlineKeyboardButton("🗂 Danh sách repo", callback_data="ghr:r")])
+    lines += ["", "Repo đích đã lưu — /update sẽ dùng repo này."]
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def _gh_set_origin(rd: Path, slug: str) -> tuple:
+    url = f"https://github.com/{_norm_repo(slug)}.git"
+    rc, out = _git(["remote", "set-url", "origin", url], rd, timeout=20)
+    if rc != 0:
+        rc, out = _git(["remote", "add", "origin", url], rd, timeout=20)
+    return rc, out
+
+
+def gh_switch_repo(slug: str) -> str:
+    """Đổi origin sang repo đã chọn rồi fetch/pull fast-forward."""
+    rd = repo_dir()
+    if not rd:
+        raise RuntimeError("Không tìm thấy repo (.git) trên máy để đổi origin.")
+    rc, out = _gh_set_origin(rd, slug)
+    if rc != 0:
+        raise RuntimeError(f"Không đổi được origin: {oneline(out, 300)}")
+    rc, out = _git(["fetch", "origin", "--prune"], rd, timeout=300)
+    if rc != 0:
+        raise RuntimeError(f"Fetch lỗi: {oneline(out, 300)}")
+    rc, out = _git(["pull", "--ff-only"], rd, timeout=300)
+    if rc != 0:
+        raise RuntimeError("Đã đổi origin nhưng chưa pull được (lịch sử khác nhau hoặc có "
+                           f"thay đổi chưa commit): {oneline(out, 300)}")
+    return f"origin → {slug}\n{oneline(out, 300)}"
+
+
+def gh_push_code(slug: str) -> str:
+    """Đặt origin về repo đã chọn rồi đẩy code hiện tại lên."""
+    rd = repo_dir()
+    if not rd:
+        raise RuntimeError("Không tìm thấy repo (.git) trên máy để đẩy code.")
+    rc, out = _gh_set_origin(rd, slug)
+    if rc != 0:
+        raise RuntimeError(f"Không đổi được origin: {oneline(out, 300)}")
+    if _git(["status", "--porcelain"], rd, timeout=60)[1]:
+        _git(["add", "-A"], rd, timeout=180)
+        _git(["commit", "-m", f"AI STV — cập nhật {now():%d/%m/%Y %H:%M}"], rd, timeout=180)
+    rc, out = _git(["push", "-u", "origin", "HEAD"], rd, timeout=300)
+    if rc != 0:
+        raise RuntimeError("Push thất bại (repo đã có lịch sử khác?). Chọn repo trống/khác "
+                           f"hoặc xử lý thủ công: {oneline(out, 400)}")
+    return f"origin → {slug}\n{oneline(out, 300)}"
+
+
+def gh_create_repo(name: str, token: str, private: bool = False) -> str:
+    name = re.sub(r"[^\w.-]+", "-", (name or "").strip()).strip("-._")
+    if not name:
+        raise RuntimeError("Tên repo không hợp lệ.")
+    d = _gh_api("/user/repos", token, "POST",
+                {"name": name, "private": bool(private), "auto_init": False,
+                 "description": "AI STV — Telegram × OpenCode"}, timeout=40)
+    slug = str((d or {}).get("full_name") or "").strip()
+    if not slug:
+        raise RuntimeError("GitHub không trả về tên repo vừa tạo.")
+    GH_REPOS_CACHE.update({"token": "", "items": [], "at": 0.0})
+    return slug
+
+
+def repo_access(slug: str, token: str) -> bool:
+    return bool(slug) and gh_repo_meta(slug, token) is not None
+
+
+def repo_can_push(slug: str, token: str) -> bool:
+    meta = gh_repo_meta(slug, token)
+    return bool(meta and (meta.get("permissions") or {}).get("push"))
 
 
 def repo_dir() -> Optional[Path]:
@@ -1812,7 +2064,10 @@ HELP_TEXT = (
     "/variant [high|max|off] — mức reasoning của model\n"
     "Agent tự dùng nút bấm khi cần bạn chọn/xác nhận.\n\n"
     "<b>GitHub &amp; tự cập nhật (chủ bot)</b>\n/github login — kết nối GitHub bằng mã, lưu lâu dài\n"
-    "/github token &lt;PAT&gt; · /github status · /github repo · /github logout\n"
+    "/github token &lt;PAT&gt; — đổi token; bot tự quét repo nếu repo cũ không truy cập được\n"
+    "/github repos — quét repo của tài khoản, bấm nút để chọn repo đích\n"
+    "/github repo use owner/name — đặt repo đích · /github repo create tên [private]\n"
+    "/github status · /github repo · /github logout\n"
     "/update — pull bản mới trên GitHub rồi khởi động lại\n/restart — khởi động lại bot\n\n"
     "<b>Hệ thống (chủ bot)</b>\n/model [provider/tên] — xem/đổi model\n/models — danh sách model\n/allow &lt;id&gt; · /deny &lt;id&gt; — cấp/thu hồi quyền"
 )
@@ -1952,6 +2207,134 @@ async def cmd_variant(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(f"✅ Variant: <code>{esc(cur)}</code>", parse_mode=HTML)
 
 
+async def _github_connected(bot, chat_id: int, info: dict, tok: str) -> None:
+    """Sau khi có token: kiểm tra repo đích; không truy cập được thì quét repo cho chọn."""
+    active = github_token() or tok
+    if active != tok:
+        await bot.send_message(
+            chat_id,
+            "⚠️ Đang có <code>GITHUB_TOKEN</code>/<code>GH_TOKEN</code> trong môi trường "
+            "(Colab Secrets) và nó được ưu tiên hơn token vừa nhập. Xoá secret đó nếu muốn "
+            "dùng token mới.", parse_mode=HTML)
+    login = info.get("login") or "?"
+    slug = current_repo_slug()
+    ok = False
+    if slug:
+        try:
+            ok = await asyncio.to_thread(repo_can_push, slug, active)
+        except Exception:
+            ok = False
+    head = ("✅ <b>Đã kết nối GitHub</b>\n"
+            f"• Tài khoản: <b>{esc(login)}</b>\n"
+            "• Đã cấu hình <code>git</code> (và <code>gh</code> nếu có)\n")
+    if ok:
+        await bot.send_message(
+            chat_id, head + f"• Repo đích: <code>{esc(slug)}</code>\n\n"
+            "Đổi repo bất cứ lúc nào: /github repos", parse_mode=HTML,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🗂 Chọn / đổi repo", callback_data="ghr:r")]]))
+        return
+    await bot.send_message(
+        chat_id,
+        head + f"• Repo đích cũ: <code>{esc(slug or 'chưa đặt')}</code> — tài khoản này "
+        "<b>không có quyền ghi</b> (hoặc không truy cập được).\n\n"
+        "🔍 Đang quét repo của tài khoản này để bạn chọn…", parse_mode=HTML)
+    try:
+        text, kb = await asyncio.to_thread(gh_repo_picker, chat_id, active, 0, True)
+        await bot.send_message(chat_id, text, parse_mode=HTML, reply_markup=kb)
+    except Exception as e:
+        await bot.send_message(
+            chat_id,
+            f"⚠️ Không quét được repo: {esc(oneline(str(e), 300))}\n"
+            "Tạo repo mới: <code>/github repo create ten-repo [private]</code>",
+            parse_mode=HTML)
+
+
+async def _github_repo_cmd(msg, sub: str, args: list, tok: str) -> None:
+    """Xử lý /github repo|repos [list|use owner/name|create tên [private]]."""
+    if not tok:
+        await msg.reply_text("⚠️ Chưa kết nối GitHub. Dùng /github login hoặc /github token &lt;PAT&gt;.",
+                             parse_mode=HTML)
+        return
+    action = (args[0].lower() if args else "")
+
+    if action in ("use", "set", "select", "chon", "chọn") and len(args) > 1:
+        try:
+            slug = set_repo_slug(args[1])
+        except Exception as e:
+            await msg.reply_text(f"⚠️ {esc(oneline(str(e), 300))}", parse_mode=HTML)
+            return
+        lines = [f"✅ Repo đích: <code>{esc(slug)}</code>"]
+        if repo_dir():
+            origin = repo_remote_slug()
+            if origin and origin != slug:
+                lines.append(f"• Origin máy này vẫn là <code>{esc(origin)}</code>\n"
+                             "  Đổi origin: <code>/github repos</code> → chọn repo → "
+                             "“Đổi origin + pull”.")
+            else:
+                lines.append("• Origin đã khớp.")
+        lines.append("• /update sẽ pull từ repo này.")
+        await msg.reply_text("\n".join(lines), parse_mode=HTML)
+        return
+
+    if action in ("create", "new", "tao", "tạo") and len(args) > 1:
+        private = any(a.lower() in ("private", "rieng", "riêng", "kin", "kín") for a in args[2:])
+        await msg.reply_text("⏳ Đang tạo repo trên GitHub…")
+        try:
+            slug = await asyncio.to_thread(gh_create_repo, args[1], tok, private)
+        except Exception as e:
+            await msg.reply_text(f"❌ Không tạo được repo: {esc(oneline(str(e), 400))}\n"
+                                 "Có thể tên đã tồn tại — dùng /github repos để chọn repo có sẵn.",
+                                 parse_mode=HTML)
+            return
+        set_repo_slug(slug)
+        try:
+            out = await asyncio.to_thread(gh_push_code, slug)
+        except Exception as e:
+            await msg.reply_text(
+                f"✅ Đã tạo <code>{esc(slug)}</code> nhưng chưa đẩy được code:\n"
+                f"{esc(oneline(str(e), 500))}\n\n"
+                "Thử: <code>/github repos</code> → chọn repo → “Đẩy code lên repo này”.",
+                parse_mode=HTML)
+            return
+        await msg.reply_text(
+            f"✅ <b>Đã tạo repo + đẩy code</b>\n• Repo: <code>{esc(slug)}</code>\n"
+            f"• Origin: đã trỏ về repo mới\n<pre>{esc(out[-600:])}</pre>",
+            parse_mode=HTML)
+        return
+
+    if sub != "repo" or action in ("list", "all", "scan", "quet", "quét"):
+        try:
+            text, kb = await asyncio.to_thread(gh_repo_picker, msg.chat_id, tok, 0, True)
+        except Exception as e:
+            await msg.reply_text(f"⚠️ Không quét được repo: {esc(oneline(str(e), 400))}",
+                                 parse_mode=HTML)
+            return
+        await msg.reply_text(text, parse_mode=HTML, reply_markup=kb)
+        return
+
+    # /github repo — thông tin hiện tại + danh sách để chọn
+    cur = current_repo_slug()
+    origin = repo_remote_slug()
+    lines = ["📦 <b>Repo đích</b>",
+             f"• Đang dùng: <code>{esc(cur or 'chưa đặt')}</code>"]
+    rd = repo_dir()
+    if rd:
+        _, branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], rd)
+        _, head = _git(["log", "-1", "--oneline"], rd)
+        lines.append(f"• Bản clone: <code>{esc(rd)}</code> · {esc(branch)} · {esc(head[:70])}")
+        if origin:
+            lines.append(f"• Origin: <code>{esc(origin)}</code>")
+    lines += ["", "<i>Chọn repo bên dưới để đặt làm repo đích.</i>"]
+    try:
+        text, kb = await asyncio.to_thread(gh_repo_picker, msg.chat_id, tok, 0, False)
+    except Exception as e:
+        await msg.reply_text("\n".join(lines + ["", f"⚠️ {esc(oneline(str(e), 300))}"]),
+                             parse_mode=HTML)
+        return
+    await msg.reply_text("\n".join(lines) + "\n\n" + text, parse_mode=HTML, reply_markup=kb)
+
+
 async def _gh_poll_task(bot, chat_id: int, device: dict) -> None:
     interval = max(5, int(device.get("interval") or 5))
     deadline = time.time() + int(device.get("expires_in") or 900)
@@ -1983,13 +2366,12 @@ async def _gh_poll_task(bot, chat_id: int, device: dict) -> None:
         login = info.get("login") or "?"
         await bot.send_message(
             chat_id,
-            "✅ <b>Đã kết nối GitHub</b>\n"
-            f"• Tài khoản: <b>{esc(login)}</b>\n"
-            "• Đã cấu hình <code>git</code> + <code>gh</code>\n"
+            f"✅ <b>Đã lưu token GitHub</b> · tài khoản <b>{esc(login)}</b>\n"
             f"• Lưu tại: <code>{esc(GITHUB_TOKEN_FILE)}</code>\n\n"
             "Lần sau (kể cả Colab khác) bot tự dùng lại. Để chắc chắn 100%, thêm secret "
             "<code>GITHUB_TOKEN</code> trong Colab Secrets hoặc bật Google Drive.",
             parse_mode=HTML)
+        await _github_connected(bot, chat_id, info, tok)
         return
     await bot.send_message(chat_id, "⌛ Mã đăng nhập đã hết hạn. Gửi /github login để lấy mã mới.")
 
@@ -2037,21 +2419,11 @@ async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Đã lưu token GitHub cho <b>{esc(info.get('login') or '?')}</b>.\n"
             "⚠️ Token vừa gửi nằm trong lịch sử chat Telegram — nên thu hồi nếu đã lộ.",
             parse_mode=HTML)
+        await _github_connected(context.bot, update.effective_chat.id, info, value)
         return
 
-    if sub == "repo":
-        rd = repo_dir()
-        if not rd:
-            await msg.reply_text("⚠️ Không tìm thấy thư mục repo (.git).")
-            return
-        _, remote = _git(["remote", "-v"], rd)
-        _, branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], rd)
-        _, head = _git(["log", "-1", "--oneline"], rd)
-        await msg.reply_text(
-            f"📦 <b>Repo bot</b>\n• Thư mục: <code>{esc(rd)}</code>\n"
-            f"• Nhánh: <code>{esc(branch)}</code>\n• Commit: <code>{esc(head)}</code>\n"
-            f"<pre>{esc(remote[:1200])}</pre>",
-            parse_mode=HTML)
+    if sub in ("repo", "repos", "list", "scan"):
+        await _github_repo_cmd(msg, sub, context.args[1:], tok)
         return
 
     # status
@@ -2075,14 +2447,26 @@ async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if rd:
         _, branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], rd)
         _, head = _git(["log", "-1", "--oneline"], rd)
-        lines.append(f"• Repo: <code>{esc(rd)}</code> · {esc(branch)} · {esc(head[:80])}")
+        lines.append(f"• Bản clone: <code>{esc(rd)}</code> · {esc(branch)} · {esc(head[:80])}")
+    slug = current_repo_slug()
+    if slug:
+        lines.append(f"• Repo đích: <code>{esc(slug)}</code>")
     lines += ["", "<b>Lệnh</b>",
               "/github login — kết nối bằng mã (khuyến nghị)",
               "/github token &lt;PAT&gt; — dán token có sẵn",
+              "/github repos — quét &amp; chọn repo bằng nút",
+              "/github repo use owner/name — đặt repo đích",
+              "/github repo create tên [private] — tạo repo mới + đẩy code",
               "/github repo — xem repo/nhánh/commit",
               "/github logout — ngắt kết nối",
               "/update — pull bản mới + khởi động lại"]
-    await msg.reply_text("\n".join(lines), parse_mode=HTML)
+    kb = None
+    if tok:
+        rows = [[InlineKeyboardButton("🗂 Chọn / đổi repo", callback_data="ghr:r")]]
+        if slug:
+            rows.append([InlineKeyboardButton("📦 Repo hiện tại", callback_data="ghr:cur")])
+        kb = InlineKeyboardMarkup(rows)
+    await msg.reply_text("\n".join(lines), parse_mode=HTML, reply_markup=kb)
 
 
 @guard(owner_only=True)
@@ -2092,6 +2476,13 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rd:
         await msg.reply_text("⚠️ Không tìm thấy repo (.git) để cập nhật.")
         return
+    slug = current_repo_slug()
+    origin = repo_remote_slug()
+    if slug and slug != origin:
+        rc, out = _gh_set_origin(rd, slug)
+        if rc != 0:
+            await msg.reply_text(f"⚠️ Không trỏ được origin về repo đích {slug}: {oneline(out, 300)}")
+            return
     rc, dirty = _git(["status", "--porcelain"], rd)
     if dirty:
         await msg.reply_text(
@@ -2334,10 +2725,119 @@ async def _on_ask_button(q, data: str) -> None:
         pass
 
 
+async def _on_gh_repo_button(q, data: str) -> None:
+    chat_id = q.message.chat_id
+    if not (q.from_user and is_owner(q.from_user.id)):
+        await q.answer("Chỉ chủ bot dùng được.", show_alert=True)
+        return
+    tok = github_token()
+    if not tok:
+        await q.answer("Chưa kết nối GitHub.", show_alert=True)
+        return
+    parts = data.split(":")
+    act = parts[1] if len(parts) > 1 else ""
+    arg = parts[2] if len(parts) > 2 else ""
+
+    if act == "cur":
+        await q.answer()
+        slug = current_repo_slug()
+        if not slug:
+            await q.message.reply_text("Chưa đặt repo đích. Bấm “🗂 Chọn / đổi repo”.",
+                                       parse_mode=HTML,
+                                       reply_markup=InlineKeyboardMarkup(
+                                           [[InlineKeyboardButton("🗂 Chọn / đổi repo",
+                                                                  callback_data="ghr:r")]]))
+            return
+        meta = await asyncio.to_thread(gh_repo_meta, slug, tok)
+        perms = (meta or {}).get("permissions") or {}
+        origin = repo_remote_slug()
+        lines = [f"📦 <b>Repo đích</b> <code>{esc(slug)}</code>",
+                 f"• Quyền: {'đẩy code' if perms.get('push') else 'chỉ đọc'}",
+                 f"• Origin máy này: <code>{esc(origin or 'chưa có')}</code>"]
+        rows = [[InlineKeyboardButton("🗂 Chọn / đổi repo", callback_data="ghr:r")]]
+        if perms.get("push") and repo_dir():
+            rows.append([InlineKeyboardButton("⬆️ Đẩy code lên repo này",
+                                              callback_data="ghr:upc")])
+        await q.edit_message_text("\n".join(lines), parse_mode=HTML,
+                                  reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if act == "upc":
+        slug = current_repo_slug()
+        if not slug:
+            await q.answer("Chưa đặt repo đích.", show_alert=True)
+            return
+        await q.answer("Đang đẩy code…")
+        try:
+            out = await asyncio.to_thread(gh_push_code, slug)
+            await q.edit_message_text(
+                f"⬆️ Đã đẩy code lên <code>{esc(slug)}</code>\n<pre>{esc(out[-700:])}</pre>",
+                parse_mode=HTML)
+        except Exception as e:
+            await q.answer(oneline(str(e), 180), show_alert=True)
+        return
+
+    if act == "new":
+        await q.answer()
+        await q.message.reply_text(
+            "➕ <b>Tạo repo mới</b>\n"
+            "<code>/github repo create ten-repo</code> — public\n"
+            "<code>/github repo create ten-repo private</code> — private\n"
+            "Bot tạo xong sẽ tự đẩy code lên.", parse_mode=HTML)
+        return
+
+    if act in ("r", "p"):
+        await q.answer("Đang quét…")
+        page = int(arg) if act == "p" and arg.isdigit() else 0
+        try:
+            text, kb = await asyncio.to_thread(gh_repo_picker, chat_id, tok, page, act == "r")
+            await q.edit_message_text(text, parse_mode=HTML, reply_markup=kb)
+        except Exception as e:
+            await q.answer(oneline(str(e), 180), show_alert=True)
+        return
+
+    if act in ("s", "o", "up") and arg.isdigit():
+        idx = int(arg)
+        if act == "s":
+            await q.answer()
+            try:
+                text, kb = await asyncio.to_thread(gh_repo_detail, chat_id, idx)
+                await q.edit_message_text(text, parse_mode=HTML, reply_markup=kb)
+            except Exception as e:
+                await q.answer(oneline(str(e), 180), show_alert=True)
+            return
+        slugs = GH_REPO_PICK.get(chat_id) or []
+        if not (0 <= idx < len(slugs)):
+            await q.answer("Danh sách đã cũ — quét lại nhé.", show_alert=True)
+            return
+        slug = slugs[idx]
+        set_repo_slug(slug)
+        await q.answer("Đang chạy…")
+        try:
+            if act == "o":
+                out = await asyncio.to_thread(gh_switch_repo, slug)
+                note = "🔀 Đã đổi origin và cập nhật từ repo mới."
+            else:
+                out = await asyncio.to_thread(gh_push_code, slug)
+                note = "⬆️ Đã đẩy code lên repo đích."
+            await q.edit_message_text(
+                f"{note}\n• Repo: <code>{esc(slug)}</code>\n<pre>{esc(out[-700:])}</pre>",
+                parse_mode=HTML)
+        except Exception as e:
+            await q.edit_message_text(
+                f"⚠️ {esc(oneline(str(e), 700))}\n\n"
+                f"Repo đích vẫn là <code>{esc(slug)}</code>. Thử /github repos để chọn repo khác.",
+                parse_mode=HTML)
+        return
+
+
 @guard()
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     chat_id, data = q.message.chat_id, q.data
+    if data.startswith("ghr:"):
+        await _on_gh_repo_button(q, data)
+        return
     if data.startswith("ask:"):
         await _on_ask_button(q, data)
         return
@@ -3125,11 +3625,12 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     wid = _new_id("w")
     if sub == "git":
-        if len(args) < 2:
-            await msg.reply_text("Dùng: /watch git owner/repo [nhánh]")
-            return
-        repo = _norm_repo(args[1])
+        repo = _norm_repo(args[1]) if len(args) > 1 else current_repo_slug()
         branch = args[2] if len(args) > 2 else "main"
+        if not repo:
+            await msg.reply_text("Dùng: /watch git owner/repo [nhánh]\n"
+                                 "(chưa có repo đích — đặt bằng /github repos)")
+            return
         if "/" not in repo:
             await msg.reply_text("Repo phải dạng owner/name (ví dụ Phucvncom55/AISTV).")
             return

@@ -6,7 +6,7 @@ Chạy được trên **Colab, VPS, máy cá nhân** — chỉ cần Python 3.10
 
 ## ⚡ 3 bước
 
-1. `bash push.sh AISTV public` → in ra **link repo** + lệnh chạy.
+1. `bash push.sh` → quét repo của tài khoản GitHub, cho **chọn repo có sẵn** hoặc tạo mới, rồi push.
 2. Thêm `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`) vào 🔑 Secrets của Colab.
 3. Dán lệnh này vào ô Colab:
 
@@ -23,11 +23,26 @@ Chạy được trên **Colab, VPS, máy cá nhân** — chỉ cần Python 3.10
 
 ```bash
 cd AISTV
-gh auth login          # một lần, nếu chưa đăng nhập
-bash push.sh AISTV public
+bash push.sh                     # quét repo của tài khoản → chọn hoặc tạo mới
+bash push.sh owner/repo public   # hoặc chỉ định đúng repo
 ```
 
-Không có `gh`? Tạo repo trống trên GitHub rồi:
+`push.sh` lấy token theo thứ tự: `GITHUB_TOKEN` / `GH_TOKEN` → `.secrets/github_token`
+(bot lưu sau `/github login`) → `gh auth token` nếu có. **Không cần cài `gh`.**
+
+Trong bot Telegram (chủ bot):
+
+```text
+/github login                  # kết nối bằng mã, token lưu lâu dài
+/github repos                  # quét repo của tài khoản, bấm nút chọn repo đích
+/github repo use owner/name    # đặt repo đích bằng chữ
+/github repo create ten private  # tạo repo mới rồi tự push code
+```
+
+Đổi token sang tài khoản khác: `/github token <PAT>` — nếu repo đang dùng không
+truy cập được, bot tự quét repo của tài khoản mới và hiện bảng chọn.
+
+Không có token? Tạo repo trống trên GitHub rồi:
 
 ```bash
 cd AISTV
