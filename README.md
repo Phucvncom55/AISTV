@@ -112,14 +112,23 @@ cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
 | `/watch file <đường dẫn>` | Báo khi file/thư mục thay đổi |
 | `/cloud [sync]` | Trạng thái trí nhớ đám mây / đẩy ngay lên Firebase |
 | `/summary` | Cô đọng hội thoại hiện tại vào `MEMORY.md` |
+| `/email` | Trạng thái kết nối email |
+| `/email test` | Kiểm tra đăng nhập IMAP |
+| `/email inbox [n]` · `/email unread [n]` | Xem hộp thư / thư chưa đọc |
+| `/email read <số\|uid>` | Đọc nội dung một thư |
+| `/email send a@b.c \| Tiêu đề \| Nội dung` | Gửi thư |
+| `/email setup <email> <app-password>` | Lưu cấu hình (chủ bot) |
+| `/email reset` | Xoá cấu hình đã lưu |
 
 - **Trí nhớ đám mây (Firebase RTDB):** `MEMORY.md`, lịch sử chat, nhắc việc và watch được lưu trên cloud nên **restart bot / Colab reset vẫn còn**. Mỗi bot dùng namespace riêng `AISTV_CLOUD_NS/<bot id>`.
 - **Tự tóm tắt:** sau ~20 lượt hỏi–đáp, bot tự cô đọng phần cũ thành gạch đầu dòng trong `MEMORY.md` rồi cắt bớt lịch sử (giữ ngữ cảnh gần).
 - **Nhắc việc/việc định kỳ** sống qua restart; việc định kỳ dùng đúng model và workspace hiện tại.
 
+**Email (IMAP/SMTP):** thêm 2 Colab Secret `AISTV_EMAIL_ADDRESS` + `AISTV_EMAIL_PASSWORD` (mật khẩu ứng dụng) rồi bật Notebook access; hoặc `/email setup <email> <app-password>`. Gmail cần bật 2FA và tạo App Password 16 ký tự. Agent cũng gọi được `aistv_email.py` để đọc/gửi thư trong lúc làm việc; mật khẩu không bao giờ bị in ra.
+
 Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
 
-**Tiến độ kiểu terminal:** trong lúc chạy, tin nhắn "Đang làm việc" tự cập nhật ~1 giây/lần — suy nghĩ của model và từng bước (lệnh, file đang đọc/sửa) cuộn từ dưới lên, dòng cũ rơi khỏi đỉnh khi đầy. `/think off` ẩn suy nghĩ; `/activity on` hiện thêm output/code chi tiết.
+**Tiến độ kiểu terminal:** trong lúc chạy, tin nhắn "Đang làm việc" tự cập nhật ~1 giây/lần trong một **trích dẫn thu gọn/mở rộng** (`blockquote expandable`); lệnh và code nằm trong khối mã nên dễ đọc trên điện thoại. Dòng cũ rơi khỏi đỉnh khi đầy. `/think off` ẩn suy nghĩ; `/activity on` hiện thêm output chi tiết.
 
 ## 5. Biến môi trường
 
@@ -146,6 +155,10 @@ Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
 | `AISTV_WATCH_SELF` | `1` | Tự báo lỗi trong log của chính bot |
 | `AISTV_PROGRESS_TICK` | `1` | Giây giữa 2 lần cập nhật khung tiến độ |
 | `AISTV_PROGRESS_LINES` | `14` | Số dòng cuộn trong khung tiến độ (dòng cũ rơi khỏi đỉnh) |
+| `AISTV_EMAIL_ADDRESS` | trống | Địa chỉ email nhận/gửi |
+| `AISTV_EMAIL_PASSWORD` | trống | Mật khẩu ứng dụng (App Password), không phải mật khẩu đăng nhập |
+| `AISTV_EMAIL_IMAP_HOST` / `AISTV_EMAIL_IMAP_PORT` | tự nhận / `993` | Máy chủ IMAP |
+| `AISTV_EMAIL_SMTP_HOST` / `AISTV_EMAIL_SMTP_PORT` | tự nhận / `587` | Máy chủ SMTP |
 
 Cấu hình nâng cao nằm ở đầu `aistv_bot.py` (model, timeout, số lịch sử, `FULL_ACCESS`, `USE_GOOGLE_DRIVE`).
 
@@ -154,6 +167,7 @@ Cấu hình nâng cao nằm ở đầu `aistv_bot.py` (model, timeout, số lị
 ```
 AISTV/
 ├── aistv_bot.py      bot hoàn chỉnh (cài đặt, agent, Telegram, định dạng)
+├── aistv_email.py    đọc/gửi email IMAP·SMTP + CLI cho agent
 ├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (khuyến nghị)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy
 ├── push.sh           tạo repo GitHub và push

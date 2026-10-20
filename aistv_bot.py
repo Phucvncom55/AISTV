@@ -38,6 +38,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
+try:
+    import aistv_email as mail
+except Exception:                       # thiếu mô-đun → bot vẫn chạy, chỉ tắt email
+    mail = None
+
 CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "1") != "0"   # 0 = giữ bản OpenCode đã cài, không xoá & cài lại
 USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google Drive (sống sót khi Colab reset)
 FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
@@ -192,6 +197,11 @@ try:
     SECRETS_DIR.chmod(0o700)
 except Exception:
     pass
+if mail:
+    try:
+        mail.configure(HOME)
+    except Exception:
+        mail = None
 
 START_TIME = time.time()
 BOT_TOKEN = ""
@@ -889,6 +899,18 @@ def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple] = None) ->
     if skill:
         head.append(f"## SKILL ĐANG KÍCH HOẠT: {skill[0]}\n" + skill[1][:6000])
     head.append(f"## BỐI CẢNH\n- Bây giờ: {now():%d/%m/%Y %H:%M} ({TIMEZONE})\n- Thư mục làm việc: {WORKSPACE}")
+    if mail:
+        try:
+            ecfg = mail.load()
+            if ecfg.get("address") and ecfg.get("password"):
+                cli = Path(__file__).resolve().parent / "aistv_email.py"
+                head.append(
+                    f"## EMAIL (đã kết nối)\n- Hộp thư: {ecfg['address']}\n"
+                    f"- CLI: python3 {cli} status|test|inbox -n 10 [--unread]|read <uid>\n"
+                    f"- Gửi: python3 {cli} send --to a@b.c --subject \"…\" --body \"…\"\n"
+                    "- Không bao giờ in mật khẩu hay nội dung file .secrets/email.json.")
+        except Exception:
+            pass
     head_s = "\n\n".join(head)
     tail = f"## YÊU CẦU MỚI\n[Người dùng]: {user_text}\n\nHãy trả lời yêu cầu mới ở trên."
 
@@ -924,6 +946,13 @@ def _redact(s) -> str:
         s = s.replace(BOT_TOKEN, "***")
     if GH_TOKEN_CACHE:
         s = s.replace(GH_TOKEN_CACHE, "***")
+    if mail:
+        try:
+            pw = mail.password()
+            if pw:
+                s = s.replace(pw, "***")
+        except Exception:
+            pass
     s = _GH_SECRET_RE.sub("***", s)
     return _SECRET_RE.sub(lambda m: f"{m.group(1)}=***", s)
 
@@ -974,10 +1003,11 @@ def _tool_entry(part: dict) -> Optional[dict]:
     icon, label = _TOOL_INFO.get(tool, ("🔧", tool or "Công cụ"))
     target, detail, lang = "", "", ""
 
+    output = ""
     if tool == "bash":
         cmd = _clip(_redact(inp.get("command", "")), PROGRESS_DETAIL)
-        out = _clip(_redact(st.get("output", "")), PROGRESS_DETAIL)
-        detail = _clip(f"$ {cmd}" + (f"\n{out}" if out else ""))
+        output = _clip(_redact(st.get("output", "")), PROGRESS_DETAIL)
+        detail = _clip(f"$ {cmd}")
         lang = "bash"
     elif tool in ("write", "patch"):
         target = _rel(inp.get("filePath", ""))
@@ -1018,7 +1048,8 @@ def _tool_entry(part: dict) -> Optional[dict]:
         target = _clip(_redact(st.get("title") or ""), 100)
     target = " ".join(str(target).split())
     return {"icon": icon, "label": label, "target": target, "detail": detail,
-            "lang": lang, "ok": st.get("status") != "error", "call": part.get("callID")}
+            "output": output, "lang": lang, "ok": st.get("status") != "error",
+            "call": part.get("callID")}
 
 
 def _status_rows(chat_id: int, limit: int = PROGRESS_KEEP) -> list:
@@ -1086,8 +1117,14 @@ def _wrap_live(text: str, width: int = 44) -> list:
     return out
 
 
+def _code_block(text: str, lang: str = "") -> str:
+    """Khối mã kiểu ```lang … ``` để lệnh/code dễ đọc trên Telegram."""
+    cls = f' class="language-{lang}"' if lang and lang.isalnum() else ""
+    return f"<pre><code{cls}>{esc(text)}</code></pre>"
+
+
 def _live_blocks(chat_id: int, detailed: bool = False) -> list:
-    """Đổi dòng thời gian thành các khối HTML đã escape, mới nhất ở cuối."""
+    """Đổi dòng thời gian thành các khối HTML gọn, mới nhất ở cuối."""
     blocks = []
     show_think = STATE.get("show_thinking", True)
     for ev in LIVE.get(chat_id) or []:
@@ -1098,19 +1135,27 @@ def _live_blocks(chat_id: int, detailed: bool = False) -> list:
             if not text:
                 continue
             lines = _wrap_live(text[-900:])
-            blocks.append("💭 " + "\n   ".join(esc(x) for x in lines[-8:]))
+            shown = "\n".join(lines[-6:])
+            blocks.append("💭 <i>Suy nghĩ</i>\n<i>" + esc(shown) + "</i>")
         else:
             e = ev.get("entry") or {}
             line = f"{e.get('icon', '🔧')} " + ("" if e.get("ok", True) else "⚠️ ")
             line += f"<b>{esc(e.get('label', 'Công cụ'))}</b>"
             if e.get("target"):
                 line += f" <code>{esc(e['target'])}</code>"
-            if detailed and e.get("detail"):
-                det = str(e["detail"])
-                dlines = det.splitlines()
-                if len(dlines) > 5:
-                    det = "\n".join(dlines[:5]) + "\n…"
-                line += f"\n<pre>{esc(det)}</pre>"
+            detail = str(e.get("detail") or "").strip()
+            if detail:
+                dlines = detail.splitlines()
+                keep = 8 if detailed else 4
+                if len(dlines) > keep:
+                    detail = "\n".join(dlines[:keep]) + "\n…"
+                line += "\n" + _code_block(detail, e.get("lang") or "")
+            output = str(e.get("output") or "").strip() if detailed else ""
+            if output:
+                olines = output.splitlines()
+                if len(olines) > 6:
+                    output = "\n".join(olines[:6]) + "\n…"
+                line += "\n" + _code_block(output)
             blocks.append(line)
     return blocks
 
@@ -1133,15 +1178,17 @@ def _tail_blocks(blocks: list, max_lines: int = PROGRESS_LINES,
 
 def _render_status(chat_id: int, started: float, frame: str = "🧠") -> str:
     secs = int(time.monotonic() - started)
-    head = f"{frame} <i>Đang làm việc…</i> {secs}s · /stop để huỷ"
+    last = _last_action(chat_id)
+    head = (f"{frame} <i>Đang làm việc…</i> {secs}s"
+            + (f" · {esc(last)}" if last else "") + " · /stop để huỷ")
     detailed = bool(STATE.get("show_activity", False))
     blocks = _live_blocks(chat_id, detailed=detailed)
     kept, cut = _tail_blocks(blocks, PROGRESS_LINES + (4 if detailed else 0))
-    if cut:
-        kept.insert(0, "⏫ <i>…</i>")
     if not kept:
         return head + "\n⏳ <i>Đang chờ model phản hồi…</i>"
-    return "\n".join([head] + kept)
+    if cut:
+        kept.insert(0, "⏫ <i>…đã cuộn, mở rộng để xem đầy đủ</i>")
+    return head + "\n<blockquote expandable>" + "\n\n".join(kept) + "</blockquote>"
 
 
 async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> str:
@@ -1591,6 +1638,18 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
 # ════════════════════════════════════════════════════════════════════
 # 8. LỆNH & TRÌNH XỬ LÝ TELEGRAM
 # ════════════════════════════════════════════════════════════════════
+def email_line() -> str:
+    if not mail:
+        return "không có mô-đun"
+    try:
+        cfg = mail.load()
+    except Exception:
+        return "lỗi cấu hình"
+    if not cfg.get("address"):
+        return "chưa kết nối"
+    return mail.mask(cfg["address"]) + ("" if cfg.get("password") else " ⚠️ thiếu mật khẩu")
+
+
 def build_status(chat_id: int) -> str:
     up = int(time.time() - START_TIME)
     to = "không giới hạn" if AGENT_TIMEOUT <= 0 else f"{AGENT_TIMEOUT}s"
@@ -1604,6 +1663,7 @@ def build_status(chat_id: int) -> str:
         f"{'bật' if ASK_SERVER else 'tắt'}\n"
         f"• Chi tiết việc làm: {'bật' if STATE.get('show_activity', False) else 'tắt'}\n"
         f"• GitHub: {esc(gh)}\n"
+        f"• Email: {esc(email_line())}\n"
         f"• Giới hạn 1 yêu cầu: {to}\n"
         f"• Hội thoại: {len(load_history(chat_id)) // 2} lượt đã lưu\n"
         f"• Trí nhớ dài hạn: {len(memory_items())} mục"
@@ -1643,6 +1703,7 @@ def welcome_text() -> str:
         "• Trí nhớ dài hạn — /remember, /memory; tự tóm tắt hội thoại dài\n"
         "• <b>Trí nhớ đám mây</b> (Firebase) — restart/Colab reset vẫn còn\n"
         "• <b>Chủ động</b>: /remind hẹn giờ, /task tự chạy, /watch theo dõi repo &amp; log\n"
+        "• <b>Email</b>: /email đọc &amp; gửi thư (IMAP/SMTP) ngay trong chat\n"
         "• Đọc file bạn gửi, tạo file và tự gửi lại cho bạn\n"
         "• <b>Không giới hạn 10 phút</b> — dự án lớn chạy tới khi xong (/stop để huỷ)\n"
         "• Kết nối GitHub 1 lần — /github login; tự cập nhật — /update\n\n"
@@ -1658,6 +1719,10 @@ HELP_TEXT = (
     "/forget &lt;số|all&gt; — xoá trí nhớ\n/summary — cô đọng hội thoại vào trí nhớ\n"
     "/cloud [sync] — trạng thái / đồng bộ trí nhớ đám mây\n"
     "/skills — danh sách skills\n/skill &lt;tên&gt; &lt;yêu cầu&gt; — chạy theo skill\n\n"
+    "<b>Email</b>\n/email — trạng thái · /email test — kiểm tra kết nối\n"
+    "/email inbox [n] · /email unread [n] — hộp thư\n"
+    "/email read &lt;số|uid&gt; — đọc thư · /email send a@b.c | Tiêu đề | Nội dung\n"
+    "/email setup &lt;email&gt; &lt;app-password&gt; · /email reset\n\n"
     "<b>Chủ động</b>\n/remind &lt;thời gian&gt; &lt;nội dung&gt; — nhắc việc (+30m, 20:30, daily 8:00)\n"
     "/task &lt;thời gian&gt; &lt;yêu cầu&gt; — để agent tự chạy theo lịch\n"
     "/reminders — danh sách · /unremind &lt;mã|all&gt; — xoá\n"
@@ -3060,6 +3125,170 @@ async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(build_cloud(chat_id), parse_mode=HTML)
 
 
+# ── Email (IMAP/SMTP) ────────────────────────────────────────────────
+EMAIL_LAST: dict = {}                  # chat_id -> [uid, ...] theo thứ tự đã liệt kê
+EMAIL_STAT = {"ok": None, "at": 0.0, "err": ""}
+
+
+def build_email() -> str:
+    if not mail:
+        return "⚠️ Bản bot này thiếu <code>aistv_email.py</code> nên chưa dùng được email."
+    cfg = mail.load()
+    if not cfg.get("address"):
+        return mail.HELP
+    pw = "đã đặt" if cfg.get("password") else "⚠️ thiếu"
+    if EMAIL_STAT["ok"] is True:
+        login = f"🟢 OK · {int(time.time() - EMAIL_STAT['at'])}s trước"
+    elif EMAIL_STAT["ok"] is False:
+        login = "🔴 " + esc(oneline(EMAIL_STAT["err"], 120))
+    else:
+        login = "🟡 chưa kiểm tra"
+    return (
+        "📧 <b>Email</b>\n"
+        f"• Hộp thư: <code>{esc(cfg['address'])}</code>\n"
+        f"• Mật khẩu ứng dụng: {pw}\n"
+        f"• IMAP: <code>{esc(cfg['imap_host'])}:{cfg['imap_port']}</code>\n"
+        f"• SMTP: <code>{esc(cfg['smtp_host'])}:{cfg['smtp_port']}</code>\n"
+        f"• Đăng nhập: {login}\n\n"
+        "<b>Dùng</b>\n"
+        "/email test — kiểm tra kết nối\n"
+        "/email inbox [n] — hộp thư · /email unread [n] — chưa đọc\n"
+        "/email read &lt;số|uid&gt; — đọc thư\n"
+        "/email send a@b.c | Tiêu đề | Nội dung — gửi thư\n"
+        "/email setup &lt;email&gt; &lt;app-password&gt; — đổi cấu hình\n"
+        "/email reset — xoá cấu hình"
+    )
+
+
+def _parse_email_read(chat_id: int, key: str) -> str:
+    key = (key or "").strip()
+    if key.lower().startswith("uid"):
+        return key[3:].strip(" :#") or key
+    if key.isdigit():
+        uids = EMAIL_LAST.get(chat_id) or []
+        n = int(key)
+        if 1 <= n <= len(uids):
+            return uids[n - 1]
+    return key
+
+
+@guard()
+async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat_id = update.effective_message, update.effective_chat.id
+    args = context.args or []
+    sub = args[0].lower() if args else ""
+    owner = is_owner(update.effective_user.id)
+    if not mail:
+        await msg.reply_text("⚠️ Bản bot này thiếu <code>aistv_email.py</code>.", parse_mode=HTML)
+        return
+    try:
+        if sub in ("", "status", "help"):
+            await msg.reply_text(build_email(), parse_mode=HTML)
+            return
+        if sub == "setup":
+            if not owner:
+                await msg.reply_text("⛔ Chỉ chủ bot mới đổi được cấu hình email.")
+                return
+            if len(args) < 3:
+                await msg.reply_text(
+                    "Dùng: <code>/email setup ban@gmail.com mat-khau-ung-dung</code>\n"
+                    "Nên dùng <b>App Password</b> 16 ký tự. Bot sẽ xoá tin nhắn chứa mật khẩu.",
+                    parse_mode=HTML)
+                return
+            cfg = mail.save(args[1], args[2])
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            note = (f"✅ Đã lưu email <code>{esc(cfg['address'])}</code>.\n"
+                    "Thử ngay: /email test")
+            if mail.get_secret("AISTV_EMAIL_ADDRESS") or mail.get_secret("AISTV_EMAIL_PASSWORD"):
+                note += ("\n⚠️ Biến môi trường/Colab Secrets đang ghi đè cấu hình này — "
+                         "xoá secret nếu muốn dùng bản vừa lưu.")
+            await msg.reply_text(note, parse_mode=HTML)
+            return
+        if sub == "reset":
+            if not owner:
+                await msg.reply_text("⛔ Chỉ chủ bot mới xoá được cấu hình email.")
+                return
+            removed = mail.clear()
+            EMAIL_LAST.pop(chat_id, None)
+            EMAIL_STAT.update(ok=None, at=0.0, err="")
+            await msg.reply_text("🗑 Đã xoá cấu hình email đã lưu." if removed
+                                 else "ℹ️ Không có cấu hình email nào đã lưu.")
+            return
+        if sub == "test":
+            note = await msg.reply_text("📧 Đang kiểm tra kết nối email…")
+            try:
+                info = await asyncio.to_thread(mail.test)
+                EMAIL_STAT.update(ok=True, at=time.time(), err="")
+                await note.edit_text(
+                    f"✅ <b>Email hoạt động</b>\n"
+                    f"• Hộp thư: <code>{esc(info['address'])}</code>\n"
+                    f"• INBOX: {info['messages']} thư\n"
+                    f"• IMAP <code>{esc(info['imap'])}</code> · SMTP <code>{esc(info['smtp'])}</code>",
+                    parse_mode=HTML)
+            except Exception as e:
+                EMAIL_STAT.update(ok=False, at=time.time(), err=str(e))
+                await note.edit_text(f"❌ {esc(str(e))}\n\nXem lại /email.", parse_mode=HTML)
+            return
+        if sub in ("inbox", "unread"):
+            limit = 8
+            if len(args) > 1 and args[1].isdigit():
+                limit = max(1, min(int(args[1]), 15))
+            note = await msg.reply_text("📬 Đang tải hộp thư…")
+            rows = await asyncio.to_thread(mail.list_messages, limit, sub == "unread")
+            EMAIL_LAST[chat_id] = [r["uid"] for r in rows]
+            EMAIL_STAT.update(ok=True, at=time.time(), err="")
+            if not rows:
+                await note.edit_text("📭 Không có thư nào.")
+                return
+            lines = [f"📬 <b>{'Thư chưa đọc' if sub == 'unread' else 'Hộp thư'}</b> · {len(rows)} thư"]
+            for i, r in enumerate(rows, 1):
+                mark = "🟡" if r.get("unread") else "⚪"
+                subj = esc(oneline(r["subject"], 80))
+                who = esc(oneline(r["from"], 45))
+                when = esc(oneline(r["date"], 30))
+                lines.append(f"{i}. {mark} <b>{subj}</b>\n   <i>{who}</i> · {when} · <code>{esc(r['uid'])}</code>")
+            lines.append("\nĐọc: <code>/email read &lt;số&gt;</code>")
+            body = "\n".join(lines)
+            await note.edit_text(body[:3900], parse_mode=HTML, link_preview_options=NO_PREVIEW)
+            return
+        if sub == "read":
+            if len(args) < 2:
+                await msg.reply_text("Dùng: /email read <số trong danh sách|uid>")
+                return
+            uid = _parse_email_read(chat_id, args[1])
+            note = await msg.reply_text("📖 Đang đọc thư…")
+            m = await asyncio.to_thread(mail.read_message, uid)
+            body = m["body"][:3200] + ("\n…" if m.get("truncated") or len(m["body"]) > 3200 else "")
+            head = (f"📧 <b>{esc(oneline(m['subject'], 150))}</b>\n"
+                    f"<i>{esc(oneline(m['from'], 80))}</i> · {esc(oneline(m['date'], 40))}")
+            if m.get("attachments"):
+                head += "\n📎 " + esc(", ".join(m["attachments"]))
+            text = head + f"\n\n<blockquote expandable>{esc(body)}</blockquote>"
+            await note.edit_text(text[:3900], parse_mode=HTML, link_preview_options=NO_PREVIEW)
+            return
+        if sub == "send":
+            if not owner:
+                await msg.reply_text("⛔ Chỉ chủ bot mới gửi được email.")
+                return
+            raw = " ".join(args[1:])
+            parts = [x.strip() for x in raw.split("|", 2)]
+            if len(parts) < 3 or not parts[0] or not parts[2]:
+                await msg.reply_text(
+                    "Dùng: <code>/email send nguoinhan@example.com | Tiêu đề | Nội dung</code>",
+                    parse_mode=HTML)
+                return
+            note = await msg.reply_text("✉️ Đang gửi…")
+            await asyncio.to_thread(mail.send, parts[0], parts[1], parts[2])
+            await note.edit_text(f"✅ Đã gửi tới <code>{esc(parts[0])}</code>.", parse_mode=HTML)
+            return
+        await msg.reply_text(build_email(), parse_mode=HTML)
+    except Exception as e:
+        await msg.reply_text(f"❌ Email lỗi: {esc(str(e))}", parse_mode=HTML)
+
+
 # ════════════════════════════════════════════════════════════════════
 # 9. KHỞI CHẠY
 # ════════════════════════════════════════════════════════════════════
@@ -3072,7 +3301,7 @@ COMMANDS = [
     ("variant", "Mức reasoning của model"),
     ("remind", "Hẹn nhắc việc"), ("task", "Việc tự chạy theo lịch"), ("reminders", "Danh sách nhắc việc"),
     ("unremind", "Xoá nhắc việc"), ("watch", "Theo dõi repo/log"), ("cloud", "Trí nhớ đám mây"),
-    ("summary", "Tóm tắt hội thoại vào trí nhớ"),
+    ("summary", "Tóm tắt hội thoại vào trí nhớ"), ("email", "Đọc / gửi email"),
     ("github", "Kết nối / quản lý GitHub"), ("update", "Cập nhật bot từ GitHub"),
     ("restart", "Khởi động lại bot"),
     ("files", "File trong workspace"), ("get", "Tải file về"), ("help", "Hướng dẫn"),
@@ -3155,7 +3384,7 @@ def main() -> None:
                       (["remind"], cmd_remind), (["task", "cron"], cmd_task),
                       (["reminders", "remindlist"], cmd_reminders), (["unremind"], cmd_unremind),
                       (["watch", "monitor"], cmd_watch), (["cloud"], cmd_cloud),
-                      (["summary", "summarize"], cmd_summary),
+                      (["summary", "summarize"], cmd_summary), (["email", "mail"], cmd_email),
                       (["github"], cmd_github), (["update"], cmd_update), (["restart"], cmd_restart),
                       (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny)]:
         app.add_handler(CommandHandler(names, fn))
