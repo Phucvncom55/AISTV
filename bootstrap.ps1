@@ -1,4 +1,4 @@
-﻿#requires -version 5.1
+#requires -version 5.1
 <#
   AI STV — bootstrap cho Windows.
   Luôn tải/cập nhật repo rồi mới chạy run.ps1 trong repo, nhờ vậy không bị
@@ -17,7 +17,25 @@ $ErrorActionPreference = "Stop"
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $ProgressPreference = "SilentlyContinue"
 
+$PSNativeCommandUseErrorActionPreference = $false
+
 function Say([string]$Message) { Write-Host "> $Message" -ForegroundColor Cyan }
+
+function Invoke-Native {
+    param([string]$Exe, [string[]]$Arguments)
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $lines = & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } catch {
+        $lines = @("$_")
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    [pscustomobject]@{ Code = $code; Output = (@($lines) -join [Environment]::NewLine) }
+}
 
 function Normalize-Repo([string]$Url) {
     $Url = ($Url -as [string]).Trim().TrimEnd("/")
@@ -53,25 +71,28 @@ Say "AI STV bootstrap (Windows)"
 
 if (Test-Path -LiteralPath (Join-Path $AppDir ".git")) {
     Say "Cập nhật mã nguồn trong $AppDir"
-    & git -C $AppDir pull --ff-only *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $pull = Invoke-Native git @("-C", $AppDir, "pull", "--ff-only")
+    if ($pull.Code -ne 0) {
         Say "Không fast-forward được — lấy đúng bản $Branch trên GitHub."
-        & git -C $AppDir fetch --depth 1 origin $Branch *> $null
-        if ($LASTEXITCODE -ne 0) {
+        $fetch = Invoke-Native git @("-C", $AppDir, "fetch", "--depth", "1", "origin", $Branch)
+        if ($fetch.Code -ne 0) {
             Write-Host "x Không tải được $Repo (nhánh $Branch)." -ForegroundColor Red
+            if ($fetch.Output) { Write-Host $fetch.Output -ForegroundColor DarkGray }
             exit 1
         }
-        & git -C $AppDir reset --hard FETCH_HEAD *> $null
-        if ($LASTEXITCODE -ne 0) {
+        $reset = Invoke-Native git @("-C", $AppDir, "reset", "--hard", "FETCH_HEAD")
+        if ($reset.Code -ne 0) {
             Write-Host "x Không cập nhật được $AppDir." -ForegroundColor Red
+            if ($reset.Output) { Write-Host $reset.Output -ForegroundColor DarkGray }
             exit 1
         }
     }
 } else {
     Say "Tải mã nguồn từ $Repo"
-    & git clone --depth 1 --branch $Branch $Repo $AppDir
-    if ($LASTEXITCODE -ne 0) {
+    $clone = Invoke-Native git @("clone", "--depth", "1", "--branch", $Branch, $Repo, $AppDir)
+    if ($clone.Code -ne 0) {
         Write-Host "x Không clone được $Repo — kiểm tra URL / nhánh $Branch." -ForegroundColor Red
+        if ($clone.Output) { Write-Host $clone.Output -ForegroundColor DarkGray }
         exit 1
     }
 }
