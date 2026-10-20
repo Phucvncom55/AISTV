@@ -969,7 +969,7 @@ def clear_github_token() -> None:
         cred = Path.home() / ".git-credentials"
         if cred.exists():
             keep = [l for l in cred.read_text("utf-8").splitlines() if "@github.com" not in l]
-            cred.write_text("\n".join(keep) + ("\n" if keep else ""), "utf-8")
+            cred.write_bytes(("\n".join(keep) + ("\n" if keep else "")).encode("utf-8"))
     except Exception:
         pass
     if shutil.which("gh"):
