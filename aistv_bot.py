@@ -29,7 +29,7 @@ KIẾN TRÚC (học theo OpenClaw)
 # ════════════════════════════════════════════════════════════════════
 # 0. CẤU HÌNH — chỉnh ở đây
 # ════════════════════════════════════════════════════════════════════
-import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools
+import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
@@ -37,8 +37,8 @@ from typing import Optional
 
 CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "1") != "0"   # 0 = giữ bản OpenCode đã cài, không xoá & cài lại
 USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google Drive (sống sót khi Colab reset)
-FULL_ACCESS = False             # True = agent được đọc/ghi NGOÀI workspace và không bị chặn quyền
-                                #        (mặc định `opencode run` tự từ chối mọi thao tác cần hỏi quyền)
+FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
+                                #        không cần hỏi quyền (mọi tool của OpenCode đều được auto-approve)
 DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"   # đổi nhanh bằng /model hoặc biến OPENCODE_MODEL
 TIMEZONE = "Asia/Ho_Chi_Minh"
 MAX_HISTORY = 12                # số lượt hỏi-đáp đưa vào ngữ cảnh
@@ -46,6 +46,8 @@ MAX_PARALLEL = 2                # số tiến trình OpenCode chạy cùng lúc
 AGENT_TIMEOUT = 600             # giây tối đa cho 1 yêu cầu
 MAX_PROMPT_BYTES = 110_000      # giới hạn an toàn cho 1 tham số dòng lệnh Linux (128KB)
 SPLIT_LIMIT = 3000              # ký tự tối đa mỗi tin nhắn Telegram (trước khi đổi sang HTML)
+PROGRESS_DETAIL = 500           # ký tự tối đa cho mỗi đoạn chi tiết (lệnh, code, output) trong tin nhắn tiến độ
+PROGRESS_KEEP = 6               # số việc gần nhất hiển thị trong tin nhắn tiến độ
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -448,17 +450,128 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _HEADER = re.compile(r"\A(?:>\s*\w[\w-]*\s*·[^\n]*\n+)+")      # dòng "> build · model" nếu lọt vào stdout
 
 
+_SECRET_RE = re.compile(r"(?i)\b(token|api[_-]?key|password|passwd|secret)\b\s*[=:]\s*\S+")
+
+
+def _redact(s) -> str:
+    s = str(s or "")
+    if BOT_TOKEN:
+        s = s.replace(BOT_TOKEN, "***")
+    return _SECRET_RE.sub(lambda m: f"{m.group(1)}=***", s)
+
+
 def clean_output(s: str) -> str:
     s = _ANSI.sub("", s or "").replace("\r", "").strip()
     s = _HEADER.sub("", s).strip()
-    return s.replace(BOT_TOKEN, "***") if BOT_TOKEN else s
+    return _redact(s)
 
 
-PROGRESS: dict = {}                # chat_id -> dòng hoạt động mới nhất của agent (đọc từ stderr)
+ACTIVITY: dict = {}                # chat_id -> danh sách việc agent đã làm (hiện trong tin nhắn tiến độ)
 
 
-async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> bytes:
-    """Gửi prompt qua stdin, đọc stdout trọn vẹn, đọc stderr từng dòng để hiện tiến độ."""
+def _clip(s, n: int = PROGRESS_DETAIL) -> str:
+    s = str(s or "").strip()
+    return s if len(s) <= n else s[: max(0, n - 1)] + "…"
+
+
+def _rel(path) -> str:
+    try:
+        return Path(path).resolve().relative_to(WORKSPACE.resolve()).as_posix()
+    except Exception:
+        return str(path or "")
+
+
+_TOOL_INFO = {
+    "bash": ("⚙️", "Chạy lệnh"),
+    "write": ("📝", "Tạo file"),
+    "edit": ("✏️", "Sửa code"),
+    "patch": ("✏️", "Sửa code"),
+    "read": ("📖", "Đọc file"),
+    "webfetch": ("🌐", "Truy cập web"),
+    "websearch": ("🌐", "Tìm web"),
+    "grep": ("🔎", "Tìm trong mã"),
+    "glob": ("🔎", "Tìm file"),
+    "list": ("📂", "Liệt kê"),
+    "task": ("🤖", "Giao việc phụ"),
+    "todowrite": ("📋", "Cập nhật kế hoạch"),
+}
+
+
+def _tool_entry(part: dict) -> Optional[dict]:
+    """Đổi 1 sự kiện tool_use của OpenCode thành dòng tiến độ gọn cho Telegram."""
+    tool = (part.get("tool") or "").lower()
+    st = part.get("state") or {}
+    inp = st.get("input") or {}
+    icon, label = _TOOL_INFO.get(tool, ("🔧", tool or "Công cụ"))
+    target, detail, lang = "", "", ""
+
+    if tool == "bash":
+        cmd = _clip(_redact(inp.get("command", "")), PROGRESS_DETAIL)
+        out = _clip(_redact(st.get("output", "")), PROGRESS_DETAIL)
+        detail = _clip(f"$ {cmd}" + (f"\n{out}" if out else ""))
+        lang = "bash"
+    elif tool in ("write", "patch"):
+        target = _rel(inp.get("filePath", ""))
+        detail = _clip(_redact(inp.get("content", "") or inp.get("patch", "")))
+        lang = "diff" if tool == "patch" else ""
+    elif tool == "edit":
+        target = _rel(inp.get("filePath", ""))
+        old = _clip(_redact(inp.get("oldString", "")), 240)
+        new = _clip(_redact(inp.get("newString", "")), 240)
+        detail = _clip("\n".join(x for x in (f"- {old}" if old else "", f"+ {new}" if new else "") if x))
+        lang = "diff"
+    elif tool in ("read", "list"):
+        target = _rel(inp.get("filePath", "") or inp.get("path", ""))
+    elif tool in ("webfetch", "websearch"):
+        target = _clip(_redact(inp.get("url", "") or inp.get("query", "")), 200)
+    elif tool in ("grep", "glob"):
+        target = _clip(_redact(inp.get("pattern", "")), 80)
+        p = inp.get("path")
+        if p:
+            target += f" · {_clip(_rel(p), 60)}"
+    elif tool == "task":
+        target = _clip(_redact(inp.get("description", "") or inp.get("prompt", "")), 120)
+    elif tool == "todowrite":
+        todos = inp.get("todos") or []
+        target = f"{len(todos)} mục" if isinstance(todos, list) else ""
+
+    if not target and tool not in _TOOL_INFO:
+        for v in inp.values():
+            if isinstance(v, str) and v.strip():
+                target = _clip(_redact(v), 100)
+                break
+    return {"icon": icon, "label": label, "target": target, "detail": detail,
+            "lang": lang, "ok": st.get("status") != "error", "call": part.get("callID")}
+
+
+def _status_rows(chat_id: int, limit: int = PROGRESS_KEEP) -> list:
+    rows = []
+    for e in (ACTIVITY.get(chat_id) or [])[-limit:]:
+        mark = "" if e.get("ok", True) else "⚠️ "
+        line = f"{e['icon']} {mark}<b>{esc(e['label'])}</b>"
+        if e.get("target"):
+            line += f" <code>{esc(e['target'])}</code>"
+        rows.append(line)
+        if e.get("detail"):
+            rows.append(f"<pre>{esc(e['detail'])}</pre>")
+    return rows
+
+
+def _render_status(chat_id: int, started: float, frame: str = "🧠") -> str:
+    secs = int(time.monotonic() - started)
+    head = f"{frame} <i>Đang suy nghĩ…</i> {secs}s · /stop để huỷ"
+    rows = _status_rows(chat_id)
+    if not rows:
+        return head
+    body = "\n".join([head, "", "✅ <b>Việc đã làm</b>"] + rows)
+    return body if len(body) <= 3800 else body[:3790] + "\n…"
+
+
+async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> str:
+    """Gửi prompt qua stdin, đọc stdout từng dòng.
+    OpenCode chạy với --format json nên mỗi dòng là 1 sự kiện: text / tool_use / step_start."""
+    texts, raw, buf, mid = [], [], [], None
+
     async def feed():
         if data is None or proc.stdin is None:
             return
@@ -473,6 +586,58 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> b
             except Exception:
                 pass
 
+    async def read_out():
+        nonlocal buf, mid
+        assert proc.stdout is not None
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            t = line.decode("utf-8", "replace").strip()
+            if not t:
+                continue
+            if not t.startswith("{"):
+                raw.append(t)
+                continue
+            try:
+                ev = json.loads(t)
+            except Exception:
+                raw.append(t)
+                continue
+            etype = ev.get("type")
+            part = ev.get("part") or {}
+            if etype == "text":
+                txt = part.get("text") or ""
+                if not txt:
+                    continue
+                m = part.get("messageID")
+                if m != mid:
+                    if buf:
+                        texts.append("".join(buf))
+                    buf, mid = [], m
+                buf.append(txt)
+            elif etype == "tool_use":
+                entry = _tool_entry(part)
+                if entry:
+                    items = ACTIVITY.setdefault(chat_id, [])
+                    call = entry.get("call")
+                    if call:
+                        for i, old in enumerate(items):          # cùng callID: cập nhật, không lặp
+                            if old.get("call") == call:
+                                items[i] = entry
+                                break
+                        else:
+                            items.append(entry)
+                    else:
+                        items.append(entry)
+                    del items[:-PROGRESS_KEEP * 3]
+            elif etype == "error":
+                err = part.get("error") or ev.get("error") or ""
+                if isinstance(err, dict):
+                    err = json.dumps(err, ensure_ascii=False)
+                if err:
+                    raw.append(str(err))
+
     async def watch_err():
         try:
             while True:
@@ -483,26 +648,32 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> b
                 if t:
                     err_lines.append(t)
                     del err_lines[:-60]
-                    PROGRESS[chat_id] = oneline(t, 60)
         except Exception:
             pass
 
-    out, _, _ = await asyncio.gather(proc.stdout.read(), feed(), watch_err())
+    await asyncio.gather(read_out(), feed(), watch_err())
     await proc.wait()
-    return out
+    if buf:
+        texts.append("".join(buf))
+    return (texts[-1] if texts else "") or "\n".join(raw)
 
 
 async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
     """Trả về (ok, text).
-    Lần 1: đưa prompt qua stdin (không dính giới hạn độ dài tham số, không bị CLI bọc thêm dấu ngoặc kép).
-    Lần 2 (nếu lần 1 trống): đưa prompt qua tham số dòng lệnh như cách cũ."""
+    Lần 1: `--format json` + prompt qua stdin → đọc được từng tool call để hiện tiến độ.
+    Lần 2 (nếu lần 1 trống): chế độ cũ (prompt qua tham số dòng lệnh)."""
     env = os.environ.copy()
     env.pop("TELEGRAM_BOT_TOKEN", None)          # không để agent nhìn thấy token
-    env.update(NO_COLOR="1", TERM="dumb")
+    env.update(NO_COLOR="1", TERM="dumb", PWD=str(WORKSPACE))
     err_text = ""
     for attempt in range(retries + 1):
         via_stdin = attempt == 0
-        cmd = [OPENCODE_BIN, "run", "--model", STATE["model"]] + ([] if via_stdin else [prompt])
+        cmd = [OPENCODE_BIN, "run", "--dir", str(WORKSPACE), "--model", STATE["model"], "--auto"]
+        if via_stdin:
+            cmd += ["--format", "json"]
+        else:
+            cmd.append(prompt)
+        ACTIVITY[chat_id] = []
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=str(WORKSPACE), env=env, limit=2 ** 20,
             stdin=asyncio.subprocess.PIPE if via_stdin else asyncio.subprocess.DEVNULL,
@@ -519,11 +690,10 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
             return False, f"⏱ Yêu cầu vượt quá {AGENT_TIMEOUT // 60} phút nên đã bị dừng. Hãy chia nhỏ yêu cầu rồi thử lại."
         finally:
             RUNNING.pop(chat_id, None)
-            PROGRESS.pop(chat_id, None)
         if chat_id in CANCELLED:
             CANCELLED.discard(chat_id)
             return False, "🛑 Đã huỷ tác vụ."
-        text = clean_output(out.decode("utf-8", "replace"))
+        text = clean_output(out)
         if text:
             return True, text
         err_text = "\n".join(err_lines)
@@ -539,7 +709,8 @@ def snapshot() -> dict:
     snap = {}
     for root, dirs, files in os.walk(WORKSPACE):
         rel_root = Path(root).relative_to(WORKSPACE)
-        dirs[:] = [d for d in dirs if not d.startswith(".") and not (rel_root == Path(".") and d in _SKIP_DIRS)]
+        dirs[:] = [d for d in dirs
+                   if not d.startswith(".") and d not in _SKIP_DIRS and d != "__pycache__"]
         for fn in files:
             rel = (rel_root / fn).as_posix()
             if fn.startswith(".") or rel in _SYSTEM_FILES:
@@ -548,7 +719,13 @@ def snapshot() -> dict:
                 st = (Path(root) / fn).stat()
             except OSError:
                 continue
-            snap[rel] = (st.st_mtime_ns, st.st_size)
+            sig = (st.st_mtime_ns, st.st_size)
+            if st.st_size <= 2 * 1024 * 1024:                 # bắt cả trường hợp sửa cùng kích thước, cùng tick
+                try:
+                    sig += (hashlib.blake2b((Path(root) / fn).read_bytes(), digest_size=8).hexdigest(),)
+                except OSError:
+                    pass
+            snap[rel] = sig
     return snap
 
 
@@ -679,40 +856,66 @@ MENU_KB = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Trạng thái", call
 
 
 async def _ticker(bot, chat_id: int, status, started: float, stop: asyncio.Event) -> None:
-    frames, i = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", 0
+    frames, i, last = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", 0, ""
     while not stop.is_set():
         try:
             await bot.send_chat_action(chat_id, ChatAction.TYPING)
         except Exception:
             pass
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=4)
-            break
-        except asyncio.TimeoutError:
-            pass
-        i += 1
-        if i % 2 == 0:
-            act = PROGRESS.get(chat_id)
-            line2 = f"\n<code>{esc(act)}</code>" if act else ""
+        body = _render_status(chat_id, started, frames[i % len(frames)])
+        if body != last:
             try:
-                await status.edit_text(
-                    f"{frames[(i // 2) % len(frames)]} <i>Đang xử lý… {int(time.monotonic() - started)}s</i>  ·  /stop để huỷ{line2}",
-                    parse_mode=HTML)
+                await status.edit_text(body, parse_mode=HTML, link_preview_options=NO_PREVIEW)
+                last = body
+            except RetryAfter as e:
+                await asyncio.sleep(e.retry_after + 1)
             except Exception:
                 pass
+        i += 1
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _finish_status(status, chat_id: int, started: float, ok: bool) -> None:
+    """Chốt tin nhắn tiến độ thành danh sách việc đã làm; xoá nếu agent không dùng tool."""
+    rows = _status_rows(chat_id)
+    if not rows:
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        ACTIVITY.pop(chat_id, None)
+        return
+    head = (f"✅ <b>Hoàn tất</b> · {time.monotonic() - started:.1f}s" if ok
+            else f"⚠️ <b>Dừng lại</b> · {time.monotonic() - started:.1f}s")
+    body = "\n".join([head, "", "<b>Việc đã làm</b>"] + rows)
+    if len(body) > 3900:
+        body = body[:3890] + "\n…"
+    try:
+        await status.edit_text(body, parse_mode=HTML, link_preview_options=NO_PREVIEW)
+    except Exception:
+        try:
+            await status.delete()
+        except Exception:
+            pass
+    ACTIVITY.pop(chat_id, None)
 
 
 async def send_new_files(message, before: dict) -> None:
     after = snapshot()
-    changed = [k for k, v in after.items() if before.get(k) != v and v[1] > 0 and v[1] < 45 * 1024 * 1024]
-    for rel in changed[:5]:
+    changed = [k for k, v in after.items() if before.get(k) != v and 0 < v[1] < 45 * 1024 * 1024]
+    changed.sort(key=lambda k: (k not in before, k))          # file sửa trước, file tạo mới sau
+    for rel in changed[:10]:
         try:
             with (WORKSPACE / rel).open("rb") as fh:
-                await message.reply_document(fh, filename=Path(rel).name, caption=f"📎 {rel}")
+                mark = "✏️ Đã sửa" if rel in before else "🆕 Tạo mới"
+                await message.reply_document(fh, filename=Path(rel).name, caption=f"{mark}: {rel}")
         except Exception as e:
             log.warning("Không gửi được %s: %s", rel, e)
-    if len(changed) > 5:
-        await message.reply_text(f"📂 Còn {len(changed) - 5} file khác — dùng /files và /get <tên> để tải.")
+    if len(changed) > 10:
+        await message.reply_text(f"📂 Còn {len(changed) - 10} file khác — dùng /files và /get <tên> để tải.")
 
 
 async def respond(message, context, chat_id: int, text: str, skill: Optional[tuple] = None) -> bool:
@@ -732,10 +935,7 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
             finally:
                 stop.set()
                 await ticker
-            try:
-                await status.delete()
-            except Exception:
-                pass
+            await _finish_status(status, chat_id, started, ok)
             if ok:
                 append_history(chat_id, "user", text)
                 append_history(chat_id, "assistant", answer[:6000])
