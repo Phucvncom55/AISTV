@@ -280,6 +280,7 @@ cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
 | `/model` `/models` | Xem / đổi model OpenCode |
 | `/remember` `/memory` `/forget` | Trí nhớ dài hạn |
 | `/skills` `/skill <tên> <yêu cầu>` | Kỹ năng chuyên biệt |
+| `/skill add <github-url\|owner/repo/path>` | Cài skill chuẩn Agent Skills (chủ bot); thêm `--force`, `--name`, `--ref`, `--allow-restricted` |
 | `/files` `/get <đường dẫn>` | Liệt kê / tải file agent tạo |
 | `/allow <id>` `/deny <id>` | Cấp / thu hồi quyền (chủ bot) |
 | `/key [gemini\|groq\|openai\|jina] [giá trị]` | Xem / đặt API key ngay trong chat (chủ bot); tin nhắn chứa key tự xoá |
@@ -308,6 +309,27 @@ cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
 - **Bí mật đồng bộ, không phải đăng nhập lại:** Gemini/Groq/OpenAI/Jina key, GitHub token, email, `ALLOWED_USER_IDS`, cấu hình model… được **mã hoá** (PBKDF2-HMAC-SHA256 từ token bot + HMAC-SHA256 + keystream) rồi lưu ở `aistv/<bot id>/secrets`. Chạy bot ở terminal/máy khác chỉ cần đúng bot token là tự khôi phục. Đổi bot token thì blob cũ không giải mã được và bot tự bỏ qua. Đồng bộ ngay: `/cloud sync`.
 - **Tự tóm tắt:** sau ~20 lượt hỏi–đáp, bot tự cô đọng phần cũ thành gạch đầu dòng trong `MEMORY.md` rồi cắt bớt lịch sử (giữ ngữ cảnh gần).
 - **Nhắc việc/việc định kỳ** sống qua restart; việc định kỳ dùng đúng model và workspace hiện tại.
+
+**Skills (Agent Skills):** bot dùng chuẩn [Agent Skills](https://agentskills.io) — mỗi skill là thư mục có `SKILL.md` (YAML frontmatter `name`, `description`) cùng `scripts/`, `references/`, `assets/` tuỳ chọn. Bot đọc được định dạng [Cursor Agent Skills](https://cursor.com/docs/skills) ở `workspace/skills/`, `workspace/.agents/skills/` và `workspace/.cursor/skills/` (thư mục lồng nhau cũng được; `paths`/`icon`/`color` chưa hỗ trợ). Bot tự đọc danh sách mô tả và chọn skill phù hợp; `/skill <tên> <yêu cầu>` ép dùng một skill, `/skill <tên>` xem thông tin. Skill có `disable-model-invocation: true` chỉ chạy khi gọi bằng `/skill`, không tự gợi ý.
+
+- **Đã cài sẵn** một bộ chọn lọc từ [mattpocock/skills](https://github.com/mattpocock/skills) (MIT) và [anthropics/skills](https://github.com/anthropics/skills) (Apache-2.0): debug, TDD, thiết kế codebase, domain model, PR, prototype, spec/ticket, retro, phản biện kế hoạch, viết lách, dạy học, tạo skill, frontend design, web artifact/testing, MCP server, algorithmic art, theme… Xem `/skills` và `seed/skills/THIRD_PARTY.md`.
+- **Cài thêm** ngay trong chat (chủ bot):
+  ```text
+  /skill add mattpocock/skills/skills/engineering/tdd
+  /skill add anthropics/skills/skills/skill-creator
+  /skill add https://github.com/owner/repo/tree/main/path/to/skill
+  /skill add owner/repo --ref v1.2.0 --force
+  ```
+  Hỗ trợ `owner/repo`, `owner/repo/path`, URL GitHub (`tree`/`blob`), raw `SKILL.md`, hoặc zip. Nếu trỏ vào repo/thư mục có nhiều skill, bot cài tất cả (tối đa 40). Mặc định **không ghi đè** skill đã có; `--force` để thay.
+- **CLI** (dùng khi không mở Telegram):
+  ```bash
+  python3 aistv_skills.py install mattpocock/skills/skills/engineering/tdd
+  python3 aistv_skills.py install anthropics/skills/skills/skill-creator --force
+  python3 aistv_skills.py list
+  ```
+  Mặc định cài vào `$STV_HOME/workspace/skills` (hoặc `~/stv_agent/workspace/skills`).
+- **Giới hạn & an toàn:** chỉ tải file, không chạy script khi cài; chặn path traversal/symlink; giới hạn dung lượng. Chỉ cài skill từ nguồn tin cậy — nội dung skill là hướng dẫn cho agent, không được phép ghi đè quy tắc bảo mật hay đọc `.secrets`.
+- **Giấy phép:** các skill tài liệu `docx`, `pdf`, `pptx`, `xlsx` của Anthropic dùng giấy phép source-available riêng, **không được nhúng sẵn** trong repo này. Installer mặc định chặn 4 skill này; chỉ dùng `--allow-restricted` sau khi bạn tự đọc và tuân thủ điều khoản. Các skill Anthropic còn lại là Apache-2.0, giữ nguyên `LICENSE.txt`. `doc-coauthoring` (thiếu `LICENSE.txt`) và `canvas-design` (font nặng) cũng không nhúng sẵn; cài riêng nếu cần.
 
 **Email (IMAP/SMTP):** thêm 2 Colab Secret `AISTV_EMAIL_ADDRESS` + `AISTV_EMAIL_PASSWORD` (mật khẩu ứng dụng) rồi bật Notebook access; hoặc `/email setup <email> <app-password>`. Gmail cần bật 2FA và tạo App Password 16 ký tự. Agent cũng gọi được `aistv_email.py` để đọc/gửi thư trong lúc làm việc; mật khẩu không bao giờ bị in ra.
 
@@ -485,6 +507,7 @@ AISTV/
 ├── aistv_tiktok.py   thông tin, tải video không watermark, tìm kiếm TikTok
 ├── aistv_watch.py    đọc ảnh + xem video bằng Gemini, transcript + frames
 ├── aistv_image.py    tạo ảnh (Gemini/Cloudflare/Together/HF) + vẽ sơ đồ tư duy Pillow
+├── aistv_skills.py   cài skill chuẩn Agent Skills từ GitHub/zip
 ├── aistv_github_docs.py  đọc README/docs, tìm trong tài liệu và mã GitHub
 ├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)

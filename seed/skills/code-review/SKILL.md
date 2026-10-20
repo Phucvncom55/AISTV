@@ -1,3 +1,7 @@
+---
+name: code-review
+description: Review code nghiêm túc như một senior engineer — lỗi logic, edge case, bảo mật, hiệu năng, khả năng bảo trì.
+---
 # code-review
 Review code nghiêm túc như một senior engineer.
 

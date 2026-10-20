@@ -1,3 +1,7 @@
+---
+name: watch
+description: Xem video và đọc ảnh thật bằng Gemini (mắt + tai), kết hợp transcript và frames khi cần.
+---
 # watch
 Xem video và đọc ảnh thật bằng Gemini (mắt + tai), kết hợp transcript + frames khi cần.
 

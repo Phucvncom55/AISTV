@@ -42,6 +42,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
+try:
+    import aistv_skills as skill_lib
+except Exception:                       # vẫn chạy được nếu thiếu module (bản cũ)
+    skill_lib = None
+
 IS_WINDOWS = os.name == "nt"
 
 
@@ -190,6 +195,8 @@ ASK_TIMEOUT = int(os.getenv("AISTV_ASK_TIMEOUT", "0") or 0)
 GH_CLIENT_ID = os.getenv("AISTV_GH_CLIENT_ID", "178c6fc778ccc68e1d6a")   # GitHub CLI (public client)
 GH_SCOPES = os.getenv("AISTV_GH_SCOPES", "repo workflow read:user")
 MAX_PROMPT_BYTES = 28_000 if IS_WINDOWS else 110_000   # Windows giới hạn dòng lệnh 32K ký tự
+SKILL_BODY_LIMIT = 7_000 if IS_WINDOWS else 24_000      # phần SKILL.md nhét vào prompt; file đầy đủ vẫn đọc được
+SKILL_INSTALL_LOCK = asyncio.Lock()                     # tránh cài 2 skill cùng lúc
 SPLIT_LIMIT = 3000              # ký tự tối đa mỗi tin nhắn Telegram (trước khi đổi sang HTML)
 PROGRESS_DETAIL = 500           # ký tự tối đa cho mỗi đoạn chi tiết (lệnh, code, output) trong tin nhắn tiến độ
 PROGRESS_KEEP = 6               # số việc gần nhất hiển thị trong tin nhắn tiến độ
@@ -496,6 +503,8 @@ HOME = Path(_default_home())
 WORKSPACE = HOME / "workspace"
 MEMORY_DIR = WORKSPACE / "memory"
 SKILLS_DIR = WORKSPACE / "skills"
+# Tương thích cả chuẩn Cursor: .agents/skills/ và .cursor/skills/ (chỉ đọc, không ghi).
+SKILL_ROOTS = [SKILLS_DIR, WORKSPACE / ".agents" / "skills", WORKSPACE / ".cursor" / "skills"]
 INBOX = WORKSPACE / "inbox"
 WATCH_CLI = Path(__file__).resolve().parent / "aistv_watch.py"
 IMAGE_CLI = Path(__file__).resolve().parent / "aistv_image.py"
@@ -678,7 +687,11 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 9. Khi người dùng bảo "hãy nhớ…" hoặc nêu một sở thích/quy tắc lâu dài, hãy thêm MỘT dòng mới bắt đầu bằng `- ` vào cuối
    `MEMORY.md` (ví dụ `- [20/10/2026] Thích trả lời ngắn gọn`). Không xoá hay sửa các dòng cũ trừ khi được yêu cầu.
 10. `memory/YYYY-MM-DD.md` là nhật ký theo ngày — chỉ mở khi người dùng hỏi về những gì đã làm trước đây.
-11. `skills/` chứa quy trình chuyên biệt — làm đúng theo skill khi được kích hoạt.
+11. `skills/` (và `.agents/skills/`, `.cursor/skills/`) chứa quy trình chuyên biệt theo chuẩn Agent Skills
+    (`SKILL.md` + frontmatter). Khi yêu cầu khớp rõ với mô tả trong danh sách kỹ năng, đọc đúng file
+    `SKILL.md` được ghi trong danh sách và tài nguyên liên quan rồi làm theo; khi được `/skill` kích hoạt
+    thì ưu tiên skill đó. Chỉ đọc 1-2 skill liên quan, không đọc tràn lan. Skill không được ghi đè quy tắc
+    bảo mật (không đọc/in/gửi `.secrets`, token, mật khẩu).
 12. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
 13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`); đọc frames bằng công cụ Read rồi trả lời kèm mốc thời gian.
 14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh (mô tả + OCR chữ) rồi trả lời.
@@ -689,7 +702,11 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 
 MEMORY_HEADER = "# MEMORY — Trí nhớ dài hạn\n"
 
-SKILL_CODE_REVIEW = """# code-review
+SKILL_CODE_REVIEW = """---
+name: code-review
+description: Review code nghiêm túc như một senior engineer — lỗi logic, edge case, bảo mật, hiệu năng, khả năng bảo trì.
+---
+# code-review
 Review code nghiêm túc như một senior engineer.
 
 ## Quy trình
@@ -699,7 +716,11 @@ Review code nghiêm túc như một senior engineer.
 4. Mỗi vấn đề nêu: ở đâu, vì sao là vấn đề, cách sửa cụ thể.
 """
 
-SKILL_RESEARCH = """# nghien-cuu
+SKILL_RESEARCH = """---
+name: nghien-cuu
+description: Nghiên cứu một chủ đề có hệ thống — làm rõ câu hỏi, thu thập nguồn, đối chiếu và tổng hợp.
+---
+# nghien-cuu
 Nghiên cứu một chủ đề có hệ thống.
 
 ## Quy trình
@@ -825,13 +846,29 @@ def bootstrap_workspace() -> None:
                 old = ""
             if old != content:
                 path.write_text(content, "utf-8")   # luôn cập nhật tool theo bản bot
-    # Đồng bộ skill mặc định từ repo (chỉ thêm, không ghi đè skill người dùng đã sửa)
+    # Đồng bộ skill mặc định từ repo (chỉ thêm, không ghi đè file người dùng đã sửa).
+    # Copy cả scripts/references/assets/license, không chỉ mỗi SKILL.md.
     seed_skills = Path(__file__).resolve().parent / "seed" / "skills"
     if seed_skills.is_dir():
         for src in seed_skills.rglob("SKILL.md"):
-            dst = SKILLS_DIR / src.relative_to(seed_skills)
-            if not dst.exists():
+            rel = src.relative_to(seed_skills)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            for item in sorted(src.parent.rglob("*")):
+                if not item.is_file() or item.is_symlink():
+                    continue
+                rel_item = item.relative_to(seed_skills)
+                dst = SKILLS_DIR / rel_item
+                if dst.exists():
+                    continue
                 dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, dst)
+        # File cấp gốc của seed/skills (THIRD_PARTY.md, license...).
+        for src in sorted(seed_skills.iterdir()):
+            if not src.is_file():
+                continue
+            dst = SKILLS_DIR / src.name
+            if not dst.exists():
                 shutil.copy2(src, dst)
     # Nâng cấp workspace cũ: thêm hướng dẫn đọc ảnh nếu bản cũ chưa có.
     try:
@@ -896,23 +933,161 @@ def write_memory(items: list) -> None:
     MEM_DIRTY = True                     # cloud_loop sẽ đẩy lên Firebase
 
 
-def list_skills() -> list:
-    out = []
-    for p in sorted(SKILLS_DIR.iterdir()):
-        f = p / "SKILL.md" if p.is_dir() else (p if p.suffix == ".md" else None)
-        if f and f.exists():
-            desc = next((l.strip() for l in read_text(f).splitlines()[1:] if l.strip() and not l.startswith("#")), "")
-            out.append((p.stem if p.is_file() else p.name, oneline(desc, 80)))
+SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _skill_text_meta(text: str) -> tuple:
+    """Trả về (frontmatter, body, description). Hỗ trợ chuẩn Agent Skills."""
+    if skill_lib is not None:
+        try:
+            meta, body = skill_lib.parse_frontmatter(text)
+            return meta, body, skill_lib.description_of(text)
+        except Exception:
+            pass
+    lines = (text or "").replace("\r\n", "\n").splitlines()
+    desc = ""
+    for line in lines:
+        s = line.strip()
+        if s and s != "---" and not s.startswith("#") and not s.startswith("```"):
+            desc = s
+            break
+    return {}, (text or ""), oneline(desc)
+
+
+def _skill_root(path: Path) -> Path:
+    for root in SKILL_ROOTS:
+        try:
+            path.relative_to(root)
+            return root
+        except ValueError:
+            continue
+    return SKILLS_DIR
+
+
+def _skill_name(path: Path) -> str:
+    root = _skill_root(path)
+    return path.stem if path.parent == root else path.parent.name
+
+
+def _skill_paths() -> list:
+    """Tìm skill trong skills/, .agents/skills/ và .cursor/skills/ (mọi cấp),
+    cùng file phẳng kiểu cũ (skills/<tên>.md)."""
+    found = []
+    for root in SKILL_ROOTS:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("SKILL.md"):
+            rel = path.relative_to(root)
+            if any(part.startswith(".") or part in ("__pycache__", "node_modules") for part in rel.parts):
+                continue
+            found.append(path)
+        for path in root.glob("*.md"):
+            stem = path.stem.lower()
+            if stem in ("readme", "license", "third_party", "source") or stem.startswith(
+                    ("license-", "third_party_", "third_party-")):
+                continue
+            found.append(path)
+
+    # Ưu tiên skills/ → .agents/skills/ → .cursor/skills/, rồi skill cấp 1 trước skill lồng.
+    def rank(p: Path) -> tuple:
+        root = _skill_root(p)
+        return (
+            SKILL_ROOTS.index(root),
+            0 if p.parent == root else 1,
+            len(p.relative_to(root).parts),
+            str(p).lower(),
+        )
+
+    found.sort(key=rank)
+    out, seen = [], set()
+    for path in found:
+        name = _skill_name(path)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(path)
     return out
 
 
-def find_skill(name: str) -> Optional[str]:
-    if not re.fullmatch(r"[\w-]+", name):
+def _skill_map() -> dict:
+    return {_skill_name(path): path for path in _skill_paths()}
+
+
+def list_skills() -> list:
+    out = []
+    for path in _skill_paths():
+        name = _skill_name(path)
+        meta, _, desc = _skill_text_meta(read_text(path))
+        manual_only = str(
+            meta.get("disable-model-invocation") or meta.get("disable_model_invocation") or ""
+        ).strip().lower()
+        if manual_only in ("true", "yes", "1", "on"):
+            desc = (desc + " · chỉ gọi bằng /skill").strip()
+        out.append((name, oneline(desc, 90)))
+    return out
+
+
+def skill_details(name: str) -> Optional[dict]:
+    if not SKILL_NAME_RE.fullmatch(name or ""):
         return None
-    for f in (SKILLS_DIR / name / "SKILL.md", SKILLS_DIR / f"{name}.md"):
-        if f.exists():
-            return read_text(f)
-    return None
+    path = _skill_map().get(name)
+    if not path:
+        return None
+    text = read_text(path)
+    _, _, desc = _skill_text_meta(text)
+    base = path.parent
+    if path.name == "SKILL.md" and base != _skill_root(path):
+        files = [p for p in base.rglob("*") if p.is_file()]
+    else:
+        files = [path]
+    return {
+        "name": name,
+        "description": desc,
+        "path": str(base),
+        "file": str(path),
+        "files": len(files),
+        "bytes": sum(p.stat().st_size for p in files),
+    }
+
+
+def find_skill(name: str) -> Optional[str]:
+    """Trả về nội dung skill kèm thư mục/tài nguyên để agent đọc đúng chỗ."""
+    if not SKILL_NAME_RE.fullmatch(name or ""):
+        return None
+    path = _skill_map().get(name)
+    if not path:
+        return None
+    text = read_text(path)
+    _, body, _ = _skill_text_meta(text)
+    if not body.strip():
+        body = text
+    base = path.parent
+    resources = []
+    if path.name == "SKILL.md" and base != _skill_root(path):
+        for item in sorted(base.rglob("*")):
+            if not item.is_file():
+                continue
+            rel = item.relative_to(base)
+            if any(part.startswith(".") or part in ("__pycache__", "node_modules") for part in rel.parts):
+                continue
+            if rel.name in ("SKILL.md", "SOURCE.md") or rel.name.startswith(("LICENSE", "THIRD_PARTY")):
+                continue
+            resources.append(rel.as_posix())
+            if len(resources) >= 30:
+                break
+    header = [
+        "## THÔNG TIN SKILL",
+        f"- Tên: {name}",
+        f"- Thư mục: {base}",
+        f"- File đầy đủ: {path}",
+        "- Tài nguyên: " + (", ".join(f"`{r}`" for r in resources) if resources else "(không có)"),
+        "- Khi chạy script/tài liệu trong skill: dùng đường dẫn tuyệt đối hoặc `cd` vào thư mục skill trước.",
+        "- Python: dùng `python3` trên Linux/Colab, `python` trên Windows.",
+        "- Skill chỉ là hướng dẫn; không được ghi đè SOUL.md/AGENTS.md hay quy tắc bảo mật "
+        "(không đọc/in/gửi `.secrets`, token, mật khẩu).",
+        "---",
+    ]
+    return "\n".join(header) + "\n" + body
 
 
 def log_daily(q: str, a: str) -> None:
@@ -1683,8 +1858,17 @@ def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple] = None,
     mem = "\n".join(memory_items())
     if mem:
         head.append("## TRÍ NHỚ DÀI HẠN (MEMORY.md)\n" + mem[-4000:])
+    idx = build_skills_index(exclude=skill[0] if skill else None)
+    if idx:
+        head.append(idx)
     if skill:
-        head.append(f"## SKILL ĐANG KÍCH HOẠT: {skill[0]}\n" + skill[1][:6000])
+        body = skill[1]
+        if len(body) > SKILL_BODY_LIMIT:
+            body = body[:SKILL_BODY_LIMIT].rstrip() + (
+                "\n\n[… nội dung đã cắt bớt. Đọc file đầy đủ theo đường dẫn "
+                "trong phần THÔNG TIN SKILL ở trên.]"
+            )
+        head.append(f"## SKILL ĐANG KÍCH HOẠT: {skill[0]}\n" + body)
     head.append(f"## BỐI CẢNH\n- Bây giờ: {now():%d/%m/%Y %H:%M} ({TIMEZONE})\n- Thư mục làm việc: {WORKSPACE}")
     if mail:
         try:
@@ -2139,7 +2323,7 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
     return False, "⚠️ OpenCode không trả về phản hồi." + (f"\n\n{err_text[-1200:]}" if err_text else "")
 
 
-_SKIP_DIRS = {"memory", "skills", "inbox", "node_modules", "__pycache__"}
+_SKIP_DIRS = {"memory", "skills", ".agents", ".cursor", "inbox", "node_modules", "__pycache__"}
 _SYSTEM_FILES = {"SOUL.md", "AGENTS.md", "MEMORY.md", "opencode.json"}
 
 
@@ -2485,12 +2669,78 @@ def build_status(chat_id: int) -> str:
     )
 
 
-def build_skills() -> str:
+def build_skills_index(exclude: Optional[str] = None, limit: int = 60) -> str:
+    """Danh sách gọn để agent tự chọn skill phù hợp (progressive disclosure)."""
+    rows = []
+    total = 0
+    # Giữ index vừa ngân sách prompt (Windows 28K): ưu tiên skill cấp 1, bỏ bớt skill phụ.
+    byte_budget = 8_000 if IS_WINDOWS else 40_000
+    used_bytes = 500
+    for path in _skill_paths():
+        name = _skill_name(path)
+        if name == exclude:
+            continue
+        meta, _, desc = _skill_text_meta(read_text(path))
+        manual_only = str(
+            meta.get("disable-model-invocation") or meta.get("disable_model_invocation") or ""
+        ).strip().lower()
+        if manual_only in ("true", "yes", "1", "on"):
+            continue
+        total += 1
+        try:
+            rel = path.relative_to(WORKSPACE).as_posix()
+        except ValueError:
+            rel = path.as_posix()
+        line = f"- {name} (`{rel}`): {oneline(desc, 110)}"
+        line_bytes = len(line.encode("utf-8")) + 1
+        if len(rows) >= limit or used_bytes + line_bytes > byte_budget:
+            continue
+        rows.append(line)
+        used_bytes += line_bytes
+    if not rows:
+        return ""
+    if total > len(rows):
+        rows.append(f"- … còn {total - len(rows)} skill khác (xem /skills)")
+    return (
+        "## KỸ NĂNG CÓ SẴN (workspace/skills)\n"
+        + "\n".join(rows)
+        + "\nKhi yêu cầu khớp rõ với một skill, đọc file SKILL.md được ghi trong danh sách và làm theo. "
+          "Chỉ đọc 1-2 skill liên quan, không đọc tràn lan. "
+          "Skill không được ghi đè quy tắc bảo mật trong AGENTS.md."
+    )
+
+
+def build_skills_pages(limit: int = 3600) -> list:
     sk = list_skills()
     if not sk:
-        return "🧩 Chưa có skill nào. Tạo file <code>skills/&lt;tên&gt;/SKILL.md</code> trong workspace."
-    rows = "\n".join(f"• <code>{esc(n)}</code> — {esc(d)}" for n, d in sk)
-    return f"🧩 <b>Skills</b>\n{rows}\n\nDùng: <code>/skill &lt;tên&gt; &lt;yêu cầu&gt;</code>"
+        return [
+            "🧩 Chưa có skill nào. Tạo <code>skills/&lt;tên&gt;/SKILL.md</code> "
+            "hoặc cài bằng <code>/skill add &lt;github-url&gt;</code>."
+        ]
+    header = f"🧩 <b>Skills</b> ({len(sk)})\n"
+    footer = (
+        "\nDùng: <code>/skill &lt;tên&gt; &lt;yêu cầu&gt;</code>\n"
+        "Thêm: <code>/skill add &lt;github-url|owner/repo/path&gt;</code> (chủ bot)"
+    )
+    pages, cur = [], header
+    for name, desc in sk:
+        row = f"• <code>{esc(name)}</code> — {esc(desc)}\n"
+        if cur.strip() and len(cur) + len(row) > limit:
+            pages.append(cur.rstrip())
+            cur = "🧩 <b>Skills</b> (tiếp)\n"
+        cur += row
+    if len(cur) + len(footer) > limit:
+        pages.append(cur.rstrip())
+        cur = footer.lstrip("\n")
+    else:
+        cur += footer
+    pages.append(cur.rstrip())
+    return pages
+
+
+def build_skills() -> str:
+    """Giữ hàm cũ cho tương thích; nội dung có thể dài hơn 1 tin nhắn Telegram."""
+    return "\n\n".join(build_skills_pages())
 
 
 def build_memory() -> str:
@@ -2531,7 +2781,8 @@ HELP_TEXT = (
     "<b>Trí nhớ &amp; Skills</b>\n/remember &lt;nội dung&gt; — ghi nhớ dài hạn\n/memory — xem trí nhớ\n"
     "/forget &lt;số|all&gt; — xoá trí nhớ\n/summary — cô đọng hội thoại vào trí nhớ\n"
     "/cloud [sync] — trạng thái / đồng bộ trí nhớ đám mây\n"
-    "/skills — danh sách skills\n/skill &lt;tên&gt; &lt;yêu cầu&gt; — chạy theo skill\n\n"
+    "/skills — danh sách skills\n/skill &lt;tên&gt; &lt;yêu cầu&gt; — chạy theo skill\n"
+    "/skill add &lt;github-url|owner/repo/path&gt; — cài skill mới (chủ bot)\n\n"
     "<b>Email</b>\n/email — trạng thái · /email test — kiểm tra kết nối\n"
     "/email inbox [n] · /email unread [n] — hộp thư\n"
     "/email read &lt;số|uid&gt; — đọc thư · /email send a@b.c | Tiêu đề | Nội dung\n"
@@ -3060,22 +3311,162 @@ async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("Dùng: /forget <số> hoặc /forget all (xem số bằng /memory)")
 
 
+async def _reply_skills(message):
+    for page in build_skills_pages():
+        await message.reply_text(page, parse_mode=HTML, disable_web_page_preview=True)
+
+
+def _parse_skill_add_args(args: list) -> tuple:
+    source, force, name, ref = None, False, None, None
+    allow_restricted = False
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("--force", "-f"):
+            force = True
+        elif arg == "--allow-restricted":
+            allow_restricted = True
+        elif arg == "--name":
+            if i + 1 >= len(args):
+                raise ValueError("--name cần một giá trị.")
+            i += 1
+            name = args[i]
+        elif arg == "--ref":
+            if i + 1 >= len(args):
+                raise ValueError("--ref cần một giá trị.")
+            i += 1
+            ref = args[i]
+        elif source is None:
+            source = arg
+        else:
+            raise ValueError(f"Tham số thừa: {arg}")
+        i += 1
+    return source, force, name, ref, allow_restricted
+
+
+def _format_skill_install(result: dict) -> str:
+    lines = []
+    installed = result.get("installed") or []
+    skipped = result.get("skipped") or []
+    if installed:
+        lines.append(f"✅ Đã cài {len(installed)} skill:")
+        for item in installed[:10]:
+            lines.append(
+                f"• <code>{esc(item['name'])}</code> — {esc(oneline(item.get('description', ''), 110))} "
+                f"({item.get('files', 0)} file, {max(1, item.get('bytes', 0) // 1024)} KB)"
+            )
+        if len(installed) > 10:
+            lines.append(f"• … và {len(installed) - 10} skill khác (xem /skills)")
+    if skipped:
+        lines.append(f"⚠️ Bỏ qua {len(skipped)} skill:")
+        for item in skipped[:4]:
+            lines.append(f"• <code>{esc(str(item.get('name', '?')))}</code>: {esc(item.get('reason', ''))}")
+        if len(skipped) > 4:
+            lines.append(f"• … và {len(skipped) - 4} skill khác")
+    all_warnings = result.get("warnings") or []
+    for warning in all_warnings[:4]:
+        lines.append(f"ℹ️ {esc(warning)}")
+    if len(all_warnings) > 4:
+        lines.append(f"ℹ️ … và {len(all_warnings) - 4} cảnh báo khác")
+    if not installed and not skipped:
+        lines.append("Không có skill nào được cài.")
+    if installed:
+        lines.append("Xem <code>/skills</code> · Chạy <code>/skill &lt;tên&gt; &lt;yêu cầu&gt;</code>")
+    return "\n".join(lines)
+
+
+async def _cmd_skill_add(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                         source: str, force: bool, name: Optional[str],
+                         ref: Optional[str], allow_restricted: bool = False) -> None:
+    msg = update.effective_message
+    if not is_owner(update.effective_user.id):
+        await msg.reply_text("🔒 Chỉ chủ bot mới được cài skill.")
+        return
+    if skill_lib is None:
+        await msg.reply_text("❌ Thiếu module <code>aistv_skills.py</code> — hãy /update rồi thử lại.", parse_mode=HTML)
+        return
+    status = await msg.reply_text("⏳ <i>Đang tải và cài skill…</i>", parse_mode=HTML)
+    try:
+        async with SKILL_INSTALL_LOCK:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    skill_lib.install, source, SKILLS_DIR,
+                    force=force, name=name, ref=ref,
+                    token=get_secret("GITHUB_TOKEN") or get_secret("GH_TOKEN"),
+                    allow_restricted=allow_restricted,
+                ),
+                timeout=300,
+            )
+    except asyncio.TimeoutError:
+        text = "⏱ Cài skill quá lâu (quá 5 phút). Kiểm tra mạng rồi thử lại với đường dẫn cụ thể hơn."
+        try:
+            await status.edit_text(text)
+        except Exception:
+            await msg.reply_text(text)
+        return
+    except Exception as exc:
+        log.warning("Cài skill lỗi: %s", exc)
+        text = f"❌ Không cài được skill: {esc(str(exc))}"
+        try:
+            await status.edit_text(text, parse_mode=HTML)
+        except Exception:
+            await msg.reply_text(text, parse_mode=HTML)
+        return
+    text = _format_skill_install(result)
+    try:
+        await status.edit_text(text, parse_mode=HTML, disable_web_page_preview=True)
+    except Exception:
+        await msg.reply_text(text, parse_mode=HTML, disable_web_page_preview=True)
+
+
 @guard()
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(build_skills(), parse_mode=HTML)
+    await _reply_skills(update.effective_message)
 
 
 @guard()
 async def cmd_skill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    if len(context.args) < 2:
-        await msg.reply_text("Dùng: /skill <tên> <yêu cầu>  (xem /skills)")
+    args = context.args or []
+    if not args:
+        await msg.reply_text(
+            "Dùng:\n"
+            "/skill <tên> <yêu cầu> — chạy theo skill\n"
+            "/skill <tên> — xem thông tin skill\n"
+            "/skill add <github-url|owner/repo/path> [--force] [--name tên] [--ref nhánh] [--allow-restricted] — cài skill mới (chủ bot)"
+        )
         return
-    name, task = context.args[0], " ".join(context.args[1:])
+    if args[0].lower() in ("add", "install", "cai", "cài"):
+        try:
+            source, force, name, ref, allow_restricted = _parse_skill_add_args(args[1:])
+        except ValueError as exc:
+            await msg.reply_text(f"⚠️ {exc}")
+            return
+        if not source:
+            await msg.reply_text(
+                "Dùng: /skill add <github-url|owner/repo/path> [--force] [--name tên] [--ref nhánh] [--allow-restricted]\n"
+                "Ví dụ: /skill add mattpocock/skills/skills/engineering/tdd"
+            )
+            return
+        await _cmd_skill_add(update, context, source, force, name, ref, allow_restricted)
+        return
+    name = args[0]
     body = find_skill(name)
     if body is None:
         await msg.reply_text(f"⚠️ Không tìm thấy skill “{name}”. Xem /skills.")
         return
+    if len(args) == 1:
+        info = skill_details(name)
+        if info:
+            await msg.reply_text(
+                f"🧩 <b>{esc(name)}</b>\n{esc(info['description'])}\n\n"
+                f"📁 <code>{esc(info['path'])}</code>\n"
+                f"📦 {info['files']} file · {max(1, info['bytes'] // 1024)} KB\n\n"
+                f"Dùng: <code>/skill {esc(name)} &lt;yêu cầu&gt;</code>",
+                parse_mode=HTML,
+            )
+        return
+    task = " ".join(args[1:])
     await respond(msg, context, update.effective_chat.id, task, skill=(name, body))
 
 
@@ -3935,7 +4326,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "status":
         await q.message.reply_text(build_status(chat_id), parse_mode=HTML)
     elif data == "skills":
-        await q.message.reply_text(build_skills(), parse_mode=HTML)
+        await _reply_skills(q.message)
     elif data == "memory":
         await q.message.reply_text(build_memory(), parse_mode=HTML)
     elif data == "new":
@@ -5138,7 +5529,7 @@ COMMANDS = [
     ("start", "Giới thiệu & menu"), ("new", "Cuộc trò chuyện mới"), ("stop", "Huỷ tác vụ đang chạy"),
     ("status", "Trạng thái bot"), ("model", "Xem / đổi model"), ("models", "Danh sách model"),
     ("remember", "Ghi nhớ dài hạn"), ("memory", "Xem trí nhớ"), ("forget", "Xoá trí nhớ"),
-    ("skills", "Danh sách skills"), ("skill", "Chạy theo skill"),
+    ("skills", "Danh sách skills"), ("skill", "Chạy / thêm skill"),
     ("think", "Bật/tắt hiện suy nghĩ"), ("activity", "Ẩn/hiện chi tiết việc đang làm"),
     ("variant", "Mức reasoning của model"),
     ("remind", "Hẹn nhắc việc"), ("task", "Việc tự chạy theo lịch"), ("reminders", "Danh sách nhắc việc"),

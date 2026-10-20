@@ -1,3 +1,7 @@
+---
+name: youtube
+description: Lướt YouTube — tìm video, xem thông tin, lấy phụ đề/transcript để đọc hoặc tóm tắt.
+---
 # youtube
 Lướt YouTube: tìm video, xem thông tin, lấy phụ đề/transcript để đọc hoặc tóm tắt.
 

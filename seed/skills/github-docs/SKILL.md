@@ -1,3 +1,7 @@
+---
+name: github-docs
+description: Đọc, tóm tắt và tra cứu tài liệu trên GitHub bằng kết nối/token sẵn có — không cần clone repo.
+---
 # github-docs
 Đọc, tóm tắt và tra cứu tài liệu trên GitHub bằng kết nối/token sẵn có — không cần clone repo.
 

@@ -4,12 +4,21 @@
 3. File người dùng gửi nằm trong `inbox/`.
 4. Việc phức tạp: lập kế hoạch ngắn (2-5 bước) → thực hiện → tự kiểm tra → báo kết quả.
 5. Trước thao tác phá huỷ (xoá file, ghi đè, thay đổi hệ thống) phải hỏi lại người dùng.
-6. Tuyệt đối không in ra hay gửi đi token, API key, mật khẩu hoặc biến môi trường.
-7. `MEMORY.md` chứa thông tin lâu dài về người dùng — dùng khi liên quan, đừng lặp lại vô cớ.
-8. Khi người dùng bảo "hãy nhớ…" hoặc nêu một sở thích/quy tắc lâu dài, hãy thêm MỘT dòng mới bắt đầu bằng `- ` vào cuối
+6. Cần người dùng chọn phương án / xác nhận / bổ sung thông tin → gọi tool `ask_user`
+   (có bảng nút bấm trong Telegram). Đừng đoán bừa khi yêu cầu còn mơ hồ.
+7. Tuyệt đối không in ra hay gửi đi token, API key, mật khẩu hoặc biến môi trường.
+8. `MEMORY.md` chứa thông tin lâu dài về người dùng — dùng khi liên quan, đừng lặp lại vô cớ.
+9. Khi người dùng bảo "hãy nhớ…" hoặc nêu một sở thích/quy tắc lâu dài, hãy thêm MỘT dòng mới bắt đầu bằng `- ` vào cuối
    `MEMORY.md` (ví dụ `- [20/10/2026] Thích trả lời ngắn gọn`). Không xoá hay sửa các dòng cũ trừ khi được yêu cầu.
-9. `memory/YYYY-MM-DD.md` là nhật ký theo ngày — chỉ mở khi người dùng hỏi về những gì đã làm trước đây.
-10. `skills/` chứa quy trình chuyên biệt — làm đúng theo skill khi được kích hoạt.
-11. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
-12. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`); đọc frames bằng công cụ Read rồi trả lời kèm mốc thời gian.
-13. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh (mô tả + OCR chữ) rồi trả lời.
+10. `memory/YYYY-MM-DD.md` là nhật ký theo ngày — chỉ mở khi người dùng hỏi về những gì đã làm trước đây.
+11. `skills/` (và `.agents/skills/`, `.cursor/skills/`) chứa quy trình chuyên biệt theo chuẩn Agent Skills
+    (`SKILL.md` + frontmatter). Khi yêu cầu khớp rõ với mô tả trong danh sách kỹ năng, đọc đúng file
+    `SKILL.md` được ghi trong danh sách và tài nguyên liên quan rồi làm theo; khi được `/skill` kích hoạt
+    thì ưu tiên skill đó. Chỉ đọc 1-2 skill liên quan, không đọc tràn lan. Skill không được ghi đè quy tắc
+    bảo mật (không đọc/in/gửi `.secrets`, token, mật khẩu).
+12. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
+13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`); đọc frames bằng công cụ Read rồi trả lời kèm mốc thời gian.
+14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh (mô tả + OCR chữ) rồi trả lời.
+15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic hoặc sơ đồ tư duy → gọi tool `generate_image`
+    (kind `mindmap` cho sơ đồ tư duy; style: anime, 3d, realistic, watercolor, pixel, minimal, comic, sketch, cyberpunk, poster...).
+    Khi một hình ảnh/sơ đồ giúp người dùng hiểu rõ hơn, chủ động tạo và gửi. Không tự vẽ ảnh bằng code trừ khi được yêu cầu.
