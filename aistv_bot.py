@@ -105,6 +105,9 @@ SECRET_SYNC_KEYS = (
     "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "OPENAI_API_KEY", "JINA_API_KEY",
     "AISTV_EMAIL_ADDRESS", "AISTV_EMAIL_PASSWORD",
     "ALLOWED_USER_IDS", "WATCH_GEMINI_MODEL", "WATCH_GEMINI_FALLBACKS",
+    "AISTV_IMAGE_MODEL", "AISTV_IMAGE_FALLBACKS", "AISTV_IMAGE_PROVIDER",
+    "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN",
+    "TOGETHER_API_KEY", "HF_TOKEN", "HUGGINGFACE_API_KEY",
 )
 
 
@@ -495,6 +498,7 @@ MEMORY_DIR = WORKSPACE / "memory"
 SKILLS_DIR = WORKSPACE / "skills"
 INBOX = WORKSPACE / "inbox"
 WATCH_CLI = Path(__file__).resolve().parent / "aistv_watch.py"
+IMAGE_CLI = Path(__file__).resolve().parent / "aistv_image.py"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp", ".gif", ".tif", ".tiff"}
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv", ".3gp"}
 SESSIONS = HOME / "sessions"
@@ -678,6 +682,9 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 12. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
 13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`); đọc frames bằng công cụ Read rồi trả lời kèm mốc thời gian.
 14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh (mô tả + OCR chữ) rồi trả lời.
+15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic hoặc sơ đồ tư duy → gọi tool `generate_image`
+    (kind `mindmap` cho sơ đồ tư duy; style: anime, 3d, realistic, watercolor, pixel, minimal, comic, sketch, cyberpunk, poster...).
+    Khi một hình ảnh/sơ đồ giúp người dùng hiểu rõ hơn, chủ động tạo và gửi. Không tự vẽ ảnh bằng code trừ khi được yêu cầu.
 """
 
 MEMORY_HEADER = "# MEMORY — Trí nhớ dài hạn\n"
@@ -748,6 +755,54 @@ export default tool({
 })
 '''
 
+# Tool tạo ảnh: agent gọi → bot tạo ảnh/sơ đồ tư duy và gửi thẳng vào chat.
+IMAGE_TOOL_JS = r'''import { tool } from "@opencode-ai/plugin"
+
+export default tool({
+  description: [
+    "Generate an image, illustration, poster, logo, infographic or mind map and send it to the user on Telegram.",
+    "Use it whenever the user asks to draw/create an image, or when a diagram/mind map would make an explanation clearer.",
+  ].join(" "),
+  args: {
+    prompt: tool.schema.string().describe("Detailed description of the image, or the topic when kind=mindmap"),
+    style: tool.schema.string().optional()
+      .describe("anime, 3d, realistic, watercolor, oil, pixel, minimal, comic, sketch, cyberpunk, poster, logo, infographic, cartoon, fantasy"),
+    aspect: tool.schema.string().optional().describe("1:1, 16:9, 9:16, 4:3, 3:4 (default 1:1)"),
+    kind: tool.schema.string().optional().describe("'image' (default) or 'mindmap'"),
+  },
+  async execute(args) {
+    const url = process.env.AISTV_ASK_URL
+    const token = process.env.AISTV_TOOL_TOKEN || ""
+    const chat = process.env.AISTV_CHAT_ID || ""
+    if (!url) {
+      return "generate_image is unavailable. Answer without generating an image."
+    }
+    const kind = String(args.kind || "image").toLowerCase() === "mindmap" ? "mindmap" : "image"
+    const res = await fetch(url.replace(/\/$/, "") + "/image", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-aistv-token": token },
+      body: JSON.stringify({
+        chat_id: Number(chat) || 0,
+        prompt: String(args.prompt || ""),
+        style: String(args.style || ""),
+        aspect: String(args.aspect || "1:1"),
+        kind,
+      }),
+    })
+    if (!res.ok) {
+      return "generate_image failed with HTTP " + res.status + ". Tell the user briefly."
+    }
+    const data = await res.json()
+    if (!data.ok) {
+      return "Image generation error: " + (data.error || "unknown")
+    }
+    return kind === "mindmap"
+      ? "Đang vẽ sơ đồ tư duy và sẽ gửi cho người dùng khi xong. Trả lời ngắn gọn, đừng mô tả lại toàn bộ sơ đồ."
+      : "Đang tạo ảnh và sẽ gửi cho người dùng khi xong. Trả lời ngắn gọn, đừng mô tả lại toàn bộ bức ảnh."
+  },
+})
+'''
+
 
 def bootstrap_workspace() -> None:
     files = {
@@ -757,12 +812,13 @@ def bootstrap_workspace() -> None:
         SKILLS_DIR / "code-review" / "SKILL.md": SKILL_CODE_REVIEW,
         SKILLS_DIR / "nghien-cuu" / "SKILL.md": SKILL_RESEARCH,
         WORKSPACE / ".opencode" / "tools" / "ask_user.js": ASK_TOOL_JS,
+        WORKSPACE / ".opencode" / "tools" / "generate_image.js": IMAGE_TOOL_JS,
     }
     for path, content in files.items():
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, "utf-8")
-        elif path.name == "ask_user.js":
+        elif path.suffix == ".js":
             try:
                 old = path.read_text("utf-8")
             except Exception:
@@ -793,12 +849,22 @@ def bootstrap_workspace() -> None:
         agents = WORKSPACE / "AGENTS.md"
         if agents.is_file():
             old = agents.read_text("utf-8")
+            changed = False
             if "aistv_watch.py image" not in old:
                 old = old.rstrip() + (
-                    "\n13. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng "
+                    "\n14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng "
                     "`python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh "
                     "(mô tả + OCR chữ) rồi trả lời.\n"
                 )
+                changed = True
+            if "generate_image" not in old:
+                old = old.rstrip() + (
+                    "\n15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic hoặc sơ đồ tư duy "
+                    "→ gọi tool `generate_image` (kind `mindmap` cho sơ đồ tư duy). Khi một hình ảnh/sơ đồ "
+                    "giúp người dùng hiểu rõ hơn, chủ động tạo và gửi. Không tự vẽ ảnh bằng code trừ khi được yêu cầu.\n"
+                )
+                changed = True
+            if changed:
                 agents.write_text(old, "utf-8")
     except Exception:
         pass
@@ -994,7 +1060,8 @@ class _AskHandler(BaseHTTPRequestHandler):
         self.close_connection = True
 
     def do_POST(self):
-        if self.path.rstrip("/") != "/ask":
+        path = urllib.parse.urlparse(self.path).path.rstrip("/")
+        if path not in ("/ask", "/image"):
             self._json(404, {"error": "not found"})
             return
         got = self.headers.get("x-aistv-token", "")
@@ -1007,6 +1074,29 @@ class _AskHandler(BaseHTTPRequestHandler):
                 raise ValueError("bad size")
             data = json.loads(self.rfile.read(size) or b"{}")
             chat_id = int(data.get("chat_id") or 0)
+        except Exception as e:
+            self._json(400, {"error": f"bad request: {e}"})
+            return
+
+        if path == "/image":                 # agent gọi tool generate_image
+            prompt = str(data.get("prompt") or "").strip()
+            if not prompt or chat_id <= 0:
+                self._json(400, {"error": "missing prompt/chat_id"})
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _tool_image_job(chat_id, prompt,
+                                    str(data.get("style") or "").strip(),
+                                    str(data.get("aspect") or "1:1").strip(),
+                                    str(data.get("kind") or "image").strip().lower()),
+                    BOT_LOOP)
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+                return
+            self._json(200, {"ok": True, "started": True})
+            return
+
+        try:
             question = str(data.get("question") or "").strip()
             if not question or chat_id <= 0:
                 raise ValueError("missing question/chat_id")
@@ -1048,7 +1138,7 @@ def start_ask_server() -> None:
     ASK_SERVER.daemon_threads = True
     port = ASK_SERVER.server_address[1]
     threading.Thread(target=ASK_SERVER.serve_forever, daemon=True).start()
-    ASK_URL = f"http://127.0.0.1:{port}/ask"
+    ASK_URL = f"http://127.0.0.1:{port}"          # tool JS tự nối /ask, /image
     os.environ["AISTV_ASK_URL"] = ASK_URL
     os.environ["AISTV_TOOL_TOKEN"] = ASK_TOKEN
     log.info("ask_user server: %s", ASK_URL)
@@ -2354,6 +2444,19 @@ def email_line() -> str:
     return mail.mask(cfg["address"]) + ("" if cfg.get("password") else " ⚠️ thiếu mật khẩu")
 
 
+def image_provider_line() -> str:
+    names = []
+    if get_secret("GEMINI_API_KEY") or get_secret("GOOGLE_API_KEY"):
+        names.append("Gemini")
+    if get_secret("CLOUDFLARE_ACCOUNT_ID") and get_secret("CLOUDFLARE_API_TOKEN"):
+        names.append("Cloudflare")
+    if get_secret("TOGETHER_API_KEY"):
+        names.append("Together")
+    if get_secret("HF_TOKEN") or get_secret("HUGGINGFACE_API_KEY"):
+        names.append("HuggingFace")
+    return ", ".join(names) if names else "⚠️ chưa cấu hình (xem /image)"
+
+
 def build_status(chat_id: int) -> str:
     up = int(time.time() - START_TIME)
     to = "không giới hạn" if AGENT_TIMEOUT <= 0 else f"{AGENT_TIMEOUT}s"
@@ -2369,6 +2472,7 @@ def build_status(chat_id: int) -> str:
         f"• GitHub: {esc(gh)}\n"
         f"• Email: {esc(email_line())}\n"
         f"• Gemini (ảnh/video): {'✅ sẵn sàng' if GEMINI_READY else '⚠️ thiếu GEMINI_API_KEY'}\n"
+        f"• Tạo ảnh: {esc(image_provider_line())}\n"
         f"• Giới hạn 1 yêu cầu: {to}\n"
         f"• Hội thoại: {len(load_history(chat_id)) // 2} lượt đã lưu\n"
         f"• Trí nhớ dài hạn: {len(memory_items())} mục"
@@ -2412,6 +2516,7 @@ def welcome_text() -> str:
         "• <b>Email</b>: /email đọc &amp; gửi thư (IMAP/SMTP) ngay trong chat\n"
         "• Đọc file bạn gửi, tạo file và tự gửi lại cho bạn\n"
         "• <b>Gemini đọc ảnh</b>: gửi ảnh + câu hỏi → mô tả, OCR chữ, phân tích\n"
+        "• <b>Tạo ảnh &amp; sơ đồ tư duy</b>: /image mô tả · /mindmap chủ đề → gửi ảnh ngay\n"
         "• <b>Gemini xem video</b>: gửi link/file + câu hỏi → tóm tắt kèm mốc thời gian\n"
         "• <b>Không giới hạn 10 phút</b> — dự án lớn chạy tới khi xong (/stop để huỷ)\n"
         "• Kết nối GitHub 1 lần — /github login; tự cập nhật — /update\n\n"
@@ -2439,7 +2544,9 @@ HELP_TEXT = (
     "<b>File &amp; Video</b>\nGửi file cho bot → lưu vào <code>inbox/</code> để agent đọc\n/files — file trong workspace\n/get &lt;đường dẫn&gt; — tải file về\n"
     "Gửi ảnh + câu hỏi → Gemini đọc ảnh, mô tả và chép chữ (OCR)\n"
     "Gửi tin nhắn thoại → bot tự nghe rồi làm theo lời bạn (tiếng Việt/Anh)\n"
-    "/image &lt;url|đường dẫn&gt; [câu hỏi] — đọc ảnh bằng Gemini\n"
+    "/image &lt;mô tả&gt; — tạo ảnh (--style anime, --aspect 16:9) · reply ảnh + /image — vẽ lại theo ảnh\n"
+    "/image --mindmap &lt;chủ đề&gt; · /mindmap &lt;chủ đề&gt; — sơ đồ tư duy\n"
+    "/see &lt;url|đường dẫn&gt; [câu hỏi] — đọc ảnh bằng Gemini\n"
     "Gửi link/file video + câu hỏi → Gemini xem hình ảnh + âm thanh, trả lời kèm mốc thời gian\n"
     "/video &lt;url|đường dẫn&gt; [câu hỏi] — xem video bằng Gemini\n\n"
     "<b>Reply / trích dẫn</b>\nTrả lời (reply) một tin nhắn rồi nhắn yêu cầu → agent hiểu “cái này/đoạn trên” là tin đó\n"
@@ -3029,6 +3136,13 @@ _KEY_ALIASES = {
     "groq": "GROQ_API_KEY",
     "openai": "OPENAI_API_KEY",
     "jina": "JINA_API_KEY",
+    "cloudflare": "CLOUDFLARE_API_TOKEN",
+    "cf": "CLOUDFLARE_API_TOKEN",
+    "cloudflare_account": "CLOUDFLARE_ACCOUNT_ID",
+    "cf_account": "CLOUDFLARE_ACCOUNT_ID",
+    "together": "TOGETHER_API_KEY",
+    "hf": "HF_TOKEN",
+    "huggingface": "HF_TOKEN",
 }
 
 
@@ -3058,7 +3172,7 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = _KEY_ALIASES.get(alias) or (args[0].upper() if args[0].upper() in _KEY_ALIASES.values() else "")
     if not name:
         await msg.reply_text(
-            "Dùng: <code>/key gemini|groq|openai|jina &lt;giá trị&gt;</code>\n"
+            "Dùng: <code>/key gemini|groq|openai|jina|cloudflare|cf_account|together|hf &lt;giá trị&gt;</code>\n"
             "Xem trạng thái: <code>/key</code>", parse_mode="HTML")
         return
 
@@ -3092,7 +3206,7 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_chat.send_message(
         f"✅ Đã lưu <code>{name}</code> = <code>{esc(_mask_secret(value))}</code>\n"
         f"<i>{esc(str(path))}</i>{note}\n"
-        + ("Dùng ngay: gửi ảnh hoặc <code>/image &lt;đường dẫn&gt;</code>."
+        + ("Dùng ngay: gửi ảnh hoặc <code>/see &lt;đường dẫn&gt;</code>."
            if name == "GEMINI_API_KEY" else "Đã áp dụng cho phiên này."),
         parse_mode="HTML")
 
@@ -3204,6 +3318,7 @@ def _redact_secrets(text: str) -> str:
         if value:
             text = text.replace(value, "***")
     text = re.sub(r"\bAIza[0-9A-Za-z_-]{20,}\b", "***", text)
+    text = re.sub(r"\bAQ\.[0-9A-Za-z_-]{15,}\b", "***", text)
     text = re.sub(r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b", "***", text)
     return text
 
@@ -3213,6 +3328,23 @@ def _watch_cli(args: list, timeout: int = 900):
     if not WATCH_CLI.is_file():
         return 127, "", f"thiếu {WATCH_CLI.name}"
     cmd = [sys.executable, str(WATCH_CLI)] + [str(x) for x in args]
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout, cwd=str(WORKSPACE), env=env)
+        return p.returncode, p.stdout or "", p.stderr or ""
+    except subprocess.TimeoutExpired:
+        return 124, "", f"quá thời gian chờ ({timeout}s)"
+    except Exception as e:
+        return 1, "", str(e)
+
+
+def _image_cli(args: list, timeout: int = 300):
+    """Chạy aistv_image.py bằng đúng Python của bot."""
+    if not IMAGE_CLI.is_file():
+        return 127, "", f"thiếu {IMAGE_CLI.name}"
+    cmd = [sys.executable, str(IMAGE_CLI)] + [str(x) for x in args]
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     try:
@@ -3293,6 +3425,108 @@ async def gemini_media_reply(message, chat_id: int, source, question: str, kind:
     append_history(chat_id, "assistant", text[:6000])
     log_daily(stored_q, text)
     return True
+
+
+# ── Tạo ảnh / sơ đồ tư duy ───────────────────────────────────────────
+async def generate_image_job(prompt: str, style: str = "", aspect: str = "1:1",
+                             kind: str = "image", ref: str = "") -> dict:
+    args = ["--mindmap", prompt] if kind == "mindmap" else [prompt]
+    if kind != "mindmap":
+        if style:
+            args += ["--style", style]
+        if aspect:
+            args += ["--aspect", aspect]
+        if ref:
+            args += ["--ref", ref]
+    args.append("--json")
+    timeout = int(os.getenv("AISTV_GEN_IMAGE_TIMEOUT", "300"))
+    rc, out, err = await asyncio.to_thread(_image_cli, args, timeout)
+    data = {}
+    for line in reversed([x.strip() for x in (out or "").splitlines() if x.strip()]):
+        try:
+            data = json.loads(line)
+            break
+        except Exception:
+            continue
+    if rc == 0 and data.get("ok"):
+        return data
+    detail = data.get("error") or ""
+    if not detail:
+        lines = [x.strip() for x in (err or out or "").splitlines() if x.strip()]
+        detail = lines[-1] if lines else f"lỗi không rõ (mã {rc})"
+    raise RuntimeError(_redact_secrets(detail)[:1200])
+
+
+def _photo_for_telegram(path: Path) -> Path:
+    """Ảnh > 9MB → thu nhỏ sang JPEG (photo Telegram tối đa 10MB)."""
+    try:
+        if path.stat().st_size <= 9 * 1024 * 1024:
+            return path
+        from PIL import Image
+        img = Image.open(path).convert("RGB")
+        img.thumbnail((2048, 2048))
+        out = path.with_suffix(".jpg")
+        img.save(out, "JPEG", quality=90)
+        return out
+    except Exception:
+        return path
+
+
+def _image_caption(data: dict) -> str:
+    bits = []
+    prompt = str(data.get("prompt") or "").strip()
+    if prompt:
+        bits.append(f"🎨 <b>{esc(_clip(prompt, 400))}</b>")
+    meta = []
+    if data.get("kind") == "mindmap":
+        meta.append("sơ đồ tư duy")
+    elif data.get("style"):
+        meta.append(esc(str(data["style"])))
+    if data.get("provider"):
+        meta.append(esc(str(data["provider"])))
+    if meta:
+        bits.append("<i>" + " · ".join(meta) + "</i>")
+    return "\n".join(bits)[:1000] or "🎨 Ảnh đã tạo"
+
+
+async def send_generated_image(chat_id: int, data: dict) -> None:
+    path = Path(str(data.get("path") or ""))
+    if not path.is_file():
+        raise RuntimeError("file ảnh không còn tồn tại")
+    ready = await asyncio.to_thread(_photo_for_telegram, path)
+    caption = _image_caption(data)
+    try:
+        with open(ready, "rb") as f:
+            await BOT_OBJ.send_photo(chat_id, photo=f, caption=caption, parse_mode="HTML")
+    except Exception:
+        with open(ready, "rb") as f:
+            await BOT_OBJ.send_document(chat_id, document=f, caption=caption, parse_mode="HTML")
+
+
+async def _tool_image_job(chat_id: int, prompt: str, style: str = "",
+                          aspect: str = "1:1", kind: str = "image") -> None:
+    """Chạy nền khi agent gọi tool generate_image (HTTP nội bộ)."""
+    if BOT_OBJ is None:
+        return
+    label = "sơ đồ tư duy" if kind == "mindmap" else "ảnh"
+    try:
+        status = await BOT_OBJ.send_message(chat_id, f"🎨 <i>Đang tạo {label}…</i>", parse_mode="HTML")
+    except Exception:
+        return
+    try:
+        data = await generate_image_job(prompt, style, aspect, kind)
+        await send_generated_image(chat_id, data)
+        try:
+            await status.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            await status.edit_text(
+                f"❌ Không tạo được {label}.\n<code>{esc(oneline(str(e), 1000))}</code>",
+                parse_mode="HTML")
+        except Exception:
+            pass
 
 
 async def _download_telegram_file(message, file_obj, name: str, mime: str = "") -> Optional[Path]:
@@ -3405,9 +3639,124 @@ async def _cmd_gemini_media(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     await gemini_media_reply(msg, update.effective_chat.id, source, question, kind)
 
 
+IMAGE_USAGE = (
+    "🎨 <b>Tạo ảnh</b>\n"
+    "<code>/image mèo phi hành gia</code>\n"
+    "<code>/image --style anime --aspect 16:9 thành phố tương lai</code>\n"
+    "<code>/image --mindmap Kế hoạch học Python</code>\n"
+    "Reply vào một ảnh rồi gõ <code>/image --style anime ...</code> để vẽ lại theo ảnh đó.\n"
+    "Phong cách: anime, 3d, realistic, watercolor, oil, pixel, minimal, comic, "
+    "sketch, cyberpunk, poster, logo, infographic, cartoon, fantasy.\n"
+    "Tỉ lệ: 1:1, 16:9, 9:16, 4:3, 3:4."
+)
+
+
+def _parse_image_args(args):
+    style, aspect, kind = "", "1:1", "image"
+    out = []
+    i = 0
+    while i < len(args):
+        a = str(args[i])
+        low = a.lower()
+        if low in ("--mindmap", "-m") or low == "mindmap":
+            kind = "mindmap"
+            i += 1
+            continue
+        if low in ("--style", "-s") and i + 1 < len(args):
+            style = str(args[i + 1])
+            i += 2
+            continue
+        if low.startswith("--style="):
+            style = a.split("=", 1)[1]
+            i += 1
+            continue
+        if low in ("--aspect", "-a") and i + 1 < len(args):
+            aspect = str(args[i + 1])
+            i += 2
+            continue
+        if low.startswith("--aspect="):
+            aspect = a.split("=", 1)[1]
+            i += 1
+            continue
+        out.append(a)
+        i += 1
+
+    text = " ".join(out).strip()
+    m = re.match(r"^(mindmap|sơ đồ tư duy|so do tu duy)\s*:\s*(.+)$", text, re.I | re.S)
+    if m:
+        kind, text = "mindmap", m.group(2).strip()
+    elif not style and ":" in text:
+        cand, rest = text.split(":", 1)
+        try:
+            import aistv_image as _img
+            resolved = _img.resolve_style(cand)
+            if resolved:
+                style, text = resolved, rest.strip()
+        except Exception:
+            pass
+    return text, style, aspect, kind
+
+
+async def _image_generate_reply(update, prompt: str, style: str = "", aspect: str = "1:1",
+                                kind: str = "image"):
+    msg = update.effective_message
+    chat_id = update.effective_chat.id
+    ref = ""
+    rt = msg.reply_to_message
+    if kind == "image" and rt and rt.photo:
+        photo = rt.photo[-1]
+        dest = await _download_telegram_file(msg, photo, f"ref_{photo.file_unique_id}.jpg",
+                                             "image/jpeg")
+        if dest:
+            ref = str(dest)
+    label = "sơ đồ tư duy" if kind == "mindmap" else "ảnh"
+    status = await msg.reply_text(f"🎨 <i>Đang tạo {label}…</i>", parse_mode=HTML)
+    try:
+        data = await generate_image_job(prompt, style, aspect, kind, ref)
+        await send_generated_image(chat_id, data)
+        try:
+            await status.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            await status.edit_text(
+                f"❌ Không tạo được {label}.\n<code>{esc(oneline(str(e), 1200))}</code>",
+                parse_mode="HTML")
+        except Exception:
+            pass
+
+
 @guard()
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mặc định tạo ảnh; nếu tham số đầu là file/URL ảnh thì đọc ảnh (như cũ)."""
+    msg = update.effective_message
+    args = list(context.args or [])
+    first = str(args[0]).strip() if args else ""
+    if first and not first.startswith("-"):
+        if re.match(r"^https?://", first, re.I) or Path(_resolve_media_source(first)).is_file():
+            await _cmd_gemini_media(update, context, "image")
+            return
+    prompt, style, aspect, kind = _parse_image_args(args)
+    if not prompt:
+        await msg.reply_text(IMAGE_USAGE, parse_mode="HTML")
+        return
+    await _image_generate_reply(update, prompt, style, aspect, kind)
+
+
+@guard()
+async def cmd_see(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _cmd_gemini_media(update, context, "image")
+
+
+@guard()
+async def cmd_mindmap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = " ".join(context.args or []).strip()
+    if not topic:
+        await update.effective_message.reply_text(
+            "Dùng: <code>/mindmap Kế hoạch học Python</code>", parse_mode=HTML)
+        return
+    await _image_generate_reply(update, topic, "", "1:1", "mindmap")
 
 
 @guard()
@@ -4794,7 +5143,8 @@ COMMANDS = [
     ("variant", "Mức reasoning của model"),
     ("remind", "Hẹn nhắc việc"), ("task", "Việc tự chạy theo lịch"), ("reminders", "Danh sách nhắc việc"),
     ("unremind", "Xoá nhắc việc"), ("watch", "Theo dõi repo/log"), ("cloud", "Trí nhớ đám mây"),
-    ("image", "Đọc ảnh bằng Gemini"), ("video", "Xem video bằng Gemini"),
+    ("image", "Tạo ảnh / sơ đồ tư duy"), ("see", "Đọc ảnh bằng Gemini"),
+    ("mindmap", "Vẽ sơ đồ tư duy"), ("video", "Xem video bằng Gemini"),
     ("summary", "Tóm tắt hội thoại vào trí nhớ"), ("email", "Đọc / gửi email"),
     ("github", "Kết nối / quản lý GitHub"), ("update", "Cập nhật bot từ GitHub"),
     ("restart", "Khởi động lại bot"),
@@ -4903,7 +5253,10 @@ def main() -> None:
                       (["remind"], cmd_remind), (["task", "cron"], cmd_task),
                       (["reminders", "remindlist"], cmd_reminders), (["unremind"], cmd_unremind),
                       (["watch", "monitor"], cmd_watch), (["cloud"], cmd_cloud),
-                      (["image", "vision", "anh"], cmd_image), (["video"], cmd_video),
+                      (["image", "img", "draw", "ve", "taoanh"], cmd_image),
+                      (["see", "vision", "docanh"], cmd_see),
+                      (["mindmap", "sodotuduy"], cmd_mindmap),
+                      (["video"], cmd_video),
                       (["summary", "summarize"], cmd_summary), (["email", "mail"], cmd_email),
                       (["github"], cmd_github), (["update"], cmd_update), (["restart"], cmd_restart),
                       (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny),
