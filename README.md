@@ -93,13 +93,17 @@ Không có Secrets thì script báo rõ cách thêm và dừng, không cài lan 
 
 ### Chạy trên Windows (cmd / PowerShell)
 
-**Cách nhanh — dán 1 dòng vào cmd:**
+**Cách nhanh — dán 1 dòng vào cmd (không cần PowerShell):**
 
 ```bat
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.ps1 | iex"
+curl -fsSL -o "%TEMP%\aistv.bat" "https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.bat?v=1" && call "%TEMP%\aistv.bat"
 ```
 
 Hoặc trong thư mục repo: nhấp đôi `run.bat` (dùng `bootstrap.bat` nếu muốn tự cập nhật code trước).
+
+`run.bat` / `bootstrap.bat` viết bằng **cmd thuần**, tự tải/cập nhật repo, tạo `.venv`,
+cài thư viện, hỏi token lần đầu rồi chạy bot — không phụ thuộc PowerShell 5.1/7.
+Bản PowerShell (`bootstrap.ps1`, `run.ps1`) vẫn còn cho ai muốn dùng.
 
 **Cần có sẵn:**
 
@@ -188,7 +192,7 @@ Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
 | `OPENCODE_BIN` | tự tìm | Đường dẫn `opencode` |
 | `AISTV_CLEAN_INSTALL` | `1` | `0` = không xoá & cài lại OpenCode mỗi lần chạy |
 | `AISTV_VENV` | `1` | `0` = dùng Python hệ thống, không tạo `.venv` |
-| `AISTV_REPO` | URL trong `run.sh` / `run.ps1` | Repo khác để tải mã nguồn |
+| `AISTV_REPO` | URL trong `run.sh` / `run.bat` | Repo khác để tải mã nguồn |
 | `AISTV_DIR` | `~/AISTV` (`%USERPROFILE%\AISTV`) | Nơi clone khi chạy one-liner |
 | `AISTV_BRANCH` | `main` | Nhánh cần tải |
 | `AISTV_FIREBASE_URL` | RTDB mặc định | URL Firebase Realtime Database cho trí nhớ đám mây |
@@ -218,10 +222,10 @@ AISTV/
 ├── aistv_email.py    đọc/gửi email IMAP·SMTP + CLI cho agent
 ├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)
-├── bootstrap.ps1     như bootstrap.sh nhưng cho Windows (PowerShell)
-├── run.ps1           như run.sh nhưng cho Windows (PowerShell)
-├── bootstrap.bat     nhấp đôi để chạy bootstrap.ps1 trên Windows
-├── run.bat           nhấp đôi để chạy run.ps1 trên Windows
+├── bootstrap.bat     như bootstrap.sh nhưng cho Windows (cmd thuần, khuyên dùng)
+├── run.bat           như run.sh nhưng cho Windows (cmd thuần, khuyên dùng)
+├── bootstrap.ps1     bản PowerShell của bootstrap.bat (tuỳ chọn)
+├── run.ps1           bản PowerShell của run.bat (tuỳ chọn)
 ├── push.sh           tạo repo GitHub và push (Linux/macOS)
 ├── requirements.txt
 ├── .env.example
