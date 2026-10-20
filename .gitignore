@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.venv.broken*/
 *.egg-info/
 
 # Bí mật — KHÔNG commit
