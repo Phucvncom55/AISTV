@@ -36,7 +36,11 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com"
 # Gemini 3 Flash đang ở dạng preview; 2.5 Flash là bản ổn định dự phòng.
 # Đổi bằng WATCH_GEMINI_MODEL trong .env nếu tài khoản dùng model khác.
 DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"
-DEFAULT_GEMINI_FALLBACKS = "gemini-2.5-flash,gemini-3.5-flash-lite"
+DEFAULT_GEMINI_FALLBACKS = "gemini-2.5-flash,gemini-3.1-flash-lite"
+# Chặn "treo": mỗi lần gọi tối đa GEMINI_ATTEMPT_TIMEOUT giây, cả chuỗi model
+# (kể cả retry 429) tối đa GEMINI_DEADLINE giây rồi báo lỗi và trả về.
+GEMINI_ATTEMPT_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "120") or 120)
+GEMINI_DEADLINE = int(os.getenv("GEMINI_DEADLINE", "300") or 300)
 DEFAULT_MAX_MB = int(os.getenv("WATCH_MAX_MB", "600") or 600)
 MAX_TRANSCRIPT = 16000
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp", ".gif", ".tif", ".tiff"}
@@ -508,7 +512,31 @@ def pick_caption_langs(info, requested):
     return "vi,en.*,en-orig,en"
 
 
+def yt_hint(text: str) -> str:
+    """Dịch lỗi khó hiểu của YouTube thành hướng dẫn dùng được."""
+    low = (text or "").lower()
+    if "sign in to confirm" in low or "not a bot" in low:
+        return ("YouTube chặn IP này (\"confirm you're not a bot\"). "
+                "Xuất cookies bằng tiện ích \"Get cookies.txt LOCALLY\", đặt "
+                "YT_COOKIES=/duong/dan/cookies.txt rồi thử lại — hoặc tải video lên chat.")
+    if "video unavailable" in low and "private" in low:
+        return "Video riêng tư/bị hạn chế — cần YT_COOKIES của tài khoản xem được."
+    return text
+
+
+def yt_cookies(value=None):
+    """Cookie YouTube: ưu tiên --cookies, rồi YT_COOKIES / YOUTUBE_COOKIES."""
+    for cand in (value, os.getenv("YT_COOKIES"), os.getenv("YOUTUBE_COOKIES")):
+        if not cand:
+            continue
+        path = Path(str(cand)).expanduser()
+        if path.is_file():
+            return path
+    return None
+
+
 def grab_captions(source, workdir: Path, langs="auto", cookies=None, info=None):
+    cookies = yt_cookies(cookies)
     if not is_url(source):
         cues, lang = sidecar_cues(Path(source))
         if cues:
@@ -536,7 +564,7 @@ def grab_captions(source, workdir: Path, langs="auto", cookies=None, info=None):
     if not files:
         msg = (err or out or "").strip().splitlines()
         text = clean_secret(msg[-1] if msg else "video không có phụ đề", [api_key("GEMINI_API_KEY")])
-        text = re.sub(r"^\[[a-z]+\]\s*", "", text)
+        text = yt_hint(re.sub(r"^\[[a-z]+\]\s*", "", text))
         return None, None, text
     parsed = []
     for path in files:
@@ -810,6 +838,7 @@ def file_has_video(path: Path):
 
 
 def download_media(source, workdir: Path, start=None, end=None, max_height=720, cookies=None):
+    cookies = yt_cookies(cookies)
     if not is_url(source):
         path = Path(source).expanduser().resolve()
         if not path.is_file():
@@ -833,7 +862,7 @@ def download_media(source, workdir: Path, start=None, end=None, max_height=720, 
     rc, out, err = run_ytdlp(args, timeout=DOWNLOAD_TIMEOUT)
     if rc != 0:
         msg = (err or out or "").strip().splitlines()
-        raise RuntimeError(clean_secret(msg[-1] if msg else "yt-dlp không tải được video", []))
+        raise RuntimeError(yt_hint(clean_secret(msg[-1] if msg else "yt-dlp không tải được video", [])))
     files = [
         p for p in workdir.glob("source.*")
         if p.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi", ".flv")
@@ -1246,9 +1275,14 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
     if not key:
         return None, "chưa có GEMINI_API_KEY"
     retries = max(0, config_int("GEMINI_MAX_RETRIES", 2))
+    deadline = time.monotonic() + max(30, GEMINI_DEADLINE)
     errors = []
     for model in gemini_model_chain(primary_model):
         for attempt in range(retries + 1):
+            remaining = deadline - time.monotonic()
+            if remaining < 5:
+                errors.append("hết thời gian chờ Gemini")
+                return None, clean_secret(" | ".join(errors[-4:]), [key])
             try:
                 wait_gemini_quota()
             except Exception as e:
@@ -1264,7 +1298,7 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
                 f"{GEMINI_BASE}/v1beta/models/{urllib.parse.quote(model)}:generateContent"
                 f"?key={urllib.parse.quote(key)}"
             )
-            data, err = http_json(url, payload, timeout=timeout)
+            data, err = http_json(url, payload, timeout=max(5, min(timeout, GEMINI_ATTEMPT_TIMEOUT, remaining)))
             if not err:
                 try:
                     chunks = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
@@ -1279,7 +1313,7 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
             low = str(err).lower()
             if "429" in str(err) or "resource exhausted" in low or "rate limit" in low:
                 if attempt < retries:
-                    delay = 10 * (attempt + 1)
+                    delay = min(10 * (attempt + 1), max(1, int(deadline - time.monotonic()) - 5))
                     ep(f"⏳ Gemini 429 — thử lại sau {delay}s ({model})…")
                     time.sleep(delay)
                     continue

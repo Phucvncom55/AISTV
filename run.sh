@@ -20,6 +20,9 @@
 #      STV_HOME=...                 nơi lưu workspace/sessions
 # ════════════════════════════════════════════════════════════════════
 set -euo pipefail
+export GIT_TERMINAL_PROMPT=0        # không treo ở prompt đăng nhập git
+START_TS=$SECONDS
+trap 'printf "\033[1;31m✖ Dừng: bước ngay trên báo lỗi (không treo, không chờ vô hạn).\033[0m\n" >&2' ERR
 
 REPO="${AISTV_REPO:-https://github.com/Phucvncom55/AISTV.git}"
 BRANCH="${AISTV_BRANCH:-main}"
@@ -67,21 +70,68 @@ fi
 
 cd "$APP_DIR"
 
-# ── 2. Token: .env → biến môi trường → Colab Secrets → hỏi trực tiếp ─
-# Biến môi trường truyền vào (Colab Secrets, dòng lệnh) được ưu tiên hơn .env.
+# ── 2. Bí mật: env → .env của repo → ~/.config/aistv/config.env ──────
+# Ưu tiên: biến môi trường > .env trong repo > config.env dùng chung.
+# config.env giúp token/key không mất khi clone lại repo hoặc đổi AISTV_DIR,
+# nên các lần chạy sau không phải nhập tay lần nào nữa.
+CONFIG_DIR="${AISTV_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aistv}"
+CONFIG_FILE="$CONFIG_DIR/config.env"
+ENV_FILE="$APP_DIR/.env"
+
 _ENV_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 _ENV_IDS="${ALLOWED_USER_IDS:-}"
 _ENV_GEMINI="${GEMINI_API_KEY:-}"
-if [[ -f "$APP_DIR/.env" ]]; then
+
+_load_env_file() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
   set -a
-  # shellcheck disable=SC1091
-  . "$APP_DIR/.env"
+  # shellcheck disable=SC1090
+  . "$f" 2>/dev/null || true
   set +a
-fi
+}
+
+_load_env_file "$CONFIG_FILE"
+_load_env_file "$ENV_FILE"
+
 [[ -n "$_ENV_TOKEN" ]] && TELEGRAM_BOT_TOKEN="$_ENV_TOKEN" && export TELEGRAM_BOT_TOKEN
 [[ -n "$_ENV_IDS" ]]   && ALLOWED_USER_IDS="$_ENV_IDS"     && export ALLOWED_USER_IDS
 [[ -n "$_ENV_GEMINI" ]] && GEMINI_API_KEY="$_ENV_GEMINI"   && export GEMINI_API_KEY
 unset _ENV_TOKEN _ENV_IDS _ENV_GEMINI
+
+# Ghi bí mật vào .env của repo VÀ config.env dùng chung (quyền 600), không in ra.
+persist_secret() {
+  local name="$1" value="$2" f
+  for f in "$ENV_FILE" "$CONFIG_FILE"; do
+    AISTV_SECRET="$value" AISTV_NAME="$name" "$PY" - "$f" <<'PY' 2>/dev/null || true
+import os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+name, value = os.environ["AISTV_NAME"], os.environ["AISTV_SECRET"]
+path.parent.mkdir(parents=True, exist_ok=True)
+lines = path.read_text("utf-8", "replace").splitlines() if path.is_file() else []
+out, done = [], False
+for line in lines:
+    s = line.strip()
+    if s.startswith("export "):
+        s = s[7:].lstrip()
+    if s.startswith(name + "="):
+        if not done:
+            out.append(f"{name}={value}")
+            done = True
+        continue
+    out.append(line)
+if not done:
+    if out and out[-1].strip():
+        out.append("")
+    out.append(f"{name}={value}")
+path.write_text("\n".join(out).rstrip() + "\n", "utf-8")
+try:
+    path.chmod(0o600)
+except Exception:
+    pass
+PY
+  done
+}
 
 if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${ALLOWED_USER_IDS:-}" || -z "${GEMINI_API_KEY:-}" ]]; then
   _sec() { "$PY" -c "from google.colab import userdata; print(userdata.get('$1') or '', end='')" 2>/dev/null || true; }
@@ -111,44 +161,89 @@ if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${ALLOWED_USER_IDS:-}" || -z "${GEMINI
   fi
 fi
 
-if [[ -z "${TELEGRAM_BOT_TOKEN:-}" && -t 0 ]]; then
-  printf '🔑 Dán Telegram Bot Token (Enter để bỏ qua): '
-  IFS= read -r TELEGRAM_BOT_TOKEN || true
-  TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN// /}"
-  if [[ -n "$TELEGRAM_BOT_TOKEN" ]]; then
-    export TELEGRAM_BOT_TOKEN
-    touch "$APP_DIR/.env"
-    if grep -q '^TELEGRAM_BOT_TOKEN=' "$APP_DIR/.env" 2>/dev/null; then
-      "$PY" - "$APP_DIR/.env" "$TELEGRAM_BOT_TOKEN" <<'PY'
-import sys, pathlib
-p, tok = pathlib.Path(sys.argv[1]), sys.argv[2]
-lines = [("TELEGRAM_BOT_TOKEN=" + tok) if l.startswith("TELEGRAM_BOT_TOKEN=") else l
-         for l in p.read_text("utf-8").splitlines()]
-p.write_text("\n".join(lines) + "\n", "utf-8")
-PY
-    else
-      printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TELEGRAM_BOT_TOKEN" >> "$APP_DIR/.env"
-    fi
-    chmod 600 "$APP_DIR/.env" 2>/dev/null || true
-    say "Đã lưu token vào .env (lần sau không cần nhập)."
+# Hỏi token một lần, có giới hạn thời gian để không bao giờ treo ở prompt.
+ask_token() {
+  [[ -t 0 ]] || return 1
+  cat <<'EOF'
+🔑 Chưa có Telegram Bot Token.
+   1) Mở https://t.me/BotFather → gõ /newbot → đặt tên cho bot
+   2) Copy token dạng 123456789:AAH... rồi dán vào đây
+EOF
+  local line=""
+  printf '   Token (Enter để bỏ qua): '
+  if ! IFS= read -r -t "${AISTV_PROMPT_TIMEOUT:-180}" line; then
+    printf '\n⏱ Hết thời gian chờ nhập token (%ss).\n' "${AISTV_PROMPT_TIMEOUT:-180}"
+    return 1
   fi
+  line="${line//[[:space:]]/}"
+  [[ -n "$line" ]] || return 1
+  TELEGRAM_BOT_TOKEN="$line"
+  export TELEGRAM_BOT_TOKEN
+  persist_secret TELEGRAM_BOT_TOKEN "$line"
+  say "Đã lưu token vào $ENV_FILE và $CONFIG_FILE — lần sau không cần nhập lại."
+}
+
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  ask_token || true
 fi
 
 if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
-  cat <<'EOF' >&2
+  cat <<EOF >&2
 
 ✖ Chưa có Telegram Bot Token.
-  • Colab: mở 🔑 Secrets (chìa khoá ở cột trái) → thêm
-        TELEGRAM_BOT_TOKEN = 123456:ABC...     (bật "Notebook access")
-        ALLOWED_USER_IDS   = 123456789        (tuỳ chọn, khoá bot)
-    rồi chạy lại đúng lệnh trên.
-  • VPS / máy cá nhân: tạo file .env trong thư mục repo:
-        TELEGRAM_BOT_TOKEN=123456:ABC...
-    hoặc: TELEGRAM_BOT_TOKEN=... bash run.sh
+  • Nhanh nhất: mở https://t.me/BotFather → /newbot → copy token, rồi chạy lại:
+        TELEGRAM_BOT_TOKEN=123456:ABC... bash run.sh
+    Token được lưu vào $CONFIG_FILE cho các lần sau, không phải nhập lại.
+  • Colab: thêm TELEGRAM_BOT_TOKEN vào 🔑 Secrets (bật Notebook access).
+  • Muốn bỏ bước chờ xác nhận chủ bot: AISTV_PAIR=0 bash run.sh
 
 EOF
   exit 1
 fi
+
+# ── 2b. Gemini = mắt + tai cho ảnh/video (tuỳ chọn, hỏi một lần) ─────
+if [[ -z "${GEMINI_API_KEY:-}" && -t 0 && "${AISTV_ASK_GEMINI:-1}" != "0" ]]; then
+  printf '🧠 Gemini API key (Enter để bỏ qua — lấy tại https://aistudio.google.com/apikey): '
+  _gk=""
+  if IFS= read -r -t "${AISTV_PROMPT_TIMEOUT:-180}" _gk && [[ -n "${_gk// /}" ]]; then
+    GEMINI_API_KEY="${_gk//[[:space:]]/}"
+    export GEMINI_API_KEY
+    persist_secret GEMINI_API_KEY "$GEMINI_API_KEY"
+    say "Đã lưu GEMINI_API_KEY — bot xem được video và đọc được ảnh."
+  else
+    say "Bỏ qua Gemini — vẫn xem được video có phụ đề, nhưng chưa đọc được ảnh."
+  fi
+  unset _gk
+fi
+
+# ── 2c. Xác nhận chủ bot: in link → chờ bạn bấm Start → lưu user id ──# Giống device flow của GitHub: bạn không phải chép id thủ công, script chờ
+# tối đa AISTV_PAIR_TIMEOUT giây rồi tự chạy tiếp (không treo vô hạn).
+if [[ -z "${ALLOWED_USER_IDS:-}" && "${AISTV_PAIR:-1}" != "0" && -f "$APP_DIR/aistv_pair.py" ]]; then
+  say "Xác nhận chủ bot qua Telegram (tối đa ${AISTV_PAIR_TIMEOUT:-180}s, Ctrl+C để bỏ qua)…"
+  if "$PY" "$APP_DIR/aistv_pair.py" --timeout "${AISTV_PAIR_TIMEOUT:-180}"; then
+    _load_env_file "$CONFIG_FILE"
+    _load_env_file "$ENV_FILE"
+    [[ -n "${ALLOWED_USER_IDS:-}" ]] && export ALLOWED_USER_IDS
+  else
+    say "Chưa xác nhận — bot vẫn chạy, người nhắn đầu tiên sẽ thành chủ bot."
+  fi
+fi
+
+# ── 2d. Bí mật đến từ biến môi trường → lưu lại cho lần chạy sau ────
+_have_secret() {
+  local name="$1"
+  grep -hsE "^[[:space:]]*(export[[:space:]]+)?${name}=.+" "$ENV_FILE" "$CONFIG_FILE" 2>/dev/null | grep -q .
+}
+
+for _pair in "TELEGRAM_BOT_TOKEN:${TELEGRAM_BOT_TOKEN:-}" "GEMINI_API_KEY:${GEMINI_API_KEY:-}"; do
+  _name="${_pair%%:*}"
+  _value="${_pair#*:}"
+  if [[ -n "$_value" ]] && ! _have_secret "$_name"; then
+    persist_secret "$_name" "$_value"
+    say "Đã lưu $_name vào $CONFIG_FILE — lần sau không cần nhập."
+  fi
+done
+unset _pair _name _value
 
 # ── 3. Môi trường Python: venv → Python hệ thống → uv ────────────────
 say "AI STV runner v3"
@@ -246,12 +341,26 @@ if ! have_pip "$PY" && ! ensure_pip "$PY"; then
   PY="$VENV/bin/python"
 fi
 
-say "Cài thư viện Python ($PY)"
-install_requirements "$PY" || fail "Cài thư viện thất bại.
+REQ_FILE="$APP_DIR/requirements.txt"
+REQ_HASH="$("$PY" - "$REQ_FILE" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()[:16])
+PY
+)"
+DEP_MARK="$CONFIG_DIR/deps-$REQ_HASH-$(printf '%s' "$PY" | cksum | cut -d' ' -f1).ok"
+
+if [[ -f "$DEP_MARK" ]] && "$PY" -c 'import telegram, nest_asyncio' >/dev/null 2>&1; then
+  say "Thư viện Python đã có — bỏ qua pip cho nhanh"
+else
+  say "Cài thư viện Python ($PY) — lần đầu mất 1–2 phút"
+  install_requirements "$PY" || fail "Cài thư viện thất bại.
   Thử tay: $PY -m pip install -r $APP_DIR/requirements.txt"
-"$PY" -c 'import telegram, nest_asyncio' >/dev/null 2>&1 \
-  || fail "Đã cài nhưng không import được python-telegram-bot / nest_asyncio. Xem log phía trên."
-say "Thư viện Python OK"
+  "$PY" -c 'import telegram, nest_asyncio' >/dev/null 2>&1 \
+    || fail "Đã cài nhưng không import được python-telegram-bot / nest_asyncio. Xem log phía trên."
+  mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+  : > "$DEP_MARK" 2>/dev/null || true
+  say "Thư viện Python OK"
+fi
 
 # ── 4. Seed workspace lần đầu (SOUL, AGENTS, skills) ─────────────────
 if [[ -d "$APP_DIR/seed" ]]; then
@@ -267,7 +376,7 @@ if [[ -d "$APP_DIR/seed" ]]; then
 fi
 
 # ── 5. Chạy bot ──────────────────────────────────────────────────────
-say "Khởi chạy AI STV… (Ctrl+C để dừng)"
+say "Sẵn sàng sau $((SECONDS - START_TS))s — khởi chạy AI STV… (Ctrl+C để dừng)"
 exec env PYTHONUNBUFFERED=1 AISTV_CLEAN_INSTALL="${AISTV_CLEAN_INSTALL:-0}" \
   STV_SKIP_SETUP="${STV_SKIP_SETUP:-0}" \
   "$PY" "$APP_DIR/aistv_bot.py"

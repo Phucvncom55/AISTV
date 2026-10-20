@@ -94,22 +94,27 @@ function Initialize-Python {
 }
 
 function Save-EnvToken([string]$Token) {
-    $path = Join-Path $script:AppDir ".env"
-    $lines = @()
-    if (Test-Path -LiteralPath $path) {
-        $lines = @(Get-Content -LiteralPath $path -Encoding UTF8 | ForEach-Object { $_.TrimStart([char]0xFEFF) })
-    }
-    $found = $false
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match "^\s*TELEGRAM_BOT_TOKEN\s*=") {
-            $lines[$i] = "TELEGRAM_BOT_TOKEN=$Token"
-            $found = $true
+    # Luu ca .env cua repo lan config.env dung chung: clone lai repo van con token.
+    foreach ($path in @((Join-Path $script:AppDir ".env"), $script:CfgFile)) {
+        if (-not $path) { continue }
+        $dir = Split-Path -Parent $path
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        $lines = @()
+        if (Test-Path -LiteralPath $path) {
+            $lines = @(Get-Content -LiteralPath $path -Encoding UTF8 | ForEach-Object { $_.TrimStart([char]0xFEFF) })
         }
+        $found = $false
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match "^\s*TELEGRAM_BOT_TOKEN\s*=") {
+                $lines[$i] = "TELEGRAM_BOT_TOKEN=$Token"
+                $found = $true
+            }
+        }
+        if (-not $found) { $lines += "TELEGRAM_BOT_TOKEN=$Token" }
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        try { [System.IO.File]::WriteAllLines($path, $lines, $utf8) } catch { }
     }
-    if (-not $found) { $lines += "TELEGRAM_BOT_TOKEN=$Token" }
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllLines($path, $lines, $utf8)
-    Say "Da luu token vao .env (lan sau khong can nhap)."
+    Say "Da luu token vao .env va $script:CfgFile (lan sau khong can nhap)."
 }
 
 function Copy-Seed([string]$Source, [string]$Destination) {
@@ -158,8 +163,10 @@ if ($scriptDir -and (Test-Path -LiteralPath (Join-Path $scriptDir "aistv_bot.py"
 }
 
 Set-Location -LiteralPath $script:AppDir
-$envVarsFile = Join-Path $script:AppDir ".env"
-if (Test-Path -LiteralPath $envVarsFile) {
+$script:CfgFile = Join-Path $(if ($env:AISTV_CONFIG_DIR) { $env:AISTV_CONFIG_DIR } else { Join-Path $UserHome ".config\aistv" }) "config.env"
+# Thu tu uu tien giong run.sh: .env cua repo truoc, config.env dung chung sau.
+foreach ($envVarsFile in @((Join-Path $script:AppDir ".env"), $script:CfgFile)) {
+    if (-not (Test-Path -LiteralPath $envVarsFile)) { continue }
     foreach ($line in (Get-Content -LiteralPath $envVarsFile -Encoding UTF8)) {
         $line = $line.TrimStart([char]0xFEFF)
         if ($line -match "^\s*#" -or $line -notmatch "=") { continue }
@@ -168,6 +175,7 @@ if (Test-Path -LiteralPath $envVarsFile) {
         $value = $line.Substring($idx + 1).Trim().Trim('"').Trim("'")
         if ($key -eq "TELEGRAM_BOT_TOKEN" -and -not $env:TELEGRAM_BOT_TOKEN) { $env:TELEGRAM_BOT_TOKEN = $value }
         elseif ($key -eq "ALLOWED_USER_IDS" -and -not $env:ALLOWED_USER_IDS) { $env:ALLOWED_USER_IDS = $value }
+        elseif ($key -eq "GEMINI_API_KEY" -and -not $env:GEMINI_API_KEY) { $env:GEMINI_API_KEY = $value }
     }
 }
 

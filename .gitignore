@@ -14,6 +14,7 @@ venv/
 workspace/
 sessions/
 archive/
+watch/
 state.json
 .venv/
 

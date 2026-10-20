@@ -117,20 +117,45 @@ Dữ liệu vẫn ở `%USERPROFILE%\stv_agent` (đổi bằng `STV_HOME`).
 > OpenCode khuyến nghị WSL2 để đầy đủ tính năng; bản Windows native (cmd/PowerShell) vẫn chạy được.
 > Nếu dùng WSL thì làm theo hướng dẫn Linux ở trên.
 
-### Token bot: nhập một lần, không hỏi lại
+### Token bot: nhập một lần, dùng mãi
 
-Tạo file `.env` **cùng thư mục với `aistv_bot.py`** (file này đã nằm trong `.gitignore`, không bị push):
+Có **2 chỗ** lưu bí mật, cả hai đều bị `.gitignore` nên không bị push:
+
+| File | Khi nào dùng |
+|---|---|
+| `.env` cạnh `aistv_bot.py` | riêng cho bản clone đó |
+| `~/.config/aistv/config.env` (`%USERPROFILE%\.config\aistv\config.env` trên Windows) | **dùng chung** — clone lại repo, đổi `AISTV_DIR` vẫn còn |
+
+Thứ tự đọc: biến môi trường → `.env` của repo → `config.env` dùng chung.
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=123456:ABC...
 ALLOWED_USER_IDS=123456789
-GEMINI_API_KEY=AIza...
+GEMINI_API_KEY=...
 ```
 
-- `run.sh`, `run.bat` và cả `python aistv_bot.py` đều tự đọc `.env` (không cần `export`).
-- Nếu chạy `run.sh`/`run.bat` mà chưa có token, lần đầu script hỏi rồi **tự ghi vào `.env`**.
-- Trên Colab: dùng 🔑 **Secrets** (`TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`) và bật *Notebook access* — Colab không có terminal để nhập tay.
-- Muốn đổi token: sửa trực tiếp dòng `TELEGRAM_BOT_TOKEN=` trong `.env` rồi khởi động lại bot.
+- Lần đầu chạy `run.sh`/`run.bat`, script **hỏi token đúng một lần** rồi ghi vào cả hai file.
+- Token truyền qua biến môi trường (`TELEGRAM_BOT_TOKEN=... bash run.sh`) cũng được tự lưu lại.
+- Prompt có **giới hạn thời gian** (`AISTV_PROMPT_TIMEOUT`, mặc định 180s) — không bao giờ treo chờ vô hạn.
+- Trên Colab: dùng 🔑 **Secrets** (`TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`) và bật *Notebook access*.
+
+### Xác nhận chủ bot kiểu "device flow"
+
+Không cần tự tìm `user id` rồi chép vào `.env`. Khi chưa có `ALLOWED_USER_IDS`, script:
+
+1. Gọi `getMe` → in link dạng `https://t.me/<bot>?start=<mã>`;
+2. **Chờ bạn bấm Start** (long-poll `getUpdates`), hiện đếm ngược;
+3. Nhận đúng mã → lưu `ALLOWED_USER_IDS` vào `config.env` + `.env` rồi chạy tiếp.
+
+Giống luồng `github.com/login/device`: bạn làm bên ngoài, script đợi rồi tự đi tiếp.
+
+```bash
+python aistv_pair.py                      # chạy riêng bước xác nhận
+python aistv_pair.py --timeout 300        # chờ lâu hơn (mặc định 180s)
+AISTV_PAIR=0 bash run.sh                  # bỏ qua, người nhắn đầu tiên thành chủ bot
+```
+
+Hết thời gian chờ → bot vẫn khởi động bình thường (không treo ở bước này).
 
 ### Chạy lại / VPS
 
@@ -273,6 +298,10 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | Token từ BotFather (bắt buộc) |
 | `ALLOWED_USER_IDS` | trống | Danh sách user id được phép, cách nhau `,` |
+| `AISTV_CONFIG_DIR` | `~/.config/aistv` | Nơi lưu `config.env` dùng chung + hạn mức Gemini |
+| `AISTV_PAIR` | `1` | `0` = bỏ bước chờ bấm Start xác nhận chủ bot |
+| `AISTV_PAIR_TIMEOUT` | `180` | Số giây chờ xác nhận chủ bot trước khi chạy tiếp |
+| `AISTV_PROMPT_TIMEOUT` | `180` | Số giây chờ nhập token/key (chống treo) |
 | `STV_HOME` | `~/stv_agent` (`%USERPROFILE%\stv_agent`) | Nơi lưu `workspace/`, `sessions/`, `archive/` |
 | `OPENCODE_BIN` | tự tìm | Đường dẫn `opencode` |
 | `AISTV_CLEAN_INSTALL` | `1` | `0` = không xoá & cài lại OpenCode mỗi lần chạy |
@@ -294,12 +323,15 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `AISTV_PROGRESS_LINES` | `14` | Số dòng cuộn trong khung tiến độ (dòng cũ rơi khỏi đỉnh) |
 | `FB_COOKIES` | trống | File cookie Facebook cho nội dung cần đăng nhập |
 | `TIKTOK_COOKIES` | trống | File cookie TikTok cho video riêng tư/giới hạn vùng |
+| `YT_COOKIES` | trống | File `cookies.txt` cho YouTube khi bị chặn "confirm you're not a bot" |
 | `GEMINI_API_KEY` | trống | Gemini đọc ảnh + xem video (AI Studio, miễn phí) |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | trống | Transcript dự phòng cho video không có phụ đề |
 | `WATCH_GEMINI_MODEL` | `gemini-3-flash-preview` | Model Gemini chính (`gemini-2.5-flash` nếu tài khoản chưa mở 3 Flash) |
-| `WATCH_GEMINI_FALLBACKS` | `gemini-2.5-flash,gemini-3.5-flash-lite` | Model dự phòng khi model chính lỗi/hết hạn mức |
+| `WATCH_GEMINI_FALLBACKS` | `gemini-2.5-flash,gemini-3.1-flash-lite` | Model dự phòng khi model chính lỗi/hết hạn mức |
 | `GEMINI_RPM` / `GEMINI_RPD` | `10` / `1500` | Tự giữ nhịp request/phút và request/ngày |
 | `GEMINI_MAX_RETRIES` | `2` | Số lần thử lại khi Gemini trả 429 |
+| `GEMINI_TIMEOUT` | `120` | Thời gian tối đa cho **một** lần gọi Gemini (giây) |
+| `GEMINI_DEADLINE` | `300` | Tổng thời gian tối đa cho cả chuỗi model + retry (giây) |
 | `GEMINI_QUOTA_DISABLE` | `0` | `1` = tắt theo dõi hạn mức cục bộ |
 | `WATCH_MAX_IMAGE_MB` | `50` | Giới hạn ảnh tải từ URL |
 | `AISTV_IMAGE_TIMEOUT` / `AISTV_VIDEO_TIMEOUT` | `600` / `900` | Giới hạn thời gian đọc ảnh/video trong chat (giây) |
