@@ -340,7 +340,21 @@ python3 /root/AISTV/aistv_watch.py transcript "URL" --timestamps
 python3 /root/AISTV/aistv_watch.py frames "URL" --max-frames 24 --at "1:23,4:56"
 ```
 
-Hoặc dùng lệnh trong chat: `/image <url|đường dẫn> [câu hỏi]` và `/video <url|đường dẫn> [câu hỏi]`.
+Hoặc dùng lệnh trong chat: `/see <url|đường dẫn> [câu hỏi]` và `/video <url|đường dẫn> [câu hỏi]`.
+
+**Tạo ảnh & sơ đồ tư duy:** `/image <mô tả>` tạo ảnh và gửi thẳng vào chat; thêm `--style anime|3d|watercolor|oil|pixel|minimal|comic|sketch|cyberpunk|poster|logo|infographic|cartoon|fantasy` và `--aspect 16:9`. Reply vào một ảnh rồi gõ `/image --style anime ...` để vẽ lại theo ảnh đó (Gemini). Agent cũng tự gọi tool `generate_image` khi bạn nhờ vẽ/tạo ảnh, poster, logo, infographic hoặc khi một hình ảnh/sơ đồ giúp giải thích rõ hơn.
+
+- `/mindmap <chủ đề>` (hoặc `/image --mindmap <chủ đề>`) → Gemini lập dàn ý, bot vẽ sơ đồ tư duy bằng **Pillow**: chữ tiếng Việt sắc nét, không lỗi font, không cần API ảnh.
+- Nguồn tạo ảnh (tự chọn theo key có sẵn): **Gemini** (`gemini-3.1-flash-image`; API free tier hiện cấp **0 lượt** nên cần bật billing), **Cloudflare Workers AI** (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`, có free tier), **Together AI** (`TOGETHER_API_KEY`, model `FLUX.1-schnell-Free`) hoặc **Hugging Face** (`HF_TOKEN`).
+- Gọi trực tiếp:
+
+```bash
+python3 /root/AISTV/aistv_image.py "mèo phi hành gia" --style anime --aspect 16:9 --json
+python3 /root/AISTV/aistv_image.py --mindmap "Kế hoạch học Python" --json
+python3 /root/AISTV/aistv_image.py --list-styles
+```
+
+Ảnh lưu ở `~/stv_agent/generated/` và được gửi dạng photo (ảnh > 9MB tự thu nhỏ).
 
 **Tin nhắn thoại (nói thay vì gõ):** gửi voice message (hoặc file âm thanh) cho bot → Gemini chép lời
 ngay, bot hiện `🎙️ Nghe được: …` rồi xử lý y như tin nhắn chữ (kể cả khi agent đang hỏi lại).
@@ -435,6 +449,12 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `TIKTOK_COOKIES` | trống | File cookie TikTok cho video riêng tư/giới hạn vùng |
 | `YT_COOKIES` | trống | File `cookies.txt` cho YouTube khi bị chặn "confirm you're not a bot" |
 | `GEMINI_API_KEY` | trống | Gemini đọc ảnh + xem video (AI Studio, miễn phí) |
+| `AISTV_IMAGE_MODEL` / `AISTV_IMAGE_FALLBACKS` | `gemini-3.1-flash-image` / `gemini-3-pro-image,gemini-2.5-flash-image` | Model tạo ảnh Gemini (API free tier = 0 lượt, cần bật billing) |
+| `AISTV_IMAGE_PROVIDER` | `auto` | Nguồn tạo ảnh: `gemini`, `cloudflare`, `together`, `hf`, `auto` |
+| `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` | trống | Tạo ảnh bằng Cloudflare Workers AI (`FLUX.1-schnell`, có free tier) |
+| `TOGETHER_API_KEY` | trống | Tạo ảnh bằng Together AI (`FLUX.1-schnell-Free`) |
+| `HF_TOKEN` | trống | Tạo ảnh qua Hugging Face Inference |
+| `AISTV_GEN_IMAGE_TIMEOUT` | `300` | Thời gian tối đa một lần tạo ảnh (giây) |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | trống | Transcript dự phòng cho video không có phụ đề |
 | `WATCH_GEMINI_MODEL` | `gemini-3-flash-preview` | Model Gemini chính (`gemini-2.5-flash` nếu tài khoản chưa mở 3 Flash) |
 | `WATCH_GEMINI_FALLBACKS` | `gemini-2.5-flash,gemini-3.1-flash-lite` | Model dự phòng khi model chính lỗi/hết hạn mức |
@@ -464,6 +484,7 @@ AISTV/
 ├── aistv_facebook.py đọc bài công khai, video/reel, tải video Facebook
 ├── aistv_tiktok.py   thông tin, tải video không watermark, tìm kiếm TikTok
 ├── aistv_watch.py    đọc ảnh + xem video bằng Gemini, transcript + frames
+├── aistv_image.py    tạo ảnh (Gemini/Cloudflare/Together/HF) + vẽ sơ đồ tư duy Pillow
 ├── aistv_github_docs.py  đọc README/docs, tìm trong tài liệu và mã GitHub
 ├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)
