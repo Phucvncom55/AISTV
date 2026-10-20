@@ -1764,7 +1764,8 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
     Lần 2 (nếu lần 1 trống): chế độ cũ (prompt qua tham số dòng lệnh)."""
     env = os.environ.copy()
     env.pop("TELEGRAM_BOT_TOKEN", None)          # không để agent nhìn thấy token
-    env.update(NO_COLOR="1", TERM="dumb", PWD=str(WORKSPACE), AISTV_CHAT_ID=str(chat_id))
+    env.update(NO_COLOR="1", TERM="dumb", PWD=str(WORKSPACE), AISTV_CHAT_ID=str(chat_id),
+               AISTV_DIR=str(Path(__file__).resolve().parent))
     err_text = ""
     for attempt in range(retries + 1):
         via_stdin = attempt == 0

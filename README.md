@@ -1,6 +1,6 @@
 # AI STV — Bot Telegram × OpenCode
 
-Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file và lịch sử hội thoại bền vững.
+Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube** (tìm video, đọc thông tin, lấy transcript).
 
 Chạy được trên **Colab, VPS, Linux/macOS và Windows (cmd/PowerShell)** — chỉ cần Python 3.10+ và mạng.
 
@@ -175,6 +175,16 @@ cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
 - **Nhắc việc/việc định kỳ** sống qua restart; việc định kỳ dùng đúng model và workspace hiện tại.
 
 **Email (IMAP/SMTP):** thêm 2 Colab Secret `AISTV_EMAIL_ADDRESS` + `AISTV_EMAIL_PASSWORD` (mật khẩu ứng dụng) rồi bật Notebook access; hoặc `/email setup <email> <app-password>`. Gmail cần bật 2FA và tạo App Password 16 ký tự. Agent cũng gọi được `aistv_email.py` để đọc/gửi thư trong lúc làm việc; mật khẩu không bao giờ bị in ra.
+
+**YouTube (tìm / thông tin / transcript):** agent tự dùng khi bạn gửi link hoặc nhờ tìm video, không cần lệnh riêng. Có thể gọi trực tiếp:
+
+```bash
+python3 /root/AISTV/aistv_youtube.py search "từ khoá" -n 5
+python3 /root/AISTV/aistv_youtube.py info "URL"
+python3 /root/AISTV/aistv_youtube.py transcript "URL" --timestamps
+```
+
+Lấy tiêu đề, kênh, thời lượng, lượt xem, mô tả, chương và phụ đề (ưu tiên tiếng Việt, fallback tiếng Anh). Chỉ tải metadata + phụ đề, không tải video.
 
 Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
 
