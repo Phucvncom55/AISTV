@@ -4,6 +4,16 @@ Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspac
 
 Chạy được trên **Colab, VPS, máy cá nhân** — chỉ cần Python 3.10+ và mạng.
 
+## ⚡ 3 bước
+
+1. `bash push.sh AISTV public` → in ra **link repo** + lệnh chạy.
+2. Thêm `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`) vào 🔑 Secrets của Colab.
+3. Dán lệnh này vào ô Colab:
+
+```python
+!bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/AISTV/main/run.sh)
+```
+
 ## 1. Tạo bot Telegram
 
 1. Nhắn [@BotFather](https://t.me/BotFather) → `/newbot` → lấy **token** dạng `123456:ABC…`.
@@ -31,28 +41,50 @@ git push -u origin main
 
 ## 3. Chạy bot bằng MỘT lệnh
 
-Thay `<USER>/<REPO>` bằng repo của bạn:
+`push.sh` đã tự ghi URL repo của bạn vào `run.sh`, nên lệnh chỉ cần dán **một lần** (thay `<USER>/<REPO>`):
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/run.sh)
 ```
 
-Lần đầu script sẽ: tải repo → tạo `.venv` → cài thư viện → cài OpenCode → hỏi token (nếu chưa có) → chạy bot.
-
-Muốn không phải nhập token mỗi lần:
+Nếu chưa sửa `run.sh`, truyền repo trực tiếp (dán link GitHub):
 
 ```bash
-cd ~/AISTV && cp .env.example .env && nano .env   # điền TELEGRAM_BOT_TOKEN + ALLOWED_USER_IDS
-bash run.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/run.sh) https://github.com/<USER>/<REPO>
 ```
 
+Lần đầu script sẽ: tải repo → lấy/hỏi token → tạo `.venv` → cài thư viện → cài OpenCode → chạy bot.
+Token lấy theo thứ tự: `.env` → biến môi trường → Colab Secrets → hỏi trực tiếp (máy có terminal).
+
 ### Chạy trên Google Colab
+
+1. Dán link repo của bạn vào ô dưới (thay `<USER>/<REPO>`), **hoặc** dùng
+   `bash <(curl -fsSL .../run.sh) https://github.com/<USER>/<REPO>`.
+2. Mở 🔑 **Secrets** (cột trái) → thêm `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`),
+   bật **Notebook access**.
+3. Dán vào một ô code rồi Run:
 
 ```python
 !bash <(curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/run.sh)
 ```
 
-Hoặc thêm token vào **🔑 Secrets** của Colab với tên `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`) rồi chạy lệnh trên.
+Script tự: clone → lấy token từ Secrets → tạo `.venv` → cài thư viện → cài OpenCode → chạy bot.
+Không có Secrets thì script báo rõ cách thêm và dừng, không cài lan man.
+
+> Colab không có terminal tương tác nên **không nhập token bằng tay** được — hãy dùng Secrets
+> (hoặc `!TELEGRAM_BOT_TOKEN=123:abc bash <(curl ...)` nếu không ngại lộ token trong notebook).
+
+### Chạy lại / VPS
+
+```bash
+cd ~/AISTV && bash run.sh          # đã có .env thì chạy thẳng
+```
+
+Muốn chạy nền trên VPS:
+
+```bash
+cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
+```
 
 ## 4. Dùng bot
 

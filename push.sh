@@ -17,8 +17,27 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
 fi
 
 LOGIN="$(gh api user -q .login)"
+SLUG="$LOGIN/$REPO_NAME"
+
 git config user.name  >/dev/null 2>&1 || git config user.name  "$LOGIN"
 git config user.email >/dev/null 2>&1 || git config user.email "$LOGIN@users.noreply.github.com"
+
+# Ghi URL repo thật vào run.sh + README để lệnh 1 dòng không cần sửa tay
+python3 - "$SLUG" "$REPO_NAME" <<'PY'
+import sys, pathlib
+slug, repo = sys.argv[1], sys.argv[2]
+raw = f"https://raw.githubusercontent.com/{slug}/main/run.sh"
+for fn in ("run.sh", "README.md"):
+    p = pathlib.Path(fn)
+    if not p.exists():
+        continue
+    s = p.read_text("utf-8")
+    s = s.replace("https://github.com/USER/AISTV.git", f"https://github.com/{slug}.git")
+    s = s.replace("https://raw.githubusercontent.com/USER/AISTV/main/run.sh", raw)
+    s = s.replace("<USER>/<REPO>", slug)
+    s = s.replace("<tên-repo>", repo)
+    p.write_text(s, "utf-8")
+PY
 
 git add -A
 if ! git diff --cached --quiet; then
@@ -31,17 +50,21 @@ else
   gh repo create "$REPO_NAME" "--$VISIBILITY" --source=. --remote=origin --push
 fi
 
-URL="$(gh repo view "$REPO_NAME" --json url -q .url 2>/dev/null || gh repo view --json url -q .url)"
-RAW="${URL/github.com/raw.githubusercontent.com}/main/run.sh"
+URL="https://github.com/$SLUG"
+RAW="https://raw.githubusercontent.com/$SLUG/main/run.sh"
 
 echo
 echo "✅ Repo: $URL"
 if [[ "$VISIBILITY" == "public" ]]; then
-  echo "▶ Chạy bot bằng 1 lệnh:"
+  echo "▶ Chạy bot (Linux / macOS / Colab):"
   echo
   echo "   bash <(curl -fsSL $RAW)"
+  echo
+  echo "▶ Colab (dán vào ô code):"
+  echo
+  echo "   !bash <(curl -fsSL $RAW)"
 else
-  echo "▶ Repo private: clone rồi chạy:"
+  echo "▶ Repo private — clone rồi chạy:"
   echo
   echo "   git clone $URL.git && cd $REPO_NAME && bash run.sh"
 fi
