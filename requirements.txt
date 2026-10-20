@@ -2,3 +2,4 @@ python-telegram-bot>=21.6
 nest_asyncio>=1.6.0
 yt-dlp>=2024.8.6
 curl_cffi>=0.11
+imageio-ffmpeg>=0.5.1

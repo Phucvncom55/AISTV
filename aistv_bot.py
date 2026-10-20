@@ -473,6 +473,7 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 10. `memory/YYYY-MM-DD.md` là nhật ký theo ngày — chỉ mở khi người dùng hỏi về những gì đã làm trước đây.
 11. `skills/` chứa quy trình chuyên biệt — làm đúng theo skill khi được kích hoạt.
 12. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
+13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`); đọc frames bằng công cụ Read rồi trả lời kèm mốc thời gian.
 """
 
 MEMORY_HEADER = "# MEMORY — Trí nhớ dài hạn\n"
@@ -2179,6 +2180,7 @@ def welcome_text() -> str:
         "• <b>Chủ động</b>: /remind hẹn giờ, /task tự chạy, /watch theo dõi repo &amp; log\n"
         "• <b>Email</b>: /email đọc &amp; gửi thư (IMAP/SMTP) ngay trong chat\n"
         "• Đọc file bạn gửi, tạo file và tự gửi lại cho bạn\n"
+        "• Xem video: gửi link/file + câu hỏi → tóm tắt kèm mốc thời gian\n"
         "• <b>Không giới hạn 10 phút</b> — dự án lớn chạy tới khi xong (/stop để huỷ)\n"
         "• Kết nối GitHub 1 lần — /github login; tự cập nhật — /update\n\n"
         "Gửi câu hỏi hoặc yêu cầu để bắt đầu 👇"
@@ -2202,7 +2204,8 @@ HELP_TEXT = (
     "/reminders — danh sách · /unremind &lt;mã|all&gt; — xoá\n"
     "/watch git owner/repo — báo commit mới · /watch log &lt;file&gt; — báo lỗi mới\n"
     "/watch file &lt;đường dẫn&gt; — báo khi thay đổi · /watch del &lt;mã|all&gt;\n\n"
-    "<b>File</b>\nGửi file cho bot → lưu vào <code>inbox/</code> để agent đọc\n/files — file trong workspace\n/get &lt;đường dẫn&gt; — tải file về\n\n"
+    "<b>File &amp; Video</b>\nGửi file cho bot → lưu vào <code>inbox/</code> để agent đọc\n/files — file trong workspace\n/get &lt;đường dẫn&gt; — tải file về\n"
+    "Gửi link/file video + câu hỏi → skill <code>watch</code> xem frames + transcript, trả lời kèm mốc thời gian\n\n"
     "<b>Reply / trích dẫn</b>\nTrả lời (reply) một tin nhắn rồi nhắn yêu cầu → agent hiểu “cái này/đoạn trên” là tin đó\n"
     "Bôi đen một phần rồi reply → agent ưu tiên đúng phần được trích dẫn\n"
     "Reply tin nhắn rồi gõ /remember → lưu chính tin đó vào trí nhớ\n\n"
