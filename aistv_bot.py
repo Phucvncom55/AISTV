@@ -912,7 +912,9 @@ def apply_github_config(token: str) -> dict:
                      if l.strip() and "@github.com" not in l]
         safe = urllib.parse.quote(token, safe="")
         lines.append(f"https://x-access-token:{safe}@github.com")
-        cred.write_text("\n".join(lines) + "\n", "utf-8")
+        # Ghi LF thay vì CRLF: git credential-store trên Windows không đọc được
+        # file .git-credentials dùng CRLF (sẽ báo không tìm thấy credential).
+        cred.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
         cred.chmod(0o600)
         if login:
             subprocess.run(["git", "config", "--global", "user.name", login],
