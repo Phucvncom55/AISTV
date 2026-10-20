@@ -1,6 +1,6 @@
 # AI STV — Bot Telegram × OpenCode
 
-Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube** (tìm video, đọc thông tin, lấy transcript).
+Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube, Facebook** (tìm, đọc nội dung, tải video).
 
 Chạy được trên **Colab, VPS, Linux/macOS và Windows (cmd/PowerShell)** — chỉ cần Python 3.10+ và mạng.
 
@@ -185,6 +185,17 @@ python3 /root/AISTV/aistv_youtube.py transcript "URL" --timestamps
 ```
 
 Lấy tiêu đề, kênh, thời lượng, lượt xem, mô tả, chương và phụ đề (ưu tiên tiếng Việt, fallback tiếng Anh). Chỉ tải metadata + phụ đề, không tải video.
+
+**Facebook (bài công khai / video / reel):** agent tự dùng khi bạn gửi link Facebook hoặc nhờ tìm. Có thể gọi trực tiếp:
+
+```bash
+python3 /root/AISTV/aistv_facebook.py info "URL"
+python3 /root/AISTV/aistv_facebook.py read "URL" --comments
+python3 /root/AISTV/aistv_facebook.py download "URL" -q sd
+python3 /root/AISTV/aistv_facebook.py search "từ khoá" -n 8
+```
+
+Đọc được bài viết công khai, tiêu đề/mô tả video, reel, watch; tải video về workspace (bot tự gửi nếu ≤ 45MB). Trang cá nhân, nhóm kín và feed cần đăng nhập nên không xem được.
 
 Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
 
