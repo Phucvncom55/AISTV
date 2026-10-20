@@ -224,6 +224,14 @@ def _sh(cmd: str, timeout: int = 900) -> subprocess.CompletedProcess:
                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
+def _safe_is_dir(p: Path) -> bool:
+    """is_dir() nhưng không nổ khi gặp thư mục không có quyền (vd /root trên DataCamp)."""
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
 def _opencode_dirs() -> list:
     home = Path.home()
     dirs = [home / ".opencode" / "bin", home / ".local" / "bin", home / ".bun" / "bin"]
@@ -235,7 +243,8 @@ def _opencode_dirs() -> list:
             base = os.getenv(var)
             if base:
                 dirs.append(Path(base).joinpath(*parts))
-    else:
+    elif hasattr(os, "geteuid") and os.geteuid() == 0:
+        # /root không đọc được với user thường (DataCamp, Colab) → chỉ thêm khi là root
         dirs.append(Path("/root/.opencode/bin"))
     return dirs
 
@@ -243,7 +252,7 @@ def _opencode_dirs() -> list:
 def find_opencode() -> Optional[str]:
     for p in _opencode_dirs():
         sp = str(p)
-        if p.is_dir() and sp not in os.environ.get("PATH", "").split(os.pathsep):
+        if _safe_is_dir(p) and sp not in os.environ.get("PATH", "").split(os.pathsep):
             os.environ["PATH"] = sp + os.pathsep + os.environ.get("PATH", "")
     binary = os.getenv("OPENCODE_BIN")
     if binary and Path(binary).exists():
@@ -307,6 +316,64 @@ def _install_opencode_windows() -> Optional[str]:
     return find_opencode()
 
 
+def _install_opencode_unix() -> Optional[str]:
+    """Linux: tải thẳng binary từ GitHub Releases (dự phòng khi script cài bị chặn)."""
+    import platform
+    import tarfile
+    import tempfile
+
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
+    api = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
+    req = urllib.request.Request(api, headers={"User-Agent": "AISTV-bot",
+                                              "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+    except Exception as e:
+        print(f"   ⚠️ Không lấy được thông tin bản phát hành: {e}")
+        return None
+
+    assets = {a.get("name"): a.get("browser_download_url") for a in data.get("assets") or []}
+    candidates = [f"opencode-linux-{arch}.tar.gz", f"opencode-linux-{arch}-musl.tar.gz",
+                  f"opencode-linux-{arch}-baseline.tar.gz"]
+    url = next((assets[n] for n in candidates if n in assets), None)
+    if not url:
+        print(f"   ⚠️ Không có file Linux {arch} trong bản phát hành.")
+        return None
+
+    dest = Path.home() / ".opencode" / "bin"
+    dest.mkdir(parents=True, exist_ok=True)
+    tmp_tar = None
+    try:
+        with urllib.request.urlopen(url, timeout=600) as resp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as fh:
+                tmp_tar = fh.name
+                shutil.copyfileobj(resp, fh)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with tarfile.open(tmp_tar, "r:gz") as tf:
+                try:
+                    tf.extractall(tmp_dir, filter="data")
+                except TypeError:  # Python < 3.12
+                    tf.extractall(tmp_dir)
+            found = next((p for p in Path(tmp_dir).rglob("*")
+                          if p.is_file() and p.name in ("opencode", "opencode.exe")), None)
+            if not found:
+                print("   ⚠️ Gói tải về không có file opencode.")
+                return None
+            shutil.copy2(found, dest / "opencode")
+            (dest / "opencode").chmod(0o755)
+    except Exception as e:
+        print(f"   ⚠️ Tải/cài OpenCode thất bại: {e}")
+        return None
+    finally:
+        try:
+            os.unlink(tmp_tar)
+        except Exception:
+            pass
+    return find_opencode()
+
+
 def setup_environment() -> None:
     print("⏳ [1/3] Kiểm tra thư viện Python (python-telegram-bot, nest_asyncio)...")
     missing = [name for name in ("telegram", "nest_asyncio")
@@ -331,6 +398,12 @@ def setup_environment() -> None:
         res = _sh("curl -fsSL https://opencode.ai/install | bash")
         if res.returncode != 0:
             print("\n".join(res.stdout.splitlines()[-15:]))
+        if not find_opencode() and shutil.which("npm"):
+            print("   • Thử cài bằng npm…")
+            _sh("npm install -g opencode-ai", timeout=900)
+        if not find_opencode():
+            print("   • Tải binary trực tiếp từ GitHub Releases…")
+            _install_opencode_unix()
     binary = find_opencode()
     if not binary:
         raise SystemExit("❌ Không cài được OpenCode.\n"
