@@ -1,16 +1,16 @@
 #requires -version 5.1
 <#
-  AI STV — chạy bot Telegram trên Windows (PowerShell 5.1+ / PowerShell 7)
-  Tương đương run.sh trên Linux/macOS.
+  AI STV - chay bot Telegram tren Windows (PowerShell 5.1+ / PowerShell 7)
+  Tuong duong run.sh tren Linux/macOS.
 
-  Trong thư mục repo:
+  Trong thu muc repo:
       .\run.ps1
       run.bat
 
-  Chạy từ xa (một dòng trong cmd hoặc PowerShell):
+  Chay tu xa (mot dong trong cmd hoac PowerShell):
       powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.ps1 | iex"
 
-  Biến môi trường: TELEGRAM_BOT_TOKEN, ALLOWED_USER_IDS, AISTV_REPO,
+  Bien moi truong: TELEGRAM_BOT_TOKEN, ALLOWED_USER_IDS, AISTV_REPO,
   AISTV_DIR, AISTV_BRANCH, AISTV_VENV, AISTV_CLEAN_INSTALL, STV_HOME.
 #>
 [CmdletBinding()]
@@ -109,7 +109,7 @@ function Save-EnvToken([string]$Token) {
     if (-not $found) { $lines += "TELEGRAM_BOT_TOKEN=$Token" }
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllLines($path, $lines, $utf8)
-    Say "Đã lưu token vào .env (lần sau không cần nhập)."
+    Say "Da luu token vao .env (lan sau khong can nhap)."
 }
 
 function Copy-Seed([string]$Source, [string]$Destination) {
@@ -125,33 +125,35 @@ function Copy-Seed([string]$Source, [string]$Destination) {
     }
 }
 
-# ── 1. Xác định mã nguồn: chạy tại chỗ hay clone từ GitHub ────────────
+# -- 1. Xac dinh ma nguon: chay tai cho hay clone tu GitHub ------------
 $Repo = Normalize-Repo $(if ($Repo) { $Repo } elseif ($env:AISTV_REPO) { $env:AISTV_REPO } else { "https://github.com/Phucvncom55/AISTV.git" })
 $Branch = $(if ($env:AISTV_BRANCH) { $env:AISTV_BRANCH } else { "main" })
-$script:AppDir = $(if ($env:AISTV_DIR) { $env:AISTV_DIR } else { Join-Path $env:USERPROFILE "AISTV" })
+$UserHome = $(if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME })
+if (-not $UserHome) { $UserHome = [Environment]::GetFolderPath("UserProfile") }
+$script:AppDir = $(if ($env:AISTV_DIR) { $env:AISTV_DIR } else { Join-Path $UserHome "AISTV" })
 
 $scriptDir = $PSScriptRoot
 if ($scriptDir -and (Test-Path -LiteralPath (Join-Path $scriptDir "aistv_bot.py"))) {
     $script:AppDir = $scriptDir
-    Say "Dùng mã nguồn tại $script:AppDir"
+    Say "Dung ma nguon tai $script:AppDir"
 } else {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Fail "Cần Git để tải repo. Cài bằng: winget install --id Git.Git -e   (hoặc https://git-scm.com/download/win)"
+        Fail "Can Git de tai repo. Cai bang: winget install --id Git.Git -e   (hoac https://git-scm.com/download/win)"
     }
     if (Test-Path -LiteralPath (Join-Path $script:AppDir ".git")) {
-        Say "Cập nhật mã nguồn trong $script:AppDir"
+        Say "Cap nhat ma nguon trong $script:AppDir"
         $pull = Invoke-Native git @("-C", $script:AppDir, "pull", "--ff-only")
-        if ($pull.Code -ne 0) { Warn "Không cập nhật được (bỏ qua), dùng bản hiện có." }
+        if ($pull.Code -ne 0) { Warn "Khong cap nhat duoc (bo qua), dung ban hien co." }
     } else {
-        Say "Tải mã nguồn từ $Repo"
+        Say "Tai ma nguon tu $Repo"
         $clone = Invoke-Native git @("clone", "--depth", "1", "--branch", $Branch, $Repo, $script:AppDir)
         if ($clone.Code -ne 0) {
             if ($clone.Output) { Write-Host $clone.Output -ForegroundColor DarkGray }
-            Fail "Không clone được $Repo — kiểm tra URL repo / AISTV_REPO."
+            Fail "Khong clone duoc $Repo - kiem tra URL repo / AISTV_REPO."
         }
     }
     if (-not (Test-Path -LiteralPath (Join-Path $script:AppDir "aistv_bot.py"))) {
-        Fail "Repo thiếu aistv_bot.py."
+        Fail "Repo thieu aistv_bot.py."
     }
 }
 
@@ -169,13 +171,13 @@ if (Test-Path -LiteralPath $envVarsFile) {
     }
 }
 
-# ── 2. Token: .env → biến môi trường → hỏi trực tiếp ─────────────────
+# -- 2. Token: .env -> bien moi truong -> hoi truc tiep -----------------
 if (-not $env:TELEGRAM_BOT_TOKEN) {
     $canPrompt = $true
     try { $canPrompt = -not [Console]::IsInputRedirected } catch { $canPrompt = $true }
     try {
         if (-not $canPrompt) { throw "non-interactive" }
-        $secure = Read-Host "Dán Telegram Bot Token (Enter để bỏ qua)" -AsSecureString
+        $secure = Read-Host "Dan Telegram Bot Token (Enter de bo qua)" -AsSecureString
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         try { $token = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
@@ -189,23 +191,23 @@ if (-not $env:TELEGRAM_BOT_TOKEN) {
 
 if (-not $env:TELEGRAM_BOT_TOKEN) {
     Write-Host ""
-    Write-Host "x Chưa có Telegram Bot Token." -ForegroundColor Red
-    Write-Host "  • Tạo bot: nhắn @BotFather → /newbot → lấy token 123456:ABC..."
-    Write-Host "  • Tạo file .env trong thư mục repo:"
+    Write-Host "x Chua co Telegram Bot Token." -ForegroundColor Red
+    Write-Host "  * Tao bot: nhan @BotFather -> /newbot -> lay token 123456:ABC..."
+    Write-Host "  * Tao file .env trong thu muc repo:"
     Write-Host "        TELEGRAM_BOT_TOKEN=123456:ABC..."
-    Write-Host "        ALLOWED_USER_IDS=123456789        (nên đặt, để khoá bot)"
-    Write-Host "  • Hoặc chạy: `$env:TELEGRAM_BOT_TOKEN='123456:ABC...'; .\run.ps1"
+    Write-Host "        ALLOWED_USER_IDS=123456789        (nen dat, de khoa bot)"
+    Write-Host "  * Hoac chay: `$env:TELEGRAM_BOT_TOKEN='123456:ABC...'; .\run.ps1"
     Write-Host ""
     exit 1
 }
 
-# ── 3. Môi trường Python: venv → Python hệ thống ─────────────────────
+# -- 3. Moi truong Python: venv -> Python he thong ---------------------
 Say "AI STV runner (Windows)"
 
 $pyVersion = Initialize-Python
 if (-not $pyVersion) {
-    Fail "Không tìm thấy Python 3.10+. Cài bằng: winget install --id Python.Python.3.12 -e
-  Nhớ tick 'Add python.exe to PATH' (hoặc chạy lại trong cửa sổ cmd mới)."
+    Fail "Khong tim thay Python 3.10+. Cai bang: winget install --id Python.Python.3.12 -e
+  Nho tick 'Add python.exe to PATH' (hoac chay lai trong cua so cmd moi)."
 }
 Say "Python $pyVersion"
 
@@ -217,14 +219,14 @@ $basePre = $script:PyPre
 if ($env:AISTV_VENV -ne "0" -and -not $env:VIRTUAL_ENV) {
     if ((Test-Path -LiteralPath $venv) -and -not (Test-Path -LiteralPath $venvPy)) {
         $broken = "$venv.broken." + [int][double]::Parse((Get-Date -UFormat %s))
-        Say "venv cũ không chạy được — đổi tên thành $(Split-Path $broken -Leaf)"
+        Say "venv cu khong chay duoc - doi ten thanh $(Split-Path $broken -Leaf)"
         Move-Item -LiteralPath $venv -Destination $broken -Force -ErrorAction SilentlyContinue
     }
     if (-not (Test-Path -LiteralPath $venvPy)) {
-        Say "Tạo môi trường ảo .venv"
+        Say "Tao moi truong ao .venv"
         & $baseExe @basePre -m venv $venv
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $venvPy)) {
-            Warn "Không tạo được venv — dùng Python hệ thống."
+            Warn "Khong tao duoc venv - dung Python he thong."
             if (Test-Path -LiteralPath $venv) {
                 Move-Item -LiteralPath $venv -Destination "$venv.broken" -Force -ErrorAction SilentlyContinue
             }
@@ -238,44 +240,44 @@ if ($env:AISTV_VENV -ne "0" -and -not $env:VIRTUAL_ENV) {
 
 $pipCheck = Invoke-Native $script:PyExe (@($script:PyPre) + @("-m", "pip", "--version"))
 if ($pipCheck.Code -ne 0) {
-    Say "Python thiếu pip — chạy ensurepip"
+    Say "Python thieu pip - chay ensurepip"
     $null = Invoke-Native $script:PyExe (@($script:PyPre) + @("-m", "ensurepip", "--upgrade"))
 }
 
-Say "Cài thư viện Python"
+Say "Cai thu vien Python"
 Invoke-Py "-m" "pip" "install" "-q" "-U" "pip" | Out-Null
 $requirements = Join-Path $script:AppDir "requirements.txt"
 Invoke-Py "-m" "pip" "install" "-q" "-U" "-r" $requirements
 if ($LASTEXITCODE -ne 0) {
-    Fail "Cài thư viện thất bại.
-  Thử tay: $script:PyExe -m pip install -r $requirements"
+    Fail "Cai thu vien that bai.
+  Thu tay: $script:PyExe -m pip install -r $requirements"
 }
 $importCheck = Invoke-Native $script:PyExe (@($script:PyPre) + @("-c", "import telegram, nest_asyncio"))
 if ($importCheck.Code -ne 0) {
     if ($importCheck.Output) { Write-Host $importCheck.Output -ForegroundColor DarkGray }
-    Fail "Đã cài nhưng không import được python-telegram-bot / nest_asyncio."
+    Fail "Da cai nhung khong import duoc python-telegram-bot / nest_asyncio."
 }
-Say "Thư viện Python OK"
+Say "Thu vien Python OK"
 
-# ── 4. Seed workspace lần đầu (SOUL, AGENTS, skills) ─────────────────
+# -- 4. Seed workspace lan dau (SOUL, AGENTS, skills) -----------------
 $seed = Join-Path $script:AppDir "seed"
 if (Test-Path -LiteralPath $seed) {
     if ($env:STV_HOME) {
         $workspace = Join-Path $env:STV_HOME "workspace"
     } else {
-        $workspace = Join-Path $env:USERPROFILE "stv_agent\workspace"
+        $workspace = Join-Path $UserHome "stv_agent\workspace"
     }
     New-Item -ItemType Directory -Force -Path $workspace | Out-Null
     Copy-Seed $seed $workspace
 }
 
-# ── 5. Chạy bot ──────────────────────────────────────────────────────
+# -- 5. Chay bot ------------------------------------------------------
 $env:PYTHONUNBUFFERED = "1"
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 if (-not $env:AISTV_CLEAN_INSTALL) { $env:AISTV_CLEAN_INSTALL = "0" }
 if (-not $env:STV_SKIP_SETUP) { $env:STV_SKIP_SETUP = "0" }
 
-Say "Khởi chạy AI STV… (Ctrl+C để dừng)"
+Say "Khoi chay AI STV... (Ctrl+C de dung)"
 Invoke-Py (Join-Path $script:AppDir "aistv_bot.py")
 exit $LASTEXITCODE
