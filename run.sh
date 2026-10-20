@@ -28,8 +28,11 @@ BRANCH="${AISTV_BRANCH:-main}"
 if [[ $# -ge 1 && -n "${1:-}" ]]; then
   REPO="$1"
 fi
-[[ "$REPO" == */* && "$REPO" != http* && "$REPO" != git@* ]] && REPO="https://github.com/${REPO}.git"
-[[ "$REPO" == http* && "$REPO" != *.git ]] && REPO="${REPO%.git}.git"
+REPO="${REPO%/}"
+if [[ "$REPO" != *://* && "$REPO" != git@* && "$REPO" != /* && "$REPO" == */* ]]; then
+  REPO="https://github.com/${REPO}"                       # dạng tắt: user/repo
+fi
+[[ "$REPO" == http* && "$REPO" != *.git ]] && REPO="${REPO}.git"
 
 APP_DIR="${AISTV_DIR:-$HOME/AISTV}"
 PY="${PYTHON:-python3}"
