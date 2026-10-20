@@ -10,8 +10,8 @@ CÁCH DÙNG
   • Trong repo đã clone:
       bash run.sh                    (Linux / macOS / Colab)
       run.bat                        (Windows — cmd hoặc PowerShell)
-  • Windows, chưa clone:
-      powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.ps1 | iex"
+  • Windows, chưa clone (cmd thuần, không cần PowerShell):
+      curl -fsSL -o "%TEMP%\aistv.bat" "https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.bat?v=1" && call "%TEMP%\aistv.bat"
   • Trên Colab: dán TOÀN BỘ file này vào MỘT ô code → Run (tự cài đặt),
     hoặc thêm secret TELEGRAM_BOT_TOKEN rồi chạy lệnh run.sh ở trên.
   • Token: đặt TELEGRAM_BOT_TOKEN (env / Colab Secrets / .env). Nếu thiếu, bot sẽ hỏi.
