@@ -135,12 +135,46 @@ EOF
 fi
 
 # ── 3. Môi trường Python riêng (venv) ────────────────────────────────
+have_pip() { "$1" -m pip --version >/dev/null 2>&1; }
+
+# Python thiếu ensurepip (bản build từ source, Debian tối giản…) vẫn có thể
+# lấy pip bằng get-pip.py. Trả về 0 nếu sau đó "$1 -m pip" chạy được.
+ensure_pip() {
+  local py="$1" tmp
+  have_pip "$py" && return 0
+  "$py" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  have_pip "$py" && return 0
+  tmp="$(mktemp -d)"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --max-time 60 https://bootstrap.pypa.io/get-pip.py -o "$tmp/get-pip.py" 2>/dev/null || true
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qT 60 -O "$tmp/get-pip.py" https://bootstrap.pypa.io/get-pip.py 2>/dev/null || true
+  fi
+  if [[ -s "$tmp/get-pip.py" ]]; then
+    say "Python thiếu pip — đang cài pip bằng get-pip.py"
+    "$py" "$tmp/get-pip.py" --quiet >/dev/null 2>&1 || true
+  fi
+  rm -rf "$tmp"
+  have_pip "$py"
+}
+
 if [[ "${AISTV_VENV:-1}" != "0" && -z "${VIRTUAL_ENV:-}" ]]; then
   if [[ ! -x "$APP_DIR/.venv/bin/python" ]]; then
     say "Tạo môi trường ảo .venv"
-    "$PY" -m venv "$APP_DIR/.venv" 2>/dev/null || say "Không tạo được venv, dùng Python hệ thống."
+    "$PY" -m venv "$APP_DIR/.venv" >/dev/null 2>&1 || say "Không tạo được venv, dùng Python hệ thống."
   fi
-  [[ -x "$APP_DIR/.venv/bin/python" ]] && PY="$APP_DIR/.venv/bin/python"
+  if [[ -x "$APP_DIR/.venv/bin/python" ]] && ensure_pip "$APP_DIR/.venv/bin/python"; then
+    PY="$APP_DIR/.venv/bin/python"
+  else
+    say "venv không dùng được (thiếu pip/ensurepip) — chuyển sang Python hệ thống."
+    PY="${PYTHON:-python3}"
+    ensure_pip "$PY" || fail "Python hệ thống cũng thiếu pip và không tự cài được.
+  • Debian/Ubuntu: sudo apt-get update && sudo apt-get install -y python3-pip python3-venv
+  • Rồi chạy lại lệnh trên."
+  fi
+elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  ensure_pip "$PY" || fail "Python trong venv hiện tại thiếu pip. Tạo venv mới rồi thử lại:
+  python3 -m venv .venv && . .venv/bin/activate"
 fi
 
 say "Cài thư viện Python"
