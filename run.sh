@@ -68,12 +68,18 @@ fi
 cd "$APP_DIR"
 
 # ── 2. Token: .env → biến môi trường → Colab Secrets → hỏi trực tiếp ─
+# Biến môi trường truyền vào (Colab Secrets, dòng lệnh) được ưu tiên hơn .env.
+_ENV_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+_ENV_IDS="${ALLOWED_USER_IDS:-}"
 if [[ -f "$APP_DIR/.env" ]]; then
   set -a
   # shellcheck disable=SC1091
   . "$APP_DIR/.env"
   set +a
 fi
+[[ -n "$_ENV_TOKEN" ]] && TELEGRAM_BOT_TOKEN="$_ENV_TOKEN" && export TELEGRAM_BOT_TOKEN
+[[ -n "$_ENV_IDS" ]]   && ALLOWED_USER_IDS="$_ENV_IDS"     && export ALLOWED_USER_IDS
+unset _ENV_TOKEN _ENV_IDS
 
 if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${ALLOWED_USER_IDS:-}" ]]; then
   _sec() { "$PY" -c "from google.colab import userdata; print(userdata.get('$1') or '', end='')" 2>/dev/null || true; }
