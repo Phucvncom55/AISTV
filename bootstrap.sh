@@ -10,6 +10,7 @@
 #  Biến môi trường: AISTV_REPO, AISTV_BRANCH, AISTV_DIR (như run.sh).
 # ════════════════════════════════════════════════════════════════════
 set -euo pipefail
+export GIT_TERMINAL_PROMPT=0        # không treo ở prompt đăng nhập git
 
 REPO="${AISTV_REPO:-https://github.com/Phucvncom55/AISTV.git}"
 BRANCH="${AISTV_BRANCH:-main}"
@@ -30,7 +31,7 @@ fail() { printf '\033[1;31m✖ %s\033[0m\n' "$*" >&2; exit 1; }
 
 command -v git >/dev/null 2>&1 || fail "Cần git. Debian/Ubuntu: sudo apt-get install -y git"
 
-say "AI STV bootstrap v3"
+say "AI STV bootstrap v4"
 
 if [[ -d "$APP_DIR/.git" ]]; then
   say "Cập nhật mã nguồn trong $APP_DIR"

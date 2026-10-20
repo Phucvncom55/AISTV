@@ -50,11 +50,15 @@ def _env_files():
     override = os.getenv("AISTV_ENV_FILE", "").strip()
     if override:
         return [Path(override).expanduser()]       # file chỉ định: chỉ đọc file này
+    cfg_dir = Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
+                   or (Path.home() / ".config" / "aistv"))
     files = [
         Path(__file__).resolve().parent / ".env",
         Path.cwd() / ".env",
         Path.home() / ".env",
         Path(os.getenv("STV_HOME", "")) / ".env" if os.getenv("STV_HOME") else None,
+        # Cấu hình dùng chung, không mất khi clone lại repo / đổi AISTV_DIR.
+        cfg_dir / "config.env",
     ]
     seen, result = set(), []
     for path in files:
@@ -93,39 +97,51 @@ def _load_dotenv():
 _load_dotenv()
 
 
-def save_env_var(name: str, value: str) -> Path:
-    """Lưu một biến vào .env (không in giá trị). Dùng khi người dùng nhập token lần đầu."""
-    path = Path(os.getenv("AISTV_ENV_FILE", "") or (Path(__file__).resolve().parent / ".env"))
+def _write_env_var(path: Path, name: str, value: str) -> Path:
+    """Ghi/ cập nhật một biến trong file .env kiểu KEY=VALUE."""
     path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text("utf-8", "replace").splitlines() if path.is_file() else []
+    found = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("export "):
+            stripped = stripped[7:].lstrip()
+        if stripped.startswith(name + "="):
+            lines[i] = f"{name}={value}"
+            found = True
+            break
+    if not found:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(f"{name}={value}")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(lines).rstrip() + "\n", "utf-8")
+    tmp.replace(path)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lines = path.read_text("utf-8", "replace").splitlines() if path.is_file() else []
-        found = False
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith("export "):
-                stripped = stripped[7:].lstrip()
-            if stripped.startswith(name + "="):
-                lines[i] = f"{name}={value}"
-                found = True
-                break
-        if not found:
-            if lines and lines[-1].strip():
-                lines.append("")
-            lines.append(f"{name}={value}")
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text("\n".join(lines).rstrip() + "\n", "utf-8")
-        tmp.replace(path)
-        try:
-            if not IS_WINDOWS:
-                path.chmod(0o600)
-        except Exception:
-            pass
-        os.environ[name] = value
-        return path
+        if not IS_WINDOWS:
+            path.chmod(0o600)
     except Exception:
-        os.environ[name] = value
-        return path
+        pass
+    return path
+
+
+def save_env_var(name: str, value: str) -> Path:
+    """Lưu biến vào .env của repo VÀ config.env dùng chung.
+
+    Nhờ file dùng chung (~/.config/aistv/config.env) token không mất khi
+    clone lại repo hay đổi AISTV_DIR — lần sau chạy không phải nhập lại.
+    """
+    primary = Path(os.getenv("AISTV_ENV_FILE", "") or (Path(__file__).resolve().parent / ".env"))
+    shared = Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
+                  or (Path.home() / ".config" / "aistv")) / "config.env"
+    for path in (primary, shared):
+        try:
+            _write_env_var(path, name, value)
+        except Exception:
+            continue
+    os.environ[name] = value
+    return primary
 
 
 # Windows: console mặc định không phải UTF-8 (cp1252/cp437) → in tiếng Việt/emoji sẽ lỗi.
