@@ -191,7 +191,8 @@ AGENT_TIMEOUT = 0               # LUÔN không giới hạn: dự án lớn ch�
                                 # (bỏ qua AISTV_AGENT_TIMEOUT để không bao giờ tự cắt ngang)
                                 # Muốn bật lại: sửa số 0 thành số giây.
 ASK_TIMEOUT = int(os.getenv("AISTV_ASK_TIMEOUT", "0") or 0)
-                                # 0 = agent chờ người dùng trả lời không giới hạn
+                                # 0 (mặc định) = chờ không giới hạn, không bao giờ tự cắt ngang
+                                # Muốn giới hạn: đặt AISTV_ASK_TIMEOUT=<số giây>
 GH_CLIENT_ID = os.getenv("AISTV_GH_CLIENT_ID", "178c6fc778ccc68e1d6a")   # GitHub CLI (public client)
 GH_SCOPES = os.getenv("AISTV_GH_SCOPES", "repo workflow read:user")
 MAX_PROMPT_BYTES = 28_000 if IS_WINDOWS else 110_000   # Windows giới hạn dòng lệnh 32K ký tự
@@ -1224,18 +1225,28 @@ class _AskHandler(BaseHTTPRequestHandler):
 
     def _json(self, code: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
         try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
             self.wfile.write(body)
-        except Exception:
-            pass
+        except (ConnectionError, OSError):
+            pass                    # client đã đóng socket, không phải lỗi bot
         self.close_connection = True
 
     def do_POST(self):
+        try:
+            self._handle_post()
+        except (ConnectionError, OSError):
+            log.debug("ask_user: client ngắt kết nối trước khi trả lời")
+            self.close_connection = True
+        except Exception as e:
+            log.warning("ask_user handler lỗi: %s", e)
+            self.close_connection = True
+
+    def _handle_post(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
         if path not in ("/ask", "/image"):
             self._json(404, {"error": "not found"})
@@ -1303,6 +1314,18 @@ class _AskHandler(BaseHTTPRequestHandler):
         self._json(200, {"answer": rec.get("answer"), "cancelled": bool(rec.get("cancelled"))})
 
 
+class _AskServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, OSError)):
+            log.debug("ask_user server: %s", exc)   # client tự ngắt, bỏ qua
+            return
+        log.warning("ask_user server lỗi: %r", exc)
+
+
 def start_ask_server() -> None:
     """Mở HTTP server 127.0.0.1 để tool ask_user gọi vào bot."""
     global ASK_SERVER, ASK_URL, ASK_TOKEN, BOT_LOOP
@@ -1310,8 +1333,7 @@ def start_ask_server() -> None:
         return
     BOT_LOOP = asyncio.get_running_loop()
     ASK_TOKEN = secrets.token_urlsafe(24)
-    ASK_SERVER = ThreadingHTTPServer(("127.0.0.1", 0), _AskHandler)
-    ASK_SERVER.daemon_threads = True
+    ASK_SERVER = _AskServer(("127.0.0.1", 0), _AskHandler)
     port = ASK_SERVER.server_address[1]
     threading.Thread(target=ASK_SERVER.serve_forever, daemon=True).start()
     ASK_URL = f"http://127.0.0.1:{port}"          # tool JS tự nối /ask, /image
