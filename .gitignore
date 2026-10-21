@@ -8,7 +8,10 @@ venv/
 
 # Bí mật — KHÔNG commit
 .env
+config.env
+.secrets/
 *.token
+*.json.key
 
 # Dữ liệu chạy (workspace, lịch sử, trạng thái)
 workspace/
