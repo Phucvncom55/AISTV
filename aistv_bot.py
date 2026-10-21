@@ -4337,7 +4337,10 @@ async def _on_gh_repo_button(q, data: str) -> None:
 @guard()
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    chat_id, data = q.message.chat_id, q.data
+    if q is None or not q.data:
+        return
+    chat_id = q.message.chat_id if q.message else (q.from_user.id if q.from_user else 0)
+    data = q.data
     if data.startswith("ghr:"):
         await _on_gh_repo_button(q, data)
         return
@@ -5698,7 +5701,11 @@ def main() -> None:
 
     print("🚀 Đang khởi chạy AI STV Agent… (dừng bằng nút ■ của ô Colab)")
     try:
-        app.run_polling(drop_pending_updates=True, stop_signals=None, close_loop=False)
+        # BẮT BUỘC truyền allowed_updates: Telegram ghi nhớ giá trị của lần getUpdates
+        # trước đó. Nếu lần trước chỉ đăng ký ["message"] thì mọi callback_query (nút bấm)
+        # sẽ KHÔNG bao giờ được gửi tới bot -> bấm nút không có phản ứng gì.
+        app.run_polling(allowed_updates=Update.ALL_TYPES,
+                        drop_pending_updates=True, stop_signals=None, close_loop=False)
     except KeyboardInterrupt:
         print("🛑 Bot đã dừng.")
 
