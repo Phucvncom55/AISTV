@@ -363,12 +363,41 @@ def hf_image(prompt: str, aspect: str = "1:1", **_):
     raise ImageError(_error_text(data, code) if data else f"HTTP {code}: {raw[:200]!r}")
 
 
+def pollinations_image(prompt: str, aspect: str = "1:1", **_):
+    """Pollinations.ai — miễn phí, KHÔNG cần API key (lưới an toàn cuối cùng)."""
+    w, h = _dims(aspect)
+    model = secret("AISTV_POLLINATIONS_MODEL") or "flux"
+    q = urllib.parse.urlencode({"width": w, "height": h, "model": model,
+                                "nologo": "true", "enhance": "false", "private": "true"})
+    url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(prompt[:1800])}?{q}"
+    last = ""
+    for attempt in range(4):
+        try:
+            code, raw, headers = _request(url, timeout=180)
+        except ImageError as e:
+            last = str(e)
+            time.sleep(5)
+            continue
+        ctype = (headers.get("Content-Type") or "").lower()
+        if code == 200 and (ctype.startswith("image/") or raw[:4] in (b"\x89PNG", b"\xff\xd8")):
+            return raw, (ctype.split(";")[0] if ctype.startswith("image/") else "image/jpeg"), f"pollinations/{model}"
+        detail = raw.decode("utf-8", "replace")[:300]
+        last = f"HTTP {code}: {detail}"
+        if attempt < 3:
+            # Free tier: 1 ảnh / 45 giây / IP -> đọc "Retry after Ns" rồi chờ đúng
+            m = re.search(r"[Rr]etry after (\d+)\s*s", detail)
+            time.sleep(min(int(m.group(1)) + 3, 75) if m else 8 * (attempt + 1))
+    raise ImageError(f"Pollinations không trả ảnh ({last})")
+
+
 PROVIDERS = {
     "gemini": (gemini_image, lambda: bool(gemini_key())),
     "cloudflare": (cloudflare_image,
                    lambda: bool(secret("CLOUDFLARE_ACCOUNT_ID") and secret("CLOUDFLARE_API_TOKEN"))),
     "together": (together_image, lambda: bool(secret("TOGETHER_API_KEY"))),
     "hf": (hf_image, lambda: bool(secret("HF_TOKEN") or secret("HUGGINGFACE_API_KEY"))),
+    # Không cần key -> luôn sẵn sàng, đứng cuối để làm lưới an toàn.
+    "pollinations": (pollinations_image, lambda: True),
 }
 
 
