@@ -736,8 +736,13 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 12. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
 13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`); đọc frames bằng công cụ Read rồi trả lời kèm mốc thời gian.
 14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh (mô tả + OCR chữ) rồi trả lời.
-15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic hoặc sơ đồ tư duy → gọi tool `generate_image`
-    (kind `mindmap` cho sơ đồ tư duy; style: anime, 3d, realistic, watercolor, pixel, minimal, comic, sketch, cyberpunk, poster...).
+15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic, biểu đồ hoặc sơ đồ tư duy → gọi tool `generate_image`:
+    - `kind: "mindmap"` cho sơ đồ tư duy (chữ Việt sắc nét, do Pillow vẽ).
+    - `kind: "infographic"` cho infographic/tóm tắt trực quan.
+    - `kind: "chart"` cho biểu đồ số liệu (cột/đường/tròn).
+    - `kind: "image"` cho ảnh thường; style: `realistic` (chân thật), anime, 3d, watercolor, pixel, minimal, comic, sketch, cyberpunk, poster, logo...
+    Máy tự chọn model Cloudflare phù hợp: `flux-2-dev` (chất lượng cao nhất), `flux-2-klein-9b` (cân bằng), `flux-1-schnell` (nhanh).
+    Nếu người dùng muốn chân thật/đẹp nhất, truyền `model: "flux-2-dev"`; mặc định để auto.
     Khi một hình ảnh/sơ đồ giúp người dùng hiểu rõ hơn, chủ động tạo và gửi. Không tự vẽ ảnh bằng code trừ khi được yêu cầu.
 
 ## Bộ công cụ local (không tốn Gemini)
@@ -831,15 +836,19 @@ IMAGE_TOOL_JS = r'''import { tool } from "@opencode-ai/plugin"
 
 export default tool({
   description: [
-    "Generate an image, illustration, poster, logo, infographic or mind map and send it to the user on Telegram.",
-    "Use it whenever the user asks to draw/create an image, or when a diagram/mind map would make an explanation clearer.",
+    "Generate an image, illustration, poster, logo, infographic, data chart or mind map and send it to the user on Telegram.",
+    "Use it whenever the user asks to draw/create an image, or when a diagram, chart or mind map would make an explanation clearer.",
+    "Images use Cloudflare Workers AI models (flux-2-dev, flux-2-klein-9b, flux-1-schnell); the best model is picked automatically.",
   ].join(" "),
   args: {
-    prompt: tool.schema.string().describe("Detailed description of the image, or the topic when kind=mindmap"),
+    prompt: tool.schema.string().describe("Detailed image description, the mind map/infographic topic, or the data to chart"),
     style: tool.schema.string().optional()
-      .describe("anime, 3d, realistic, watercolor, oil, pixel, minimal, comic, sketch, cyberpunk, poster, logo, infographic, cartoon, fantasy"),
+      .describe("realistic, anime, 3d, watercolor, oil, pixel, minimal, comic, sketch, cyberpunk, poster, logo, infographic, cartoon, fantasy"),
     aspect: tool.schema.string().optional().describe("1:1, 16:9, 9:16, 4:3, 3:4 (default 1:1)"),
-    kind: tool.schema.string().optional().describe("'image' (default) or 'mindmap'"),
+    kind: tool.schema.string().optional()
+      .describe("'image' (default), 'mindmap' for a mind map, 'infographic' for a visual summary, 'chart' for a bar/line/pie chart"),
+    model: tool.schema.string().optional()
+      .describe("Optional Cloudflare model: flux-2-dev (best), flux-2-klein-9b (balanced), flux-1-schnell (fast)"),
   },
   async execute(args) {
     const url = process.env.AISTV_ASK_URL
@@ -848,7 +857,8 @@ export default tool({
     if (!url) {
       return "generate_image is unavailable. Answer without generating an image."
     }
-    const kind = String(args.kind || "image").toLowerCase() === "mindmap" ? "mindmap" : "image"
+    const rawKind = String(args.kind || "image").toLowerCase()
+    const kind = ["mindmap", "infographic", "chart"].includes(rawKind) ? rawKind : "image"
     const res = await fetch(url.replace(/\/$/, "") + "/image", {
       method: "POST",
       headers: { "content-type": "application/json", "x-aistv-token": token },
@@ -858,6 +868,7 @@ export default tool({
         style: String(args.style || ""),
         aspect: String(args.aspect || "1:1"),
         kind,
+        model: String(args.model || ""),
       }),
     })
     if (!res.ok) {
@@ -867,9 +878,16 @@ export default tool({
     if (!data.ok) {
       return "Image generation error: " + (data.error || "unknown")
     }
-    return kind === "mindmap"
-      ? "Đang vẽ sơ đồ tư duy và sẽ gửi cho người dùng khi xong. Trả lời ngắn gọn, đừng mô tả lại toàn bộ sơ đồ."
-      : "Đang tạo ảnh và sẽ gửi cho người dùng khi xong. Trả lời ngắn gọn, đừng mô tả lại toàn bộ bức ảnh."
+    if (kind === "mindmap") {
+      return "Đang vẽ sơ đồ tư duy và sẽ gửi cho người dùng khi xong. Trả lời ngắn gọn, đừng mô tả lại toàn bộ sơ đồ."
+    }
+    if (kind === "infographic") {
+      return "Đang vẽ infographic và sẽ gửi cho người dùng khi xong. Trả lời ngắn gọn, đừng mô tả lại toàn bộ nội dung."
+    }
+    if (kind === "chart") {
+      return "Đang vẽ biểu đồ và sẽ gửi cho người dùng khi xong. Trả lời ngắn gọn, đừng mô tả lại toàn bộ biểu đồ."
+    }
+    return "Đang tạo ảnh và sẽ gửi cho người dùng khi xong. Trả lời ngắn gọn, đừng mô tả lại toàn bộ bức ảnh."
   },
 })
 '''
@@ -946,9 +964,11 @@ def bootstrap_workspace() -> None:
                 changed = True
             if "generate_image" not in old:
                 old = old.rstrip() + (
-                    "\n15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic hoặc sơ đồ tư duy "
-                    "→ gọi tool `generate_image` (kind `mindmap` cho sơ đồ tư duy). Khi một hình ảnh/sơ đồ "
-                    "giúp người dùng hiểu rõ hơn, chủ động tạo và gửi. Không tự vẽ ảnh bằng code trừ khi được yêu cầu.\n"
+                    "\n15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic, biểu đồ hoặc sơ đồ tư duy "
+                    "→ gọi tool `generate_image`: kind `mindmap` cho sơ đồ tư duy, `infographic` cho infographic, "
+                    "`chart` cho biểu đồ số liệu, `image` cho ảnh thường (style realistic/anime/3d/...). "
+                    "Khi một hình ảnh/sơ đồ giúp người dùng hiểu rõ hơn, chủ động tạo và gửi. "
+                    "Không tự vẽ ảnh bằng code trừ khi được yêu cầu.\n"
                 )
                 changed = True
             if changed:
@@ -1323,7 +1343,8 @@ class _AskHandler(BaseHTTPRequestHandler):
                     _tool_image_job(chat_id, prompt,
                                     str(data.get("style") or "").strip(),
                                     str(data.get("aspect") or "1:1").strip(),
-                                    str(data.get("kind") or "image").strip().lower()),
+                                    str(data.get("kind") or "image").strip().lower(),
+                                    str(data.get("model") or "").strip()),
                     BOT_LOOP)
             except Exception as e:
                 self._json(500, {"error": str(e)})
@@ -3922,15 +3943,24 @@ async def gemini_media_reply(message, chat_id: int, source, question: str, kind:
 
 # ── Tạo ảnh / sơ đồ tư duy ───────────────────────────────────────────
 async def generate_image_job(prompt: str, style: str = "", aspect: str = "1:1",
-                             kind: str = "image", ref: str = "") -> dict:
-    args = ["--mindmap", prompt] if kind == "mindmap" else [prompt]
-    if kind != "mindmap":
+                             kind: str = "image", ref: str = "", model: str = "") -> dict:
+    if kind == "mindmap":
+        args = ["--mindmap", prompt]
+    elif kind == "infographic":
+        args = ["--infographic", prompt]
+    elif kind == "chart":
+        args = ["--chart", prompt]
+    else:
+        kind = "image"
+        args = [prompt]
         if style:
             args += ["--style", style]
         if aspect:
             args += ["--aspect", aspect]
         if ref:
             args += ["--ref", ref]
+        if model:
+            args += ["--model", model]
     args.append("--json")
     timeout = int(os.getenv("AISTV_GEN_IMAGE_TIMEOUT", "300"))
     rc, out, err = await asyncio.to_thread(_image_cli, args, timeout)
@@ -3971,8 +4001,10 @@ def _image_caption(data: dict) -> str:
     if prompt:
         bits.append(f"🎨 <b>{esc(_clip(prompt, 400))}</b>")
     meta = []
-    if data.get("kind") == "mindmap":
-        meta.append("sơ đồ tư duy")
+    kind_label = {"mindmap": "sơ đồ tư duy", "infographic": "infographic",
+                  "chart": "biểu đồ"}.get(str(data.get("kind") or ""))
+    if kind_label:
+        meta.append(kind_label)
     elif data.get("style"):
         meta.append(esc(str(data["style"])))
     if data.get("provider"):
@@ -3997,17 +4029,19 @@ async def send_generated_image(chat_id: int, data: dict) -> None:
 
 
 async def _tool_image_job(chat_id: int, prompt: str, style: str = "",
-                          aspect: str = "1:1", kind: str = "image") -> None:
+                          aspect: str = "1:1", kind: str = "image",
+                          model: str = "") -> None:
     """Chạy nền khi agent gọi tool generate_image (HTTP nội bộ)."""
     if BOT_OBJ is None:
         return
-    label = "sơ đồ tư duy" if kind == "mindmap" else "ảnh"
+    label = {"mindmap": "sơ đồ tư duy", "infographic": "infographic",
+             "chart": "biểu đồ"}.get(kind, "ảnh")
     try:
         status = await BOT_OBJ.send_message(chat_id, f"🎨 <i>Đang tạo {label}…</i>", parse_mode="HTML")
     except Exception:
         return
     try:
-        data = await generate_image_job(prompt, style, aspect, kind)
+        data = await generate_image_job(prompt, style, aspect, kind, model=model)
         await send_generated_image(chat_id, data)
         try:
             await status.delete()
@@ -4135,17 +4169,21 @@ async def _cmd_gemini_media(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 IMAGE_USAGE = (
     "🎨 <b>Tạo ảnh</b>\n"
     "<code>/image mèo phi hành gia</code>\n"
-    "<code>/image --style anime --aspect 16:9 thành phố tương lai</code>\n"
+    "<code>/image --style realistic --aspect 16:9 thành phố tương lai</code>\n"
+    "<code>/image --model flux-2-dev ảnh chân dung chân thực</code>\n"
     "<code>/image --mindmap Kế hoạch học Python</code>\n"
+    "<code>/image --infographic 5 lợi ích của việc đọc sách</code>\n"
+    "<code>/image --chart doanh thu 2021: 120, 2022: 150, 2023: 180</code>\n"
     "Reply vào một ảnh rồi gõ <code>/image --style anime ...</code> để vẽ lại theo ảnh đó.\n"
     "Phong cách: anime, 3d, realistic, watercolor, oil, pixel, minimal, comic, "
     "sketch, cyberpunk, poster, logo, infographic, cartoon, fantasy.\n"
+    "Model Cloudflare: flux-2-dev (đẹp nhất), flux-2-klein-9b (cân bằng), flux-1-schnell (nhanh).\n"
     "Tỉ lệ: 1:1, 16:9, 9:16, 4:3, 3:4."
 )
 
 
 def _parse_image_args(args):
-    style, aspect, kind = "", "1:1", "image"
+    style, aspect, kind, model = "", "1:1", "image", ""
     out = []
     i = 0
     while i < len(args):
@@ -4153,6 +4191,22 @@ def _parse_image_args(args):
         low = a.lower()
         if low in ("--mindmap", "-m") or low == "mindmap":
             kind = "mindmap"
+            i += 1
+            continue
+        if low in ("--infographic", "-i"):
+            kind = "infographic"
+            i += 1
+            continue
+        if low in ("--chart", "-c"):
+            kind = "chart"
+            i += 1
+            continue
+        if low == "--model" and i + 1 < len(args):
+            model = str(args[i + 1])
+            i += 2
+            continue
+        if low.startswith("--model="):
+            model = a.split("=", 1)[1]
             i += 1
             continue
         if low in ("--style", "-s") and i + 1 < len(args):
@@ -4175,9 +4229,14 @@ def _parse_image_args(args):
         i += 1
 
     text = " ".join(out).strip()
-    m = re.match(r"^(mindmap|sơ đồ tư duy|so do tu duy)\s*:\s*(.+)$", text, re.I | re.S)
+    m = re.match(r"^(mindmap|sơ đồ tư duy|so do tu duy|infographic|chart|biểu đồ|bieu do)\s*:\s*(.+)$",
+                 text, re.I | re.S)
     if m:
-        kind, text = "mindmap", m.group(2).strip()
+        key = m.group(1).lower()
+        kind = ("mindmap" if "mindmap" in key or "sơ đồ" in key or "so do" in key
+                else "chart" if "chart" in key or "biểu đồ" in key or "bieu do" in key
+                else "infographic")
+        text = m.group(2).strip()
     elif not style and ":" in text:
         cand, rest = text.split(":", 1)
         try:
@@ -4187,11 +4246,11 @@ def _parse_image_args(args):
                 style, text = resolved, rest.strip()
         except Exception:
             pass
-    return text, style, aspect, kind
+    return text, style, aspect, kind, model
 
 
 async def _image_generate_reply(update, prompt: str, style: str = "", aspect: str = "1:1",
-                                kind: str = "image"):
+                                kind: str = "image", model: str = ""):
     msg = update.effective_message
     chat_id = update.effective_chat.id
     ref = ""
@@ -4202,10 +4261,11 @@ async def _image_generate_reply(update, prompt: str, style: str = "", aspect: st
                                              "image/jpeg")
         if dest:
             ref = str(dest)
-    label = "sơ đồ tư duy" if kind == "mindmap" else "ảnh"
+    label = {"mindmap": "sơ đồ tư duy", "infographic": "infographic",
+             "chart": "biểu đồ"}.get(kind, "ảnh")
     status = await msg.reply_text(f"🎨 <i>Đang tạo {label}…</i>", parse_mode=HTML)
     try:
-        data = await generate_image_job(prompt, style, aspect, kind, ref)
+        data = await generate_image_job(prompt, style, aspect, kind, ref, model)
         await send_generated_image(chat_id, data)
         try:
             await status.delete()
@@ -4230,11 +4290,11 @@ async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if re.match(r"^https?://", first, re.I) or Path(_resolve_media_source(first)).is_file():
             await _cmd_gemini_media(update, context, "image")
             return
-    prompt, style, aspect, kind = _parse_image_args(args)
+    prompt, style, aspect, kind, model = _parse_image_args(args)
     if not prompt:
         await msg.reply_text(IMAGE_USAGE, parse_mode="HTML")
         return
-    await _image_generate_reply(update, prompt, style, aspect, kind)
+    await _image_generate_reply(update, prompt, style, aspect, kind, model)
 
 
 @guard()
