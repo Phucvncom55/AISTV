@@ -49,8 +49,7 @@ echo %REPO% | findstr /c:"/" >nul
 if not errorlevel 1 set "REPO=https://github.com/%REPO%"
 
 :repo_norm
-echo %REPO% | findstr /i /e /c:".git" >nul
-if errorlevel 1 set "REPO=%REPO%.git"
+if /i not "%REPO:~-4%"==".git" set "REPO=%REPO%.git"
 
 where git >nul 2>nul
 if errorlevel 1 goto no_git
