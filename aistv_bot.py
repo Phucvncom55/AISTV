@@ -80,24 +80,29 @@ def _env_files():
     return result
 
 
+def _load_env_path(path: Path) -> None:
+    """Nạp KEY=VALUE từ một file, không ghi đè biến môi trường đã có."""
+    try:
+        if not path.is_file():
+            return
+        for raw in path.read_text("utf-8", "replace").splitlines():
+            line = raw.strip()
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            name = name.strip()
+            value = value.strip().strip("'\"")
+            if name and value and name not in os.environ:
+                os.environ[name] = value
+    except Exception:
+        pass
+
+
 def _load_dotenv():
     for path in _env_files():
-        try:
-            if not path.is_file():
-                continue
-            for raw in path.read_text("utf-8", "replace").splitlines():
-                line = raw.strip()
-                if line.startswith("export "):
-                    line = line[7:].lstrip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                name, value = line.split("=", 1)
-                name = name.strip()
-                value = value.strip().strip("'\"")
-                if name and value and name not in os.environ:
-                    os.environ[name] = value
-        except Exception:
-            continue
+        _load_env_path(path)
 
 
 _load_dotenv()
@@ -164,6 +169,40 @@ def save_env_var(name: str, value: str) -> Path:
     if name in SECRET_SYNC_KEYS:
         SECRETS_DIRTY = True                  # cloud_loop sẽ đẩy lên Firebase
     return primary
+
+
+def _persist_shared_config() -> None:
+    """Lưu token + bí mật đang có vào config.env dùng chung (chỉ thêm, không ghi đè).
+
+    Nhờ vậy máy khác chỉ cần clone repo / copy config.env là bot kết nối được,
+    không phải nhập lại token hay API key.
+    """
+    if os.getenv("AISTV_ENV_FILE", "").strip():
+        return                                # người dùng chỉ định file riêng: không đụng
+    shared = Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
+                  or (Path.home() / ".config" / "aistv")) / "config.env"
+    for name in ("TELEGRAM_BOT_TOKEN",) + tuple(SECRET_SYNC_KEYS):
+        value = (os.getenv(name) or "").strip()
+        if not value:
+            continue
+        try:
+            if shared.is_file():
+                has = False
+                for line in shared.read_text("utf-8", "replace").splitlines():
+                    s = line.strip()
+                    if s.startswith("export "):
+                        s = s[7:].lstrip()
+                    if s.startswith(name + "=") and s.split("=", 1)[1].strip():
+                        has = True
+                        break
+                if has:
+                    continue
+            _write_env_var(shared, name, value)
+        except Exception:
+            continue
+
+
+_persist_shared_config()
 
 
 # Windows: console mặc định không phải UTF-8 (cp1252/cp437) → in tiếng Việt/emoji sẽ lỗi.
@@ -5601,8 +5640,105 @@ COMMANDS = [
 ]
 
 
+def _merge_env_file(path: Path, text: str) -> int:
+    """Thêm các biến còn thiếu từ text vào path; không ghi đè giá trị đang có."""
+    existing = set()
+    try:
+        if path.is_file():
+            for line in path.read_text("utf-8", "replace").splitlines():
+                s = line.strip()
+                if s.startswith("export "):
+                    s = s[7:].lstrip()
+                if s and not s.startswith("#") and "=" in s:
+                    existing.add(s.split("=", 1)[0].strip())
+    except Exception:
+        pass
+    added = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        if s.startswith("export "):
+            s = s[7:].lstrip()
+        name = s.split("=", 1)[0].strip()
+        if name and name not in existing:
+            added.append(s)
+            existing.add(name)
+    if not added:
+        return 0
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        prev = path.read_bytes() if path.is_file() else b""
+        with path.open("ab") as f:
+            if prev and not prev.endswith((b"\n", b"\r")):
+                f.write(b"\n")
+            f.write(("\n".join(added) + "\n").encode("utf-8"))
+        try:
+            if not IS_WINDOWS:
+                path.chmod(0o600)
+        except Exception:
+            pass
+    except Exception:
+        return 0
+    return len(added)
+
+
+def _remote_config_text() -> str:
+    """Tải config.env từ AISTV_ENV_URL hoặc repo private (gh / AISTV_CONFIG_TOKEN)."""
+    url = (os.getenv("AISTV_ENV_URL") or "").strip()
+    if url:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "aistv"})
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                return resp.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+    repo = (os.getenv("AISTV_CONFIG_REPO") or "Phucvncom55/AISTV-secrets").strip()
+    if not repo or repo.lower() in ("0", "off"):
+        return ""
+    token = (os.getenv("AISTV_CONFIG_TOKEN") or "").strip()
+    if not token:
+        try:
+            token = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
+                                   timeout=15).stdout.strip()
+        except Exception:
+            token = ""
+    if not token:
+        return ""
+    path = (os.getenv("AISTV_CONFIG_PATH") or "config.env").strip() or "config.env"
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github.raw",
+                     "User-Agent": "aistv"})
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            return resp.read().decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def _bootstrap_remote_config() -> int:
+    """Máy mới: tự nạp token/API key từ config.env dùng chung trên GitHub."""
+    if get_secret("TELEGRAM_BOT_TOKEN"):
+        return 0
+    text = _remote_config_text()
+    if not text or "=" not in text:
+        return 0
+    shared = Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
+                  or (Path.home() / ".config" / "aistv")) / "config.env"
+    added = _merge_env_file(shared, text)
+    if added:
+        _load_env_path(shared)
+        log.info("Nạp %d mục cấu hình từ kho lưu trữ (%s)", added, shared)
+    return added
+
+
 def get_token() -> str:
     tok = get_secret("TELEGRAM_BOT_TOKEN")
+    if not tok:
+        _bootstrap_remote_config()
+        tok = get_secret("TELEGRAM_BOT_TOKEN")
     if not tok:
         try:
             tok = getpass.getpass("🔑 Dán Telegram Bot Token (lấy từ @BotFather): ").strip()

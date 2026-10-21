@@ -187,6 +187,8 @@ GEMINI_API_KEY=...
 - Token truyền qua biến môi trường (`TELEGRAM_BOT_TOKEN=... bash run.sh`) cũng được tự lưu lại.
 - Prompt có **giới hạn thời gian** (`AISTV_PROMPT_TIMEOUT`, mặc định 180s) — không bao giờ treo chờ vô hạn.
 - Trên Colab: dùng 🔑 **Secrets** (`TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`) và bật *Notebook access*.
+- **Máy mới**: nếu máy đã đăng nhập `gh` (hoặc đặt `AISTV_CONFIG_TOKEN`), bot tự tải `config.env` từ repo private `Phucvncom55/AISTV-secrets` khi thiếu token; các key còn lại khôi phục từ cloud — không phải chép file thủ công.
+- Khi bot khởi động, token/API key đang có được tự thêm vào `config.env` dùng chung (chỉ thêm, không ghi đè giá trị cũ).
 
 ### Xác nhận chủ bot kiểu "device flow"
 
