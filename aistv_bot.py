@@ -739,6 +739,15 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic hoặc sơ đồ tư duy → gọi tool `generate_image`
     (kind `mindmap` cho sơ đồ tư duy; style: anime, 3d, realistic, watercolor, pixel, minimal, comic, sketch, cyberpunk, poster...).
     Khi một hình ảnh/sơ đồ giúp người dùng hiểu rõ hơn, chủ động tạo và gửi. Không tự vẽ ảnh bằng code trừ khi được yêu cầu.
+
+## Bộ công cụ local (không tốn Gemini)
+16. Đọc PDF/DOCX/ảnh scan: `python3 aistv_docs.py "<file>" --json` (thêm `--lang vie+eng` cho ảnh). Thiếu công cụ thì chạy `--check` rồi báo người dùng cài.
+17. Tra trí nhớ/lịch sử: `python3 aistv_memory_index.py search "từ khoá" -n 8`. Trước khi trả lời câu hỏi về việc đã làm trước đây, tra index thay vì đọc lại toàn bộ MEMORY.md. Cập nhật index bằng `index` sau khi thêm ký ức mới.
+18. Điều khiển web (login, bấm, chụp màn hình): `python3 aistv_browser.py --url <url> --shot out.png` hoặc chạy kịch bản JSON. Chưa cài thì `--install`.
+19. Giọng nói: `python3 aistv_voice.py tts "<text>" -o out.ogg` và `stt <file> --json`.
+20. MCP: `python3 aistv_mcp.py list` / `add` / `remove` — ghi vào `opencode.json`, restart mới nạp.
+21. Cloudflare: dùng `python3 aistv_cloudflare.py ...` (skill `cloudflare-aistv`) cho Workers AI, upload web (Pages/Workers), DNS, R2; token ở `.secrets/cloudflare_token` hoặc env `CLOUDFLARE_API_TOKEN`, không in token ra chat/log.
+22. Railway: dùng `python3 aistv_railway.py ...` (skill `railway`) cho deploy, log, biến môi trường, domain; không in giá trị biến bí mật ra chat/log.
 """
 
 MEMORY_HEADER = "# MEMORY — Trí nhớ dài hạn\n"

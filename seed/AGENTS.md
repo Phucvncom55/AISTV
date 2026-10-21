@@ -29,3 +29,5 @@
 18. Điều khiển web (login, bấm, chụp màn hình): `python3 aistv_browser.py --url <url> --shot out.png` hoặc chạy kịch bản JSON. Chưa cài thì `--install`.
 19. Giọng nói: `python3 aistv_voice.py tts "<text>" -o out.ogg` và `stt <file> --json`.
 20. MCP: `python3 aistv_mcp.py list` / `add` / `remove` — ghi vào `opencode.json`, restart mới nạp.
+21. Cloudflare: dùng `python3 aistv_cloudflare.py ...` (skill `cloudflare-aistv`) cho Workers AI, upload web (Pages/Workers), DNS, R2; token ở `.secrets/cloudflare_token` hoặc env `CLOUDFLARE_API_TOKEN`, không in token ra chat/log.
+22. Railway: dùng `python3 aistv_railway.py ...` (skill `railway`) cho deploy, log, biến môi trường, domain; không in giá trị biến bí mật ra chat/log.
