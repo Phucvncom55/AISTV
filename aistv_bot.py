@@ -2166,6 +2166,43 @@ def _render_status(chat_id: int, started: float, frame: str = "🧠") -> str:
     return head + "\n<blockquote expandable>" + "\n\n".join(kept) + "</blockquote>"
 
 
+async def _iter_lines(stream, max_line: int = 4 * 1024 * 1024):
+    """Đọc theo chunk và tự cắt dòng.
+
+    asyncio StreamReader.readline() ném "Separator is not found, and chunk exceed
+    the limit" khi một dòng dài hơn buffer (opencode --format json có thể in ra
+    dòng JSON rất dài vì tool output/base64). Hàm này không bao giờ ném lỗi đó:
+    dòng quá dài bị cắt bớt nhưng vẫn đọc tiếp bình thường.
+    """
+    buf = bytearray()
+    skipped = False
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            break
+        start = 0
+        while True:
+            nl = chunk.find(b"\n", start)
+            if nl < 0:
+                if not skipped:
+                    buf += chunk[start:]
+                    if len(buf) > max_line:
+                        del buf[max_line:]
+                        skipped = True
+                break
+            if not skipped:
+                buf += chunk[start:nl]
+                if len(buf) > max_line:
+                    del buf[max_line:]
+                    skipped = True
+            yield bytes(buf)
+            buf.clear()
+            skipped = False
+            start = nl + 1
+    if buf:
+        yield bytes(buf)
+
+
 async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> str:
     """Gửi prompt qua stdin, đọc stdout từng dòng.
     OpenCode chạy với --format json nên mỗi dòng là 1 sự kiện: text / tool_use / step_start."""
@@ -2188,10 +2225,7 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> s
     async def read_out():
         nonlocal buf, mid
         assert proc.stdout is not None
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
+        async for line in _iter_lines(proc.stdout):
             t = line.decode("utf-8", "replace").strip()
             if not t:
                 continue
@@ -2255,10 +2289,7 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> s
 
     async def watch_err():
         try:
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
+            async for line in _iter_lines(proc.stderr):
                 t = clean_output(line.decode("utf-8", "replace"))
                 if t:
                     err_lines.append(t)
