@@ -31,7 +31,7 @@ fail() { printf '\033[1;31m✖ %s\033[0m\n' "$*" >&2; exit 1; }
 
 command -v git >/dev/null 2>&1 || fail "Cần git. Debian/Ubuntu: sudo apt-get install -y git"
 
-say "AI STV bootstrap v4"
+say "AI STV bootstrap v5"
 
 if [[ -d "$APP_DIR/.git" ]]; then
   say "Cập nhật mã nguồn trong $APP_DIR"

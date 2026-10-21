@@ -440,4 +440,6 @@ fi
 say "Sẵn sàng sau $((SECONDS - START_TS))s — khởi chạy AI STV… (Ctrl+C để dừng)"
 exec env PYTHONUNBUFFERED=1 AISTV_CLEAN_INSTALL="${AISTV_CLEAN_INSTALL:-0}" \
   STV_SKIP_SETUP="${STV_SKIP_SETUP:-0}" \
+  OPENCODE_VARIANT="${OPENCODE_VARIANT:-max}" \
+  AISTV_AGENT_TIMEOUT=0 \
   "$PY" "$APP_DIR/aistv_bot.py"

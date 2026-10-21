@@ -187,9 +187,9 @@ DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"   # đổi nhanh bằng /mod
 TIMEZONE = "Asia/Ho_Chi_Minh"
 MAX_HISTORY = 12                # số lượt hỏi-đáp đưa vào ngữ cảnh
 MAX_PARALLEL = 2                # số tiến trình OpenCode chạy cùng lúc
-AGENT_TIMEOUT = int(os.getenv("AISTV_AGENT_TIMEOUT", "0") or 0)
-                                # 0 = KHÔNG giới hạn thời gian (mặc định, cho dự án lớn)
-                                # >0 = số giây tối đa cho 1 yêu cầu
+AGENT_TIMEOUT = 0               # LUÔN không giới hạn: dự án lớn chạy tới khi xong.
+                                # (bỏ qua AISTV_AGENT_TIMEOUT để không bao giờ tự cắt ngang)
+                                # Muốn bật lại: sửa số 0 thành số giây.
 ASK_TIMEOUT = int(os.getenv("AISTV_ASK_TIMEOUT", "0") or 0)
                                 # 0 = agent chờ người dùng trả lời không giới hạn
 GH_CLIENT_ID = os.getenv("AISTV_GH_CLIENT_ID", "178c6fc778ccc68e1d6a")   # GitHub CLI (public client)
@@ -578,7 +578,8 @@ STATE = _load_state()
 STATE.setdefault("owner_id", None)
 STATE.setdefault("allowed", [])
 STATE.setdefault("model", os.getenv("OPENCODE_MODEL") or DEFAULT_MODEL)
-STATE.setdefault("variant", os.getenv("OPENCODE_VARIANT", ""))
+STATE.setdefault("variant", os.getenv("OPENCODE_VARIANT", "max") or "max")
+                                                # mặc định max; /variant off để tắt
 STATE.setdefault("show_thinking", True)          # hiện phần "suy nghĩ" của model
 STATE.setdefault("show_activity", False)         # hiện chi tiết việc agent đang làm (lệnh, code, output)
 STATE.setdefault("github_user", "")
