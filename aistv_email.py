@@ -399,7 +399,40 @@ def mask(address: str) -> str:
     return f"{shown}@{domain}"
 
 
+def _load_cli_env() -> None:
+    """Nạp .env / config.env dùng chung để CLI chạy độc lập cũng có cấu hình."""
+    override = os.getenv("AISTV_ENV_FILE", "").strip()
+    if override:
+        files = [Path(override).expanduser()]
+    else:
+        cfg_dir = Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
+                       or (Path.home() / ".config" / "aistv"))
+        files = [Path(__file__).resolve().parent / ".env", cfg_dir / "config.env"]
+        stv_home = os.getenv("STV_HOME", "").strip()
+        if stv_home:
+            files.append(Path(stv_home) / ".env")
+    for path in files:
+        try:
+            if not path.is_file():
+                continue
+            for raw in path.read_text("utf-8", "replace").splitlines():
+                line = raw.strip()
+                if line.startswith("export "):
+                    line = line[7:].lstrip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                name, value = name.strip(), value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                    value = value[1:-1]
+                if name and name not in os.environ and value:
+                    os.environ[name] = value
+        except Exception:
+            continue
+
+
 def _cli() -> int:
+    _load_cli_env()
     configure(os.getenv("STV_HOME") or ("/content/stv_agent" if Path("/content").exists()
                                         else Path.home() / "stv_agent"))
     p = argparse.ArgumentParser(prog="aistv_email", description="Đọc/gửi email cho AI STV")
