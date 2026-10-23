@@ -47,10 +47,19 @@ python aistv_web2api.py setup
 python aistv_web2api.py start
 ```
 
-> ⚠️ **Passphrase** (`WEB2API_COOKIE_PASSPHRASE`) không được đẩy lên GitHub.
-> Nó nằm trong `~/.config/aistv/config.env` và `~/.config/aistv/web2api/passphrase.txt`.
-> Hãy lưu passphrase ở nơi an toàn (trình quản lý mật khẩu). Mất passphrase =
-> không giải mã được bản backup (cookie vẫn còn trên máy cũ).
+Passphrase được backup cùng repo private (`web2api/passphrase`) để `pull` chạy
+được ngay trên máy mới. Bản thân repo đã là private và chỉ token của bạn đọc
+được, nhưng nếu muốn tách khoá ra khỏi GitHub:
+
+```bash
+# đặt trong config.env của máy chạy, KHÔNG commit
+WEB2API_KEY_BACKUP=0
+WEB2API_COOKIE_PASSPHRASE=<khoá bạn tự giữ>
+```
+
+Xem khoá hiện tại: `python aistv_web2api.py passphrase`. Đổi khoá:
+`python aistv_web2api.py passphrase --new` rồi `python aistv_web2api.py push`
+(máy khác phải `pull` lại).
 
 ## 3. Lệnh quản lý
 
@@ -96,7 +105,8 @@ OPENCODE_FALLBACK_MODELS=web2api/gemini-3.5-flash-thinking
   Không dán vào chat, không commit, không đưa lên repo public.
 * Nếu cookie từng bị lộ: vào `myaccount.google.com` → *Bảo mật* → đăng xuất
   khỏi mọi thiết bị, rồi export cookie mới.
-* Bản backup trên GitHub đã mã hoá; passphrase giữ ngoài repo.
+* Bản backup trên GitHub đã mã hoá; passphrase backup cùng repo private
+  (`web2api/passphrase`). Đặt `WEB2API_KEY_BACKUP=0` nếu muốn giữ khoá ngoài GitHub.
 * Cookie hết hạn sau vài tháng (trường `expirationDate`) — nạp lại bằng `import`.
 
 ## 6. Sự cố thường gặp

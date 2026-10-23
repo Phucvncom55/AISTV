@@ -402,6 +402,85 @@ def _remote_repo() -> tuple:
     return repo, path
 
 
+def _key_path() -> str:
+    """Cùng thư mục với blob cookie, tên `passphrase`."""
+    _repo, path = _remote_repo()
+    prefix = path.rsplit("/", 1)[0] if "/" in path else ""
+    return (prefix + "/" if prefix else "") + "passphrase"
+
+
+def _gh_put_text(path: str, text: str, message: str) -> tuple:
+    repo, _ = _remote_repo()
+    tokens = _gh_tokens()
+    if not tokens:
+        return False, "chưa có token GitHub"
+    url = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}"
+    last = ""
+    for source, token in tokens:
+        if not token:
+            continue
+        sha = ""
+        try:
+            status, body = _gh_request(url, token)
+            if status == 200:
+                sha = json.loads(body).get("sha") or ""
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (404, 401, 403):
+                last = f"HTTP {exc.code}"
+                continue
+        payload = {"message": message,
+                   "content": base64.b64encode(text.encode("utf-8")).decode()}
+        if sha:
+            payload["sha"] = sha
+        try:
+            _gh_request(url, token, "PUT", payload)
+            return True, f"{repo}/{path}"
+        except Exception as exc:
+            last = f"{type(exc).__name__}: {exc}"
+    return False, last or "không đẩy được"
+
+
+def _gh_get_text(path: str) -> str:
+    repo, _ = _remote_repo()
+    url = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}"
+    for _source, token in _gh_tokens():
+        if not token:
+            continue
+        try:
+            status, body = _gh_request(url, token, accept="application/vnd.github.raw")
+            if status == 200 and body:
+                return body
+        except Exception:
+            continue
+    return ""
+
+
+def backup_passphrase(phrase: str) -> tuple:
+    """Lưu passphrase vào repo private để máy mới `pull` được ngay.
+
+    Đặt WEB2API_KEY_BACKUP=0 nếu muốn giữ khoá ngoài GitHub (an toàn hơn,
+    nhưng máy mới phải nhập tay).
+    """
+    if value("WEB2API_KEY_BACKUP", "1").lower() in ("0", "off", "false", "no"):
+        return False, "đã tắt backup khoá"
+    return _gh_put_text(_key_path(), phrase + "\n",
+                        "chore(web2api): backup passphrase ma hoa")
+
+
+def restore_passphrase() -> str:
+    raw = _gh_get_text(_key_path()).strip()
+    if not raw:
+        return ""
+    (runtime_dir() / "passphrase.txt").write_text(raw, "utf-8")
+    mod = _config_module()
+    if mod is not None:
+        try:
+            mod.set_value("WEB2API_COOKIE_PASSPHRASE", raw)
+        except Exception:
+            pass
+    return raw
+
+
 def push_secrets(quiet: bool = False) -> tuple:
     """Mã hoá cookie + xsrf rồi ghi đè file trên repo private."""
     cookies = load_cookies()
@@ -449,6 +528,7 @@ def push_secrets(quiet: bool = False) -> tuple:
             _gh_request(url, token, "PUT", payload)
             if not quiet:
                 print(f"Đã đẩy cookie mã hoá → {repo}/{path} ({source})")
+            backup_passphrase(phrase)
             return True, f"{repo}/{path}"
         except Exception as exc:
             last = f"{type(exc).__name__}: {exc}"
@@ -462,6 +542,8 @@ def pull_secrets(quiet: bool = False) -> tuple:
     if not tokens:
         return False, "chưa có token GitHub"
     phrase = passphrase(create=False)
+    if not phrase:
+        phrase = restore_passphrase()
     if not phrase:
         return False, "chưa có passphrase (đặt WEB2API_COOKIE_PASSPHRASE)"
     url = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}"
