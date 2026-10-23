@@ -1301,6 +1301,7 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
                 f"?key={urllib.parse.quote(key)}"
             )
             data, err = http_json(url, payload, timeout=max(5, min(timeout, GEMINI_ATTEMPT_TIMEOUT, remaining)))
+            feedback = ""
             if not err:
                 try:
                     chunks = (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
@@ -1337,6 +1338,14 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
             if any(x in low for x in ("404", "not found", "not supported", "does not exist",
                                       "unsupported model", "invalid model", "permission denied")):
                 ep(f"↪︎ Gemini model {model} không dùng được — thử model dự phòng…")
+                break
+            if not feedback and "không trả lời" in err:
+                if attempt < retries:
+                    delay = min(2 * (attempt + 1), 6)
+                    ep(f"⏳ Gemini không trả lời — thử lại sau {delay}s ({model})…")
+                    time.sleep(delay)
+                    continue
+                ep(f"↪︎ Gemini {model} không trả lời — thử model dự phòng…")
                 break
             return None, clean_secret(err, [key])
     return None, clean_secret(" | ".join(errors[-4:]), [key])
