@@ -237,8 +237,13 @@ CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "1") != "0"   # 0 = giữ bản
 USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google Drive (sống sót khi Colab reset)
 FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
                                 #        không cần hỏi quyền (mọi tool của OpenCode đều được auto-approve)
-DEFAULT_MODEL = "google/gemini-3.8-flash"   # đổi nhanh bằng /model hoặc biến OPENCODE_MODEL
-LEGACY_DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"
+DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"   # model chính, đổi nhanh bằng /model hoặc OPENCODE_MODEL
+LEGACY_GEMINI_MODEL = "google/gemini-3.8-flash"       # bản trước lỡ đặt Gemini làm model chính → tự quay lại DeepSeek
+VISION_MODEL = "gemini-3.8-flash"                     # mắt + tai: đọc ảnh / xem video (không phải model trả lời)
+VISION_HANDOFF = os.getenv("AISTV_VISION_HANDOFF", "1") != "0"
+                                                      # 1 = Gemini đọc media → DeepSeek (model chính) trả lời
+VISION_FOLLOWUPS = max(0, int(os.getenv("AISTV_VISION_FOLLOWUPS", "2") or 2))
+                                                      # số lần DeepSeek được hỏi lại Gemini cho mỗi media
 TIMEZONE = "Asia/Ho_Chi_Minh"
 MAX_HISTORY = 12                # số lượt hỏi-đáp đưa vào ngữ cảnh
 MAX_PARALLEL = 2                # số tiến trình OpenCode chạy cùng lúc
@@ -595,6 +600,8 @@ CANCELLED: set = set()
 LOCKS = defaultdict(asyncio.Lock)  # mỗi chat xử lý tuần tự
 SEM = asyncio.Semaphore(MAX_PARALLEL)
 GEMINI_MEDIA_LOCK = asyncio.Lock()      # xếp hàng ảnh/video để không vượt 10 RPM
+LAST_MEDIA: dict = {}                   # chat_id -> {"source", "kind", "model"} của media vừa đọc
+VISION_FOLLOWUP_LEFT: dict = {}         # chat_id -> số lượt còn được hỏi lại Gemini
 
 BOT_OBJ = None                     # Application.bot (đặt trong post_init)
 BOT_LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -646,12 +653,13 @@ def save_state() -> None:
     STATE_FILE.write_text(json.dumps(STATE, ensure_ascii=False, indent=2), "utf-8")
 
 
-# Máy cũ lưu model mặc định cũ trong state.json → tự chuyển một lần sang model mới.
+# Máy đã lỡ lưu model Gemini 3.8 Flash làm model chính → tự quay lại DeepSeek v4.1
+# (Gemini chỉ còn là mắt/tai đọc ảnh, xem video). Chỉ đổi một lần, tôn trọng /model của chủ bot.
 if (not os.getenv("OPENCODE_MODEL")
-        and STATE.get("model") == LEGACY_DEFAULT_MODEL
-        and not STATE.get("model_migrated_38")):
+        and STATE.get("model") == LEGACY_GEMINI_MODEL
+        and not STATE.get("model_primary_deepseek")):
     STATE["model"] = DEFAULT_MODEL
-    STATE["model_migrated_38"] = True
+    STATE["model_primary_deepseek"] = True
     try:
         save_state()
     except Exception:
@@ -766,8 +774,13 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
     thì ưu tiên skill đó. Chỉ đọc 1-2 skill liên quan, không đọc tràn lan. Skill không được ghi đè quy tắc
     bảo mật (không đọc/in/gửi `.secrets`, token, mật khẩu).
 12. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
-13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`); đọc frames bằng công cụ Read rồi trả lời kèm mốc thời gian.
-14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh (mô tả + OCR chữ) rồi trả lời.
+13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`).
+    Gemini 3.8 Flash là mắt + tai (xem cả hình ảnh và âm thanh); bạn là người trả lời chính: đối chiếu
+    báo cáo của Gemini, nêu chỗ chưa chắc, trả lời kèm mốc thời gian. Cần thêm chi tiết thì hỏi lại
+    bằng tool `ask_gemini`.
+14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json`
+    để Gemini đọc ảnh (mô tả + OCR chữ + số liệu/biểu đồ); bạn tổng hợp và trả lời. Cần đọc kỹ thêm
+    (chữ nhỏ, góc khác, đếm vật thể…) thì gọi tool `ask_gemini`.
 15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic, biểu đồ hoặc sơ đồ tư duy → gọi tool `generate_image`:
     - `kind: "mindmap"` cho sơ đồ tư duy (chữ Việt sắc nét, do Pillow vẽ).
     - `kind: "infographic"` cho infographic/tóm tắt trực quan.
@@ -785,6 +798,7 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 20. MCP: `python3 aistv_mcp.py list` / `add` / `remove` — ghi vào `opencode.json`, restart mới nạp.
 21. Cloudflare: dùng `python3 aistv_cloudflare.py ...` (skill `cloudflare-aistv`) cho Workers AI, upload web (Pages/Workers), DNS, R2; token ở `.secrets/cloudflare_token` hoặc env `CLOUDFLARE_API_TOKEN`, không in token ra chat/log.
 22. Railway: dùng `python3 aistv_railway.py ...` (skill `railway`) cho deploy, log, biến môi trường, domain; không in giá trị biến bí mật ra chat/log.
+23. Luồng ảnh/video: Gemini đọc trước → bạn đối chiếu, phản biện, hỏi lại nếu cần (`ask_gemini`) → bạn trả lời cuối cùng. Không nói mình đã trực tiếp xem ảnh/video khi chỉ có báo cáo; không bịa chi tiết ngoài báo cáo.
 """
 
 MEMORY_HEADER = "# MEMORY — Trí nhớ dài hạn\n"
@@ -924,6 +938,58 @@ export default tool({
 })
 '''
 
+# Tool hỏi lại Gemini (mắt + tai) về ảnh/video vừa gửi — DeepSeek vẫn là người trả lời chính.
+ASK_GEMINI_TOOL_JS = r'''import { tool } from "@opencode-ai/plugin"
+
+export default tool({
+  description: [
+    "Ask Gemini (the vision model) a follow-up question about the image or video the user just sent.",
+    "Use it only when the vision report lacks a detail you need before answering.",
+    "Gemini looks at the media again and returns text; you are still the one who answers the user.",
+  ].join(" "),
+  args: {
+    question: tool.schema.string()
+      .describe("Specific question about the media, e.g. 'What does the label on the box say?'"),
+    source: tool.schema.string().optional()
+      .describe("Optional file path or URL; defaults to the media the user just sent"),
+    kind: tool.schema.string().optional()
+      .describe("'image' or 'video'; defaults to the last media type"),
+  },
+  async execute(args) {
+    const url = process.env.AISTV_ASK_URL
+    const token = process.env.AISTV_TOOL_TOKEN || ""
+    const chat = process.env.AISTV_CHAT_ID || ""
+    if (!url) {
+      return "ask_gemini is unavailable. Answer with the report you already have."
+    }
+    const question = String(args.question || "").trim()
+    if (!question) {
+      return "ask_gemini needs a question."
+    }
+    let res
+    try {
+      res = await fetch(url.replace(/\/$/, "") + "/vision", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-aistv-token": token },
+        body: JSON.stringify({
+          chat_id: Number(chat) || 0,
+          question,
+          source: String(args.source || ""),
+          kind: String(args.kind || ""),
+        }),
+      })
+    } catch (e) {
+      return "ask_gemini failed: " + e
+    }
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || !data.ok) {
+      return "ask_gemini error: " + (data.error || ("HTTP " + res.status))
+    }
+    return "Gemini (vision) answered:\n" + String(data.answer || "")
+  },
+})
+'''
+
 
 def bootstrap_workspace() -> None:
     files = {
@@ -934,6 +1000,7 @@ def bootstrap_workspace() -> None:
         SKILLS_DIR / "nghien-cuu" / "SKILL.md": SKILL_RESEARCH,
         WORKSPACE / ".opencode" / "tools" / "ask_user.js": ASK_TOOL_JS,
         WORKSPACE / ".opencode" / "tools" / "generate_image.js": IMAGE_TOOL_JS,
+        WORKSPACE / ".opencode" / "tools" / "ask_gemini.js": ASK_GEMINI_TOOL_JS,
     }
     for path, content in files.items():
         if not path.exists():
@@ -975,6 +1042,7 @@ def bootstrap_workspace() -> None:
         watch_skill = SKILLS_DIR / "watch" / "SKILL.md"
         if watch_skill.is_file():
             old = watch_skill.read_text("utf-8")
+            changed = False
             if "aistv_watch.py image" not in old:
                 old = old.rstrip() + (
                     "\n\n## Đọc ảnh (Gemini)\n"
@@ -982,6 +1050,17 @@ def bootstrap_workspace() -> None:
                     "--question \"...\" --json`.\n"
                     "- Script mô tả ảnh, OCR chữ và lưu report; trả lời tiếng Việt, không bịa.\n"
                 )
+                changed = True
+            if "ask_gemini" not in old:
+                old = old.rstrip() + (
+                    "\n\n## Thảo luận 2 model (mặc định)\n"
+                    "- Gemini 3.8 Flash là mắt + tai: đọc ảnh/video (dưới 45 phút) và trả về báo cáo.\n"
+                    "- Model chính (DeepSeek v4.1) đối chiếu báo cáo, phản biện, gọi tool `ask_gemini` "
+                    "nếu thiếu chi tiết, rồi trả lời người dùng.\n"
+                    "- Trả lời cuối cùng luôn do model chính viết, không dán nguyên báo cáo Gemini.\n"
+                )
+                changed = True
+            if changed:
                 watch_skill.write_text(old, "utf-8")
         agents = WORKSPACE / "AGENTS.md"
         if agents.is_file():
@@ -1001,6 +1080,21 @@ def bootstrap_workspace() -> None:
                     "`chart` cho biểu đồ số liệu, `image` cho ảnh thường (style realistic/anime/3d/...). "
                     "Khi một hình ảnh/sơ đồ giúp người dùng hiểu rõ hơn, chủ động tạo và gửi. "
                     "Không tự vẽ ảnh bằng code trừ khi được yêu cầu.\n"
+                )
+                changed = True
+            old13 = ("13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` "
+                     "(tool `aistv_watch.py`); đọc frames bằng công cụ Read rồi trả lời kèm mốc thời gian.")
+            if old13 in old:
+                old = old.replace(old13, (
+                    "13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` "
+                    "(tool `aistv_watch.py`). Gemini 3.8 Flash là mắt + tai; bạn là người trả lời chính: "
+                    "đối chiếu báo cáo, nêu chỗ chưa chắc, kèm mốc thời gian; cần thêm thì gọi `ask_gemini`."))
+                changed = True
+            if "ask_gemini" not in old:
+                old = old.rstrip() + (
+                    "\n23. Luồng ảnh/video: Gemini 3.8 Flash đọc trước → bạn đối chiếu, phản biện, hỏi lại "
+                    "nếu cần (tool `ask_gemini`) → bạn trả lời cuối cùng. DeepSeek v4.1 vẫn là model chính. "
+                    "Không nói mình đã trực tiếp xem ảnh/video khi chỉ có báo cáo; không bịa ngoài báo cáo.\n"
                 )
                 changed = True
             if changed:
@@ -1348,7 +1442,7 @@ class _AskHandler(BaseHTTPRequestHandler):
 
     def _handle_post(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
-        if path not in ("/ask", "/image"):
+        if path not in ("/ask", "/image", "/vision"):
             self._json(404, {"error": "not found"})
             return
         got = self.headers.get("x-aistv-token", "")
@@ -1363,6 +1457,32 @@ class _AskHandler(BaseHTTPRequestHandler):
             chat_id = int(data.get("chat_id") or 0)
         except Exception as e:
             self._json(400, {"error": f"bad request: {e}"})
+            return
+
+        if path == "/vision":                # agent hỏi lại Gemini về ảnh/video vừa gửi
+            try:
+                question = str(data.get("question") or "").strip()
+                media = LAST_MEDIA.get(chat_id) or {}
+                source = str(data.get("source") or media.get("source") or "").strip()
+                kind = str(data.get("kind") or media.get("kind") or "image").strip().lower()
+                if kind not in ("image", "video"):
+                    kind = "image"
+                if not question or not source or chat_id <= 0:
+                    raise ValueError("missing question/media")
+                left = VISION_FOLLOWUP_LEFT.get(chat_id, 0)
+                if left <= 0:
+                    self._json(200, {
+                        "ok": False,
+                        "error": "đã hết lượt hỏi lại Gemini cho media này — hãy kết luận "
+                                 "bằng báo cáo đã có",
+                    })
+                    return
+                VISION_FOLLOWUP_LEFT[chat_id] = left - 1
+            except Exception as e:
+                self._json(400, {"error": f"bad request: {e}"})
+                return
+            ok, answer, detail = _vision_followup(source, question, kind)
+            self._json(200, {"ok": ok, "answer": answer, "error": detail})
             return
 
         if path == "/image":                 # agent gọi tool generate_image
@@ -2717,7 +2837,10 @@ async def _finish_status(status, chat_id: int, started: float, ok: bool) -> None
 
 async def send_new_files(message, before: dict) -> None:
     after = snapshot()
-    changed = [k for k, v in after.items() if before.get(k) != v and 0 < v[1] < 45 * 1024 * 1024]
+    # Không gửi lại artifact nội bộ: báo cáo watch/, ảnh đã gửi riêng ở generated/.
+    changed = [k for k, v in after.items()
+               if before.get(k) != v and 0 < v[1] < 45 * 1024 * 1024
+               and not k.startswith(("watch/", "generated/"))]
     changed.sort(key=lambda k: (k not in before, k))          # file sửa trước, file tạo mới sau
     for rel in changed[:10]:
         try:
@@ -2731,7 +2854,7 @@ async def send_new_files(message, before: dict) -> None:
 
 
 async def respond(message, context, chat_id: int, text: str, skill: Optional[tuple] = None,
-                  quoted_msg=None) -> bool:
+                  quoted_msg=None, store_text: Optional[str] = None) -> bool:
     quote, quote_label = reply_context(quoted_msg)
     lock = LOCKS[chat_id]
     if lock.locked():
@@ -2752,7 +2875,7 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
                 await ticker
             await _finish_status(status, chat_id, started, ok)
             if ok:
-                stored = (quote_label + " " + text) if quote_label else text
+                stored = store_text or ((quote_label + " " + text) if quote_label else text)
                 append_history(chat_id, "user", stored)
                 append_history(chat_id, "assistant", answer[:6000])
                 log_daily(stored, answer)
@@ -2813,7 +2936,9 @@ def build_status(chat_id: int) -> str:
         f"• Chi tiết việc làm: {'bật' if STATE.get('show_activity', False) else 'tắt'}\n"
         f"• GitHub: {esc(gh)}\n"
         f"• Email: {esc(email_line())}\n"
-        f"• Gemini (ảnh/video): {'✅ sẵn sàng' if GEMINI_READY else '⚠️ thiếu GEMINI_API_KEY'}\n"
+        f"• Gemini ({VISION_MODEL}) đọc ảnh/video: "
+        f"{'✅ sẵn sàng' if GEMINI_READY else '⚠️ thiếu GEMINI_API_KEY'}"
+        f"{' · thảo luận 2 chiều' if VISION_HANDOFF else ' · trả lời trực tiếp'}\n"
         f"• Tạo ảnh: {esc(image_provider_line())}\n"
         f"• Giới hạn 1 yêu cầu: {to}\n"
         f"• Hội thoại: {len(load_history(chat_id)) // 2} lượt đã lưu\n"
@@ -2923,9 +3048,10 @@ def welcome_text() -> str:
         "• <b>Chủ động</b>: /remind hẹn giờ, /task tự chạy, /watch theo dõi repo &amp; log\n"
         "• <b>Email</b>: /email đọc &amp; gửi thư (IMAP/SMTP) ngay trong chat\n"
         "• Đọc file bạn gửi, tạo file và tự gửi lại cho bạn\n"
-        "• <b>Gemini đọc ảnh</b>: gửi ảnh + câu hỏi → mô tả, OCR chữ, phân tích\n"
+        "• <b>Gemini 3.8 Flash đọc ảnh</b>: gửi ảnh + câu hỏi → mô tả, OCR chữ, phân tích biểu đồ\n"
         "• <b>Tạo ảnh &amp; sơ đồ tư duy</b>: /image mô tả · /mindmap chủ đề → gửi ảnh ngay\n"
-        "• <b>Gemini xem video</b>: gửi link/file + câu hỏi → tóm tắt kèm mốc thời gian\n"
+        "• <b>Gemini xem video</b>: gửi link/file (&lt; 45 phút) + câu hỏi → tóm tắt kèm mốc thời gian\n"
+        "• <b>DeepSeek v4.1 là model chính</b> — Gemini đọc ảnh/video rồi thảo luận, DeepSeek trả lời\n"
         "• <b>Không giới hạn 10 phút</b> — dự án lớn chạy tới khi xong (/stop để huỷ)\n"
         "• Kết nối GitHub 1 lần — /github login; tự cập nhật — /update\n\n"
         "Gửi câu hỏi hoặc yêu cầu để bắt đầu 👇"
@@ -2951,13 +3077,13 @@ HELP_TEXT = (
     "/watch git owner/repo — báo commit mới · /watch log &lt;file&gt; — báo lỗi mới\n"
     "/watch file &lt;đường dẫn&gt; — báo khi thay đổi · /watch del &lt;mã|all&gt;\n\n"
     "<b>File &amp; Video</b>\nGửi file cho bot → lưu vào <code>inbox/</code> để agent đọc\n/files — file trong workspace\n/get &lt;đường dẫn&gt; — tải file về\n"
-    "Gửi ảnh + câu hỏi → Gemini đọc ảnh, mô tả và chép chữ (OCR)\n"
+    "Gửi ảnh + câu hỏi → Gemini 3.8 Flash đọc ảnh (OCR, biểu đồ) rồi DeepSeek trả lời\n"
     "Gửi tin nhắn thoại → bot tự nghe rồi làm theo lời bạn (tiếng Việt/Anh)\n"
     "/image &lt;mô tả&gt; — tạo ảnh (--style anime, --aspect 16:9) · reply ảnh + /image — vẽ lại theo ảnh\n"
     "/image --mindmap &lt;chủ đề&gt; · /mindmap &lt;chủ đề&gt; — sơ đồ tư duy\n"
-    "/see &lt;url|đường dẫn&gt; [câu hỏi] — đọc ảnh bằng Gemini\n"
-    "Gửi link/file video + câu hỏi → Gemini xem hình ảnh + âm thanh, trả lời kèm mốc thời gian\n"
-    "/video &lt;url|đường dẫn&gt; [câu hỏi] — xem video bằng Gemini\n\n"
+    "/see &lt;url|đường dẫn&gt; [câu hỏi] — Gemini đọc ảnh, DeepSeek trả lời\n"
+    "Gửi link/file video (&lt; 45 phút) + câu hỏi → Gemini xem hình ảnh + âm thanh, DeepSeek trả lời kèm mốc thời gian\n"
+    "/video &lt;url|đường dẫn&gt; [câu hỏi] — Gemini xem video, DeepSeek trả lời\n\n"
     "<b>Reply / trích dẫn</b>\nTrả lời (reply) một tin nhắn rồi nhắn yêu cầu → agent hiểu “cái này/đoạn trên” là tin đó\n"
     "Bôi đen một phần rồi reply → agent ưu tiên đúng phần được trích dẫn\n"
     "Reply tin nhắn rồi gõ /remember → lưu chính tin đó vào trí nhớ\n\n"
@@ -3019,7 +3145,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     new = context.args[0].strip()
     if not re.fullmatch(r"[\w.\-]+/[\w.\-:/]+", new):
-        await msg.reply_text("⚠️ Sai định dạng. Ví dụ: <code>/model google/gemini-3.8-flash</code>", parse_mode=HTML)
+        await msg.reply_text("⚠️ Sai định dạng. Ví dụ: <code>/model opencode/deepseek-v4.1-flash-free</code>", parse_mode=HTML)
         return
     STATE["model"] = new
     save_state()
@@ -3920,20 +4046,98 @@ def _resolve_media_source(source: str) -> str:
     return str(path)
 
 
-async def gemini_media_reply(message, chat_id: int, source, question: str, kind: str) -> bool:
-    """Đọc ảnh/video bằng Gemini rồi trả lời trực tiếp (không qua OpenCode)."""
+VISION_ASK_IMAGE = ("Hãy mô tả chi tiết ảnh: người/vật thể, bố cục, màu sắc, ngữ cảnh; "
+                    "đọc nguyên văn mọi chữ (OCR), số liệu, nhãn hiệu, biểu đồ nếu có. "
+                    "Nêu rõ chỗ không đọc được hoặc không chắc.")
+VISION_ASK_VIDEO = ("Hãy xem toàn bộ video và ghi lại bằng chứng: diễn biến chính kèm mốc [mm:ss], "
+                    "người/vật/hành động, lời nói quan trọng, chữ hiện trên màn hình (nguyên văn), số liệu. "
+                    "Nêu rõ chỗ không nghe/không thấy hoặc không chắc.")
+
+
+def _vision_question(kind: str, question: str) -> str:
+    base = VISION_ASK_IMAGE if kind == "image" else VISION_ASK_VIDEO
+    q = (question or "").strip()
+    return f"{base}\n\nCâu hỏi/yêu cầu của người dùng: {q}" if q else base
+
+
+def _vision_cli_args(source: str, question: str, kind: str) -> list:
+    args = (["image", source, "--json"] if kind == "image"
+            else ["watch", source, "--engine", "gemini", "--detail", "balanced", "--json"])
+    args += ["--question", question]
+    return args
+
+
+def _vision_timeout(kind: str) -> int:
+    key = "AISTV_IMAGE_TIMEOUT" if kind == "image" else "AISTV_VIDEO_TIMEOUT"
+    return int(os.getenv(key, "600" if kind == "image" else "900"))
+
+
+def _vision_parse(out: str) -> tuple:
+    """(text, model) từ JSON của aistv_watch.py."""
+    try:
+        data = json.loads(out)
+        gem = data.get("gemini") or {}
+        return (gem.get("text") or "").strip(), (gem.get("model") or VISION_MODEL).strip()
+    except Exception:
+        return "", VISION_MODEL
+
+
+def _vision_followup(source: str, question: str, kind: str) -> tuple:
+    """DeepSeek hỏi lại Gemini ngay trên media đã gửi → (ok, answer, error).
+
+    Tool call đi qua HTTP nội bộ nên giới hạn ~240s/lần (mặc định) để không bị
+    client cắt trước khi Gemini trả lời."""
+    cap = int(os.getenv("AISTV_VISION_FOLLOWUP_TIMEOUT", "240") or 240)
+    timeout = min(_vision_timeout(kind), cap)
+    rc, out, err = _watch_cli(_vision_cli_args(source, question, kind), timeout)
+    if rc != 0:
+        lines = [x.strip() for x in (err or out or "").splitlines() if x.strip()]
+        return False, "", _redact_secrets(lines[-1] if lines else f"lỗi không rõ (mã {rc})")
+    text, _model = _vision_parse(out)
+    if not text:
+        lines = [x.strip() for x in (err or out or "").splitlines() if x.strip()]
+        return False, "", _redact_secrets(lines[-1] if lines else "Gemini không trả lời")
+    return True, text, ""
+
+
+def _vision_handoff_prompt(kind: str, source: str, question: str, report: str, model: str) -> str:
+    label = "ẢNH" if kind == "image" else "VIDEO"
+    try:
+        shown = _rel(source) if Path(source).is_file() else source
+    except Exception:
+        shown = str(source)
+    q = (question or "").strip() or "(không có — hãy phân tích theo hướng dẫn mặc định)"
+    return (
+        f"## {label} NGƯỜI DÙNG VỪA GỬI — GEMINI ĐÃ ĐỌC\n"
+        f"- File/nguồn: {shown}\n"
+        f"- Model thị giác: {model}\n"
+        f"- Câu hỏi/yêu cầu của người dùng: {q}\n\n"
+        "### BÁO CÁO THỊ GIÁC CỦA GEMINI (bằng chứng thô, có thể sai)\n"
+        "```text\n" + report[:14000].replace("```", "ʼʼʼ") + "\n```\n\n"
+        "### CÁCH PHỐI HỢP (bắt buộc)\n"
+        "- Bạn là **model chính** và là người trả lời người dùng; Gemini chỉ là mắt + tai, "
+        "không phải người trả lời cuối cùng.\n"
+        "- Đối chiếu báo cáo với câu hỏi: chỗ nào mâu thuẫn, thiếu hoặc chưa chắc thì nói rõ mức độ chắc chắn.\n"
+        "- Nếu thiếu chi tiết quan trọng, gọi tool `ask_gemini` để hỏi lại đúng điểm đó (tối đa vài lần), "
+        "rồi mới kết luận.\n"
+        "- Bạn không đọc được file ảnh/video trực tiếp — đừng dùng Read cho media; muốn xem thêm thì "
+        "luôn dùng `ask_gemini`.\n"
+        "- Trả lời trực tiếp cho người dùng; không kể lể quy trình, không dán nguyên báo cáo. "
+        "Video thì kèm mốc thời gian [mm:ss].\n"
+        "- Không bịa chi tiết không có trong báo cáo hoặc trong câu trả lời của `ask_gemini`.\n"
+        "- Nếu báo cáo không đủ để trả lời, nói thẳng giới hạn đó thay vì đoán."
+    )
+
+
+async def gemini_media_reply(message, context, chat_id: int, source, question: str,
+                             kind: str) -> bool:
+    """Gemini đọc ảnh/video → DeepSeek (model chính) đối chiếu, hỏi lại nếu cần → trả lời."""
     label = "ảnh" if kind == "image" else "video"
     status = await message.reply_text(f"👁️ <i>Gemini đang đọc {label}…</i>", parse_mode=HTML)
-    if kind == "image":
-        cli_args = ["image", source, "--json"]
-        timeout = int(os.getenv("AISTV_IMAGE_TIMEOUT", "600"))
-    else:
-        cli_args = ["watch", source, "--engine", "gemini", "--detail", "balanced", "--json"]
-        timeout = int(os.getenv("AISTV_VIDEO_TIMEOUT", "900"))
-    if question:
-        cli_args += ["--question", question]
+    ask = _vision_question(kind, question)
     async with GEMINI_MEDIA_LOCK:
-        rc, out, err = await asyncio.to_thread(_watch_cli, cli_args, timeout)
+        rc, out, err = await asyncio.to_thread(
+            _watch_cli, _vision_cli_args(source, ask, kind), _vision_timeout(kind))
     if rc != 0:
         lines = [x.strip() for x in (err or out or "").splitlines() if x.strip()]
         detail = _redact_secrets(lines[-1] if lines else "lỗi không rõ")
@@ -3944,13 +4148,7 @@ async def gemini_media_reply(message, chat_id: int, source, question: str, kind:
         except Exception:
             pass
         return True
-    try:
-        data = json.loads(out)
-        gem = data.get("gemini") or {}
-        text = (gem.get("text") or "").strip()
-        model = (gem.get("model") or "Gemini").strip()
-    except Exception:
-        data, gem, text, model = {}, {}, "", "Gemini"
+    text, model = _vision_parse(out)
     if not text:
         lines = [x.strip() for x in (err or out or "").splitlines() if x.strip()]
         detail = _redact_secrets(lines[-1] if lines else "không có nội dung trả về")
@@ -3960,19 +4158,42 @@ async def gemini_media_reply(message, chat_id: int, source, question: str, kind:
         except Exception:
             pass
         return True
+
+    # Lưu media gần nhất để tool ask_gemini hỏi lại đúng file này.
+    LAST_MEDIA[chat_id] = {"source": str(source), "kind": kind, "model": model}
+    VISION_FOLLOWUP_LEFT[chat_id] = VISION_FOLLOWUPS
+
+    if not VISION_HANDOFF:
+        # Chế độ cũ: Gemini trả lời trực tiếp (AISTV_VISION_HANDOFF=0).
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        footer = f"<i>👁️ {esc(model)}</i>"
+        try:
+            await send_rich(message, text, footer)
+        except Exception:
+            await message.reply_text(text[:3900])
+        stored_q = f"[{label}] {question}".strip()
+        append_history(chat_id, "user", stored_q)
+        append_history(chat_id, "assistant", text[:6000])
+        log_daily(stored_q, text)
+        return True
+
     try:
         await status.delete()
     except Exception:
         pass
-    footer = f"<i>👁️ {esc(model)}</i>"
+    prompt = _vision_handoff_prompt(kind, source, question, text, model)
+    asked = (question or "").strip() or (VISION_ASK_IMAGE if kind == "image" else VISION_ASK_VIDEO)
     try:
-        await send_rich(message, text, footer)
+        name = Path(source).name if Path(source).is_file() else str(source)
     except Exception:
-        await message.reply_text(text[:3900])
-    stored_q = f"[{label}] {question}".strip()
-    append_history(chat_id, "user", stored_q)
-    append_history(chat_id, "assistant", text[:6000])
-    log_daily(stored_q, text)
+        name = str(source)
+    stored = f"[{label}: {oneline(name, 120)}] {asked}"
+    await respond(message, context, chat_id, prompt, quoted_msg=message, store_text=stored)
+    # Giữ media + nạp lại lượt hỏi để tin nhắn tiếp theo vẫn hỏi lại Gemini được.
+    VISION_FOLLOWUP_LEFT[chat_id] = VISION_FOLLOWUPS
     return True
 
 
@@ -4117,7 +4338,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     caption = (msg.caption or "").strip()
     if GEMINI_READY:
-        await gemini_media_reply(msg, update.effective_chat.id, str(dest), caption, "image")
+        await gemini_media_reply(msg, context, update.effective_chat.id, str(dest), caption, "image")
         return
     prompt = caption or "Hãy cho tôi biết nội dung chính của ảnh này."
     await respond(msg, context, update.effective_chat.id,
@@ -4141,7 +4362,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     caption = (msg.caption or "").strip()
     if GEMINI_READY:
-        await gemini_media_reply(msg, update.effective_chat.id, str(dest), caption, "video")
+        await gemini_media_reply(msg, context, update.effective_chat.id, str(dest), caption, "video")
         return
     prompt = caption or "Hãy xem video này và tóm tắt nội dung chính kèm mốc thời gian."
     await respond(msg, context, update.effective_chat.id,
@@ -4167,10 +4388,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     caption = (msg.caption or "").strip()
     if GEMINI_READY and is_image:
-        await gemini_media_reply(msg, update.effective_chat.id, str(dest), caption, "image")
+        await gemini_media_reply(msg, context, update.effective_chat.id, str(dest), caption, "image")
         return
     if GEMINI_READY and is_video:
-        await gemini_media_reply(msg, update.effective_chat.id, str(dest), caption, "video")
+        await gemini_media_reply(msg, context, update.effective_chat.id, str(dest), caption, "video")
         return
     prompt = caption or "Hãy đọc file này và tóm tắt nội dung chính."
     await respond(msg, context, update.effective_chat.id,
@@ -4198,7 +4419,7 @@ async def _cmd_gemini_media(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if not re.match(r"^https?://", source, re.I) and not Path(source).is_file():
         await msg.reply_text(f"❌ Không tìm thấy {label}: <code>{esc(source)}</code>", parse_mode=HTML)
         return
-    await gemini_media_reply(msg, update.effective_chat.id, source, question, kind)
+    await gemini_media_reply(msg, context, update.effective_chat.id, source, question, kind)
 
 
 IMAGE_USAGE = (
