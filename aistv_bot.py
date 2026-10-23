@@ -2585,35 +2585,44 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> s
     return (texts[-1] if texts else "") or "\n".join(raw)
 
 
+_OPENCODE_BAD_OUTPUT = (
+    "usage\n  opencode run",
+    "run opencode with a message",
+    "unrecognized flag:",
+    "the command line is too long",
+)
+
+
+def _is_opencode_error_output(text: str) -> bool:
+    """CLI in help/lỗi cú pháp thay vì câu trả lời — đừng gửi nguyên văn cho người dùng."""
+    low = (text or "").lower()
+    return any(marker in low for marker in _OPENCODE_BAD_OUTPUT)
+
+
 async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
     """Trả về (ok, text).
-    Lần 1: `--format json` + prompt qua stdin → đọc được từng tool call để hiện tiến độ.
-    Lần 2 (nếu lần 1 trống): chế độ cũ (prompt qua tham số dòng lệnh)."""
+    Luôn gửi prompt qua stdin + `--format json` để theo dõi tiến độ và tránh giới
+    hạn độ dài dòng lệnh Windows (prompt kèm báo cáo ảnh có thể rất dài)."""
     env = os.environ.copy()
     env.pop("TELEGRAM_BOT_TOKEN", None)          # không để agent nhìn thấy token
     env.update(NO_COLOR="1", TERM="dumb", PWD=str(WORKSPACE), AISTV_CHAT_ID=str(chat_id),
                AISTV_DIR=str(Path(__file__).resolve().parent))
     err_text = ""
     for attempt in range(retries + 1):
-        via_stdin = attempt == 0
         cmd = [OPENCODE_BIN, "run", "--model", opencode_model(),
-               "--auto", "--thinking"]
-        if via_stdin:
-            cmd += ["--format", "json"]
-        else:
-            cmd.append(prompt)
+               "--auto", "--thinking", "--format", "json"]
         ACTIVITY[chat_id] = []
         THINKING[chat_id] = []
         LIVE[chat_id] = []
         THINK_TOKENS[chat_id] = 0
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=str(WORKSPACE), env=env, limit=2 ** 20,
-            stdin=asyncio.subprocess.PIPE if via_stdin else asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         RUNNING[chat_id] = proc
         err_lines: list = []
         try:
-            coro = _talk(proc, prompt.encode("utf-8") if via_stdin else None, chat_id, err_lines)
+            coro = _talk(proc, prompt.encode("utf-8"), chat_id, err_lines)
             out = (await asyncio.wait_for(coro, timeout=AGENT_TIMEOUT)
                    if AGENT_TIMEOUT > 0 else await coro)
         except asyncio.TimeoutError:
@@ -2627,15 +2636,15 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
             CANCELLED.discard(chat_id)
             return False, "🛑 Đã huỷ tác vụ."
         text = clean_output(out)
-        if proc.returncode not in (0, None):
-            err_text = "\n".join(err_lines) or text
-            log.warning("OpenCode lỗi (lần %d, rc=%s): %s",
-                        attempt + 1, proc.returncode, err_text[-300:])
-            continue
-        if text:
+        if text and not _is_opencode_error_output(text):
+            # OpenCode có thể trả rc=1 sau khi tool lỗi nhưng vẫn có câu trả lời hoàn chỉnh.
+            if proc.returncode not in (0, None):
+                log.warning("OpenCode rc=%s nhưng vẫn có câu trả lời — dùng câu trả lời",
+                            proc.returncode)
             return True, text
-        err_text = "\n".join(err_lines)
-        log.warning("OpenCode không trả kết quả (lần %d, rc=%s): %s", attempt + 1, proc.returncode, err_text[-300:])
+        err_text = "\n".join(err_lines) or text
+        log.warning("OpenCode không trả kết quả (lần %d, rc=%s): %s",
+                    attempt + 1, proc.returncode, err_text[-300:])
     return False, "⚠️ OpenCode không trả về phản hồi." + (f"\n\n{err_text[-1200:]}" if err_text else "")
 
 
@@ -5152,9 +5161,9 @@ async def ask_model_once(prompt: str, timeout: int = 300) -> tuple:
     env.pop("TELEGRAM_BOT_TOKEN", None)
     env.update(NO_COLOR="1", TERM="dumb")
     cmd = [OPENCODE_BIN, "run", "--model", opencode_model(), "--auto"]
-    cmd.append(prompt[:MAX_PROMPT_BYTES - 2000])
     try:
         p = await asyncio.to_thread(subprocess.run, cmd, cwd=str(WORKSPACE), env=env,
+                                    input=prompt[:MAX_PROMPT_BYTES - 2000],
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, timeout=timeout)
     except Exception as e:
