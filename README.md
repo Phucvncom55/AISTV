@@ -2,6 +2,8 @@
 
 Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube, Facebook, TikTok, xem video + đọc ảnh bằng Gemini, đọc tài liệu GitHub** (tìm, đọc nội dung, tải video).
 
+**Model:** **DeepSeek v4.1** là model chính (trả lời, viết code, dùng tool). **Gemini 3.8 Flash** là mắt + tai: đọc ảnh (vật thể, OCR, biểu đồ) và xem video dưới 45 phút; sau đó hai model thảo luận (DeepSeek có thể hỏi lại Gemini bằng tool `ask_gemini`) và DeepSeek viết câu trả lời cuối cùng.
+
 Chạy được trên **Colab, VPS, Linux/macOS và Windows (cmd/PowerShell)** — chỉ cần Python 3.10+ và mạng.
 
 ## ⚡ 3 bước
@@ -345,14 +347,16 @@ python3 /root/AISTV/aistv_youtube.py transcript "URL" --timestamps
 
 Lấy tiêu đề, kênh, thời lượng, lượt xem, mô tả, chương và phụ đề (ưu tiên tiếng Việt, fallback tiếng Anh). Chỉ tải metadata + phụ đề, không tải video.
 
-**Gemini — mắt + tai cho ảnh/video (miễn phí):** thêm `GEMINI_API_KEY` vào `.env` hoặc Colab Secrets. Bot dùng **Gemini 3 Flash (preview)** mặc định, tự chuyển sang **Gemini 2.5 Flash** / `gemini-3.5-flash-lite` nếu model chính chưa mở hoặc hết hạn mức. Hạn mức miễn phí tham khảo: **10 RPM, 1500 RPD**; bot tự giữ nhịp và báo khi chạm giới hạn, không treo.
+**Gemini 3.8 Flash — mắt + tai cho ảnh/video (miễn phí):** thêm `GEMINI_API_KEY` vào `.env` hoặc Colab Secrets. Gemini đọc ảnh (nhận diện vật thể, OCR chữ, phân tích biểu đồ) và xem video **dưới 45 phút** (hình ảnh + âm thanh, context 1M token); model dự phòng `gemini-3.7-flash` → `gemini-3.5-flash`. Hạn mức miễn phí tham khảo: **10 RPM, 1500 RPD**; bot tự giữ nhịp và báo khi chạm giới hạn, không treo.
+
+**Luồng 2 model (mặc định):** DeepSeek v4.1 vẫn là **model chính** trả lời người dùng. Khi bạn gửi ảnh/video, Gemini đọc trước và trả về báo cáo thị giác; DeepSeek đối chiếu, phản biện, có thể hỏi lại Gemini bằng tool `ask_gemini` (tối đa `AISTV_VISION_FOLLOWUPS` lần), rồi mới trả lời. Muốn Gemini trả lời trực tiếp như bản cũ: `AISTV_VISION_HANDOFF=0`.
 
 ```bash
 python3 /root/AISTV/aistv_watch.py doctor
 python3 /root/AISTV/aistv_watch.py doctor --json
 ```
 
-Gửi **ảnh** cho bot kèm câu hỏi → Gemini mô tả, đọc chữ (OCR), phân tích chi tiết; gửi **video** hoặc link YouTube → Gemini xem cả hình ảnh + âm thanh và trả lời kèm mốc thời gian. Có thể gọi trực tiếp:
+Gửi **ảnh** cho bot kèm câu hỏi → Gemini mô tả, đọc chữ (OCR), phân tích chi tiết; gửi **video** hoặc link YouTube → Gemini xem cả hình ảnh + âm thanh và trả về báo cáo kèm mốc thời gian, sau đó DeepSeek tổng hợp và trả lời. Có thể gọi trực tiếp:
 
 ```bash
 python3 /root/AISTV/aistv_watch.py image "inbox/anh.jpg" --question "Ảnh này có gì?"
@@ -390,7 +394,7 @@ python3 /root/AISTV/aistv_watch.py voice "inbox/voice.ogg" --json
 python3 /root/AISTV/aistv_watch.py voice "inbox/ghi-am.m4a" -l vi
 ```
 
-**Watch (xem video bằng hình ảnh + âm thanh):** agent tự dùng khi bạn gửi link hoặc file video và hỏi nội dung. Tải video, lấy phụ đề (hoặc Whisper dự phòng), cắt frames theo cảnh/mốc thời gian rồi tạo `report.md` + `report.json` để agent đọc. Có `GEMINI_API_KEY` thì Gemini xem toàn bộ video (hình ảnh + âm thanh) và trả lời kèm mốc thời gian; không có key thì agent đọc từng frame bằng công cụ Read và kết hợp transcript. `--start/--end` giới hạn đoạn, `--resolution 1024` để đọc chữ, `--ocr` cho video quay màn hình. Video riêng tư cần `--cookies`; không tải video/audio lên chat.
+**Watch (xem video bằng hình ảnh + âm thanh):** agent tự dùng khi bạn gửi link hoặc file video và hỏi nội dung. Tải video, lấy phụ đề (hoặc Whisper dự phòng), cắt frames theo cảnh/mốc thời gian rồi tạo `report.md` + `report.json` để agent đọc. Có `GEMINI_API_KEY` thì Gemini 3.8 Flash xem toàn bộ video **dưới 45 phút** (hình ảnh + âm thanh) và trả về báo cáo kèm mốc thời gian; DeepSeek v4.1 đối chiếu, hỏi lại nếu cần (`ask_gemini`) rồi trả lời. Video gửi trực tiếp qua Telegram tối đa **20MB**; video dài/nặng hơn hãy gửi bằng link (YouTube, Drive, URL công khai). Không có key thì agent đọc từng frame bằng công cụ Read và kết hợp transcript. `--start/--end` giới hạn đoạn, `--resolution 1024` để đọc chữ, `--ocr` cho video quay màn hình. Video riêng tư cần `--cookies`; không tải video/audio lên chat.
 
 **Facebook (bài công khai / video / reel):** agent tự dùng khi bạn gửi link Facebook hoặc nhờ tìm. Có thể gọi trực tiếp:
 
@@ -483,8 +487,11 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `WATCH_GEMINI_MODEL` | `gemini-3.8-flash` | Model Gemini chính: đọc ảnh + xem video (context 1M token) |
 | `WATCH_GEMINI_FALLBACKS` | `gemini-3.7-flash,gemini-3.5-flash` | Model dự phòng khi model chính lỗi/hết hạn mức |
 | `WATCH_GEMINI_THINKING` | `low` | Mức suy nghĩ khi đọc ảnh/video: `low` (nhanh) hoặc `high` (kỹ hơn) |
-| `OPENCODE_MODEL` | `google/gemini-3.8-flash` | Model chính của agent; đổi trực tiếp bằng `/model` |
+| `OPENCODE_MODEL` | `opencode/deepseek-v4.1-flash-free` | Model chính của agent (DeepSeek v4.1); đổi trực tiếp bằng `/model` |
 | `GEMINI_RPM` / `GEMINI_RPD` | `10` / `1500` | Tự giữ nhịp request/phút và request/ngày |
+| `AISTV_VISION_HANDOFF` | `1` | `1` = Gemini đọc → DeepSeek đối chiếu/hỏi lại → DeepSeek trả lời; `0` = Gemini trả lời trực tiếp |
+| `AISTV_VISION_FOLLOWUPS` | `2` | Số lần DeepSeek được hỏi lại Gemini (tool `ask_gemini`) cho mỗi ảnh/video |
+| `AISTV_VISION_FOLLOWUP_TIMEOUT` | `240` | Giới hạn thời gian mỗi lần hỏi lại Gemini qua tool (giây) |
 | `GEMINI_MAX_RETRIES` | `2` | Số lần thử lại khi Gemini trả 429 |
 | `GEMINI_TIMEOUT` | `240` | Thời gian tối đa cho **một** lần gọi Gemini (giây; đủ cho video dài) |
 | `GEMINI_DEADLINE` | `600` | Tổng thời gian tối đa cho cả chuỗi model + retry (giây) |
