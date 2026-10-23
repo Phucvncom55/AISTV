@@ -111,6 +111,12 @@ def env_files(repo: Path = None) -> list:
 # Đọc / ghi file .env
 # ────────────────────────────────────────────────────────────────────
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+BOT_TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{30,}$")
+
+
+def valid_bot_token(value: str) -> bool:
+    """Token BotFather có dạng 123456789:AAH... — chặn dán nhầm lệnh khác."""
+    return bool(BOT_TOKEN_RE.match((value or "").strip()))
 
 
 def parse_env_text(text: str) -> dict:
@@ -211,6 +217,8 @@ def save_values(values: dict, repo: Path = None, protected=None) -> int:
     for name, value in values.items():
         if not value or not _KEY_RE.match(name):
             continue
+        if name == "TELEGRAM_BOT_TOKEN" and not valid_bot_token(value):
+            continue                      # không ghi token rác đè token tốt
         if name in protected:
             continue                      # biến môi trường do người dùng đặt
         for path in targets:
@@ -366,9 +374,10 @@ def fetch_remote(values: dict = None, log=None) -> tuple:
 # ────────────────────────────────────────────────────────────────────
 def _have_token(values: dict = None) -> bool:
     values = values or {}
-    return bool((os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-                or (values.get("TELEGRAM_BOT_TOKEN") or "").strip()
-                or colab_secret("TELEGRAM_BOT_TOKEN"))
+    token = ((os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+             or (values.get("TELEGRAM_BOT_TOKEN") or "").strip()
+             or colab_secret("TELEGRAM_BOT_TOKEN"))
+    return valid_bot_token(token)
 
 
 def sync(quiet: bool = False, repo: Path = None, offline: bool = False, protected=None) -> dict:
@@ -401,6 +410,10 @@ def sync(quiet: bool = False, repo: Path = None, offline: bool = False, protecte
         remote, labels = fetch_remote(values, log=log)
     to_save = dict(colab_values)
     to_save.update({k: v for k, v in remote.items() if v})
+    if remote.get("TELEGRAM_BOT_TOKEN") and not valid_bot_token(remote["TELEGRAM_BOT_TOKEN"]):
+        log("[config] Cảnh báo: TELEGRAM_BOT_TOKEN trên GitHub sai định dạng — giữ token cũ.")
+    to_save = {k: v for k, v in to_save.items()
+               if v and not (k == "TELEGRAM_BOT_TOKEN" and not valid_bot_token(v))}
     if to_save:
         added = save_values(to_save, repo, protected=protected)
         values.update(to_save)
@@ -432,6 +445,8 @@ def get_value(name: str, repo: Path = None) -> str:
 
 def set_value(name: str, value: str, repo: Path = None) -> bool:
     if not _KEY_RE.match(name or "") or not value:
+        return False
+    if name == "TELEGRAM_BOT_TOKEN" and not valid_bot_token(value):
         return False
     write_env_var(shared_config_path(), name, value)
     write_env_var(Path(repo or repo_dir()) / ".env", name, value)
@@ -466,6 +481,9 @@ def cmd_doctor(repo: Path = None) -> int:
         value = get_value(name, repo)
         if not value:
             print(f"  - {name:<24} (trống)")
+            continue
+        if name == "TELEGRAM_BOT_TOKEN" and not valid_bot_token(value):
+            print(f"  - {name:<24} SAI ĐỊNH DẠNG ({len(value)} ký tự) — cần dạng 123456:ABC...")
             continue
         where = "env" if (os.getenv(name) or "").strip() else str(sources.get(name, "Colab Secrets"))
         print(f"  - {name:<24} {_mask(value)}  [{where}]")
@@ -523,6 +541,10 @@ def main(argv=None) -> int:
             value = (sys.stdin.readline() or "").strip()
         if not value:
             print(f"Thiếu giá trị cho {args.key}", file=sys.stderr)
+            return 1
+        if args.key == "TELEGRAM_BOT_TOKEN" and not valid_bot_token(value):
+            print("Token Telegram không đúng định dạng (phải dạng 123456:ABC...). Không lưu.",
+                  file=sys.stderr)
             return 1
         if not set_value(args.key, value):
             print(f"Không ghi được {args.key}", file=sys.stderr)

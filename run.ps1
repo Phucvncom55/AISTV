@@ -93,8 +93,17 @@ function Initialize-Python {
     return $null
 }
 
+function Test-BotToken([string]$Token) {
+    # Token BotFather: 123456789:AAH... — chan dan nham lenh/bootstrap vao prompt.
+    return [bool]($Token -match '^\d{6,}:[A-Za-z0-9_-]{30,}$')
+}
+
 function Save-EnvToken([string]$Token) {
     # Luu ca .env cua repo lan config.env dung chung: clone lai repo van con token.
+    if (-not (Test-BotToken $Token)) {
+        Warn "Token khong hop le (dang 123456:ABC...) - khong luu."
+        return $false
+    }
     foreach ($path in @((Join-Path $script:AppDir ".env"), $script:CfgFile)) {
         if (-not $path) { continue }
         $dir = Split-Path -Parent $path
@@ -115,6 +124,7 @@ function Save-EnvToken([string]$Token) {
         try { [System.IO.File]::WriteAllLines($path, $lines, $utf8) } catch { }
     }
     Say "Da luu token vao .env va $script:CfgFile (lan sau khong can nhap)."
+    return $true
 }
 
 function Copy-Seed([string]$Source, [string]$Destination) {
@@ -280,9 +290,12 @@ if (-not $env:TELEGRAM_BOT_TOKEN) {
             try { $token = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
             finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
             $token = ($token -replace "\s", "")
+            if ($token -and -not (Test-BotToken $token)) {
+                Warn "Token khong hop le (dang 123456:ABC...) - khong luu. Dung dan nguyen dong lenh bootstrap vao day."
+                $token = ""
+            }
             if ($token) {
-                $env:TELEGRAM_BOT_TOKEN = $token
-                Save-EnvToken $token
+                if (Save-EnvToken $token) { $env:TELEGRAM_BOT_TOKEN = $token }
             }
         } catch { }
     }
