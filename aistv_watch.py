@@ -51,6 +51,11 @@ IMAGE_MIMES = {
     ".bmp": "image/bmp", ".gif": "image/gif", ".tif": "image/tiff", ".tiff": "image/tiff",
 }
 
+try:
+    import aistv_web2api as web2api      # dự phòng khi Gemini hết hạn mức
+except Exception:
+    web2api = None
+
 
 def ep(text: str = "") -> None:
     print(text, file=sys.stderr)
@@ -1269,6 +1274,25 @@ def wait_gemini_quota() -> None:
         time.sleep(wait)
 
 
+def web2api_generate(parts, timeout=240, temperature=0.2, max_output_tokens=8192):
+    """Gọi server Gemini Web2API nội bộ khi API chính hết hạn mức."""
+    if web2api is None:
+        return None, "không có aistv_web2api"
+    try:
+        if os.getenv("WEB2API_FALLBACK", "1") == "0" or not web2api.enabled():
+            return None, "Web2API đã tắt"
+    except Exception:
+        return None, "Web2API lỗi cấu hình"
+    model = config_value("WEB2API_MODEL", "gemini-3.6-flash") or "gemini-3.6-flash"
+    ep(f"↪︎ Gemini hết hạn mức — chuyển Web2API nội bộ ({model})…")
+    text, err = web2api.generate(
+        parts, model=model, timeout=max(30, min(timeout, 300)),
+        temperature=temperature, max_tokens=max_output_tokens)
+    if text:
+        return {"model": model, "text": text, "via": "web2api"}, None
+    return None, f"Web2API: {err}"
+
+
 def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
                     primary_model=None):
     """Gọi generateContent, tự đổi model dự phòng và retry khi bị 429."""
@@ -1278,6 +1302,7 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
     retries = max(0, config_int("GEMINI_MAX_RETRIES", 2))
     deadline = time.monotonic() + max(30, GEMINI_DEADLINE)
     errors = []
+    fatal = False
     for model in gemini_model_chain(primary_model):
         for attempt in range(retries + 1):
             remaining = deadline - time.monotonic()
@@ -1354,7 +1379,16 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
                     continue
                 ep(f"↪︎ Gemini {model} không trả lời — thử model dự phòng…")
                 break
-            return None, clean_secret(err, [key])
+            fatal = True
+            break
+        if fatal:
+            break
+    text, werr = web2api_generate(parts, timeout=timeout, temperature=temperature,
+                                  max_output_tokens=max_output_tokens)
+    if text:
+        return text, None
+    if werr:
+        errors.append(werr)
     return None, clean_secret(" | ".join(errors[-4:]), [key])
 
 
