@@ -222,7 +222,8 @@ CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "1") != "0"   # 0 = giữ bản
 USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google Drive (sống sót khi Colab reset)
 FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
                                 #        không cần hỏi quyền (mọi tool của OpenCode đều được auto-approve)
-DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"   # đổi nhanh bằng /model hoặc biến OPENCODE_MODEL
+DEFAULT_MODEL = "google/gemini-3.8-flash"   # đổi nhanh bằng /model hoặc biến OPENCODE_MODEL
+LEGACY_DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"
 TIMEZONE = "Asia/Ho_Chi_Minh"
 MAX_HISTORY = 12                # số lượt hỏi-đáp đưa vào ngữ cảnh
 MAX_PARALLEL = 2                # số tiến trình OpenCode chạy cùng lúc
@@ -630,6 +631,18 @@ def save_state() -> None:
     STATE_FILE.write_text(json.dumps(STATE, ensure_ascii=False, indent=2), "utf-8")
 
 
+# Máy cũ lưu model mặc định cũ trong state.json → tự chuyển một lần sang model mới.
+if (not os.getenv("OPENCODE_MODEL")
+        and STATE.get("model") == LEGACY_DEFAULT_MODEL
+        and not STATE.get("model_migrated_38")):
+    STATE["model"] = DEFAULT_MODEL
+    STATE["model_migrated_38"] = True
+    try:
+        save_state()
+    except Exception:
+        pass
+
+
 def get_secret(name: str) -> str:
     """Đọc từ biến môi trường, nếu không có thì thử 🔑 Secrets của Colab."""
     val = os.getenv(name, "").strip()
@@ -653,6 +666,10 @@ for _key in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
                 os.environ[_key] = _val
         except Exception:
             pass
+if not os.getenv("GOOGLE_GENERATIVE_AI_API_KEY"):
+    _gkey = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if _gkey:
+        os.environ["GOOGLE_GENERATIVE_AI_API_KEY"] = _gkey
 GEMINI_READY = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
 
 
@@ -2984,7 +3001,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     new = context.args[0].strip()
     if not re.fullmatch(r"[\w.\-]+/[\w.\-:/]+", new):
-        await msg.reply_text("⚠️ Sai định dạng. Ví dụ: <code>/model opencode/deepseek-v4.1-flash-free</code>", parse_mode=HTML)
+        await msg.reply_text("⚠️ Sai định dạng. Ví dụ: <code>/model google/gemini-3.8-flash</code>", parse_mode=HTML)
         return
     STATE["model"] = new
     save_state()

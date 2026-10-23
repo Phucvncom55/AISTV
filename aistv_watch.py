@@ -34,14 +34,14 @@ TIMEOUT = 120
 DOWNLOAD_TIMEOUT = 1800
 DETAIL_FRAMES = {"transcript": 0, "efficient": 12, "balanced": 24, "token-burner": 48}
 GEMINI_BASE = "https://generativelanguage.googleapis.com"
-# Gemini 3 Flash đang ở dạng preview; 2.5 Flash là bản ổn định dự phòng.
+# Gemini 3.8 Flash: đọc ảnh + xem video (audio/hình), context 1M token.
 # Đổi bằng WATCH_GEMINI_MODEL trong .env nếu tài khoản dùng model khác.
-DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"
-DEFAULT_GEMINI_FALLBACKS = "gemini-2.5-flash,gemini-3.1-flash-lite"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+DEFAULT_GEMINI_FALLBACKS = "gemini-3.7-flash,gemini-3.5-flash"
 # Chặn "treo": mỗi lần gọi tối đa GEMINI_ATTEMPT_TIMEOUT giây, cả chuỗi model
 # (kể cả retry 429) tối đa GEMINI_DEADLINE giây rồi báo lỗi và trả về.
-GEMINI_ATTEMPT_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "120") or 120)
-GEMINI_DEADLINE = int(os.getenv("GEMINI_DEADLINE", "300") or 300)
+GEMINI_ATTEMPT_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "240") or 240)
+GEMINI_DEADLINE = int(os.getenv("GEMINI_DEADLINE", "600") or 600)
 DEFAULT_MAX_MB = int(os.getenv("WATCH_MAX_MB", "600") or 600)
 MAX_TRANSCRIPT = 16000
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".bmp", ".gif", ".tif", ".tiff"}
@@ -1288,13 +1288,14 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
                 wait_gemini_quota()
             except Exception as e:
                 return None, clean_secret(err_text(e), [key])
-            payload = {
-                "contents": [{"parts": parts}],
-                "generationConfig": {
-                    "temperature": temperature,
-                    "maxOutputTokens": max_output_tokens,
-                },
+            gen_cfg = {
+                "temperature": temperature,
+                "maxOutputTokens": max_output_tokens,
             }
+            thinking = config_value("WATCH_GEMINI_THINKING", "low").strip().lower()
+            if thinking and thinking not in ("off", "0", "none"):
+                gen_cfg["thinkingConfig"] = {"thinkingLevel": thinking}
+            payload = {"contents": [{"parts": parts}], "generationConfig": gen_cfg}
             url = (
                 f"{GEMINI_BASE}/v1beta/models/{urllib.parse.quote(model)}:generateContent"
                 f"?key={urllib.parse.quote(key)}"
