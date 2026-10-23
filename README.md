@@ -520,6 +520,9 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `WATCH_GEMINI_FALLBACKS` | `gemini-3.7-flash,gemini-3.5-flash` | Model dự phòng khi model chính lỗi/hết hạn mức |
 | `WATCH_GEMINI_THINKING` | `low` | Mức suy nghĩ khi đọc ảnh/video: `low` (nhanh) hoặc `high` (kỹ hơn) |
 | `OPENCODE_MODEL` | `opencode/deepseek-v4.1-flash-free` | Model chính của agent (DeepSeek v4.1); đổi trực tiếp bằng `/model` |
+| `WEB2API_FALLBACK` | `1` | `1` = khi model chính hết hạn mức (429/hết token) tự chuyển sang Gemini Web2API nội bộ |
+| `WEB2API_URL` / `WEB2API_MODEL` | `http://127.0.0.1:8081` / `gemini-3.6-flash` | Server + model dự phòng |
+| `WEB2API_COOKIE_PASSPHRASE` | trống | Khoá mã hoá cookie khi backup lên repo private (`python aistv_web2api.py pull` ở máy mới) |
 | `GEMINI_RPM` / `GEMINI_RPD` | `10` / `1500` | Tự giữ nhịp request/phút và request/ngày |
 | `AISTV_VISION_HANDOFF` | `1` | `1` = Gemini đọc → DeepSeek đối chiếu/hỏi lại → DeepSeek trả lời; `0` = Gemini trả lời trực tiếp |
 | `AISTV_VISION_FOLLOWUPS` | `2` | Số lần DeepSeek được hỏi lại Gemini (tool `ask_gemini`) cho mỗi ảnh/video |
@@ -539,6 +542,20 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 
 Cấu hình nâng cao nằm ở đầu `aistv_bot.py` (model, timeout, số lịch sử, `FULL_ACCESS`, `USE_GOOGLE_DRIVE`).
 
+### Dự phòng khi hết hạn mức (Gemini Web2API)
+
+Model chính hết token/429 → bot tự chạy lại bằng server Gemini Web2API ngay trên máy
+(không cần API key trả phí). Cookie Google được mã hoá AES-256-GCM và backup trong
+repo private, nên đổi máy chỉ cần `python aistv_web2api.py pull`.
+
+```bash
+python aistv_web2api.py setup                       # lần đầu
+python aistv_web2api.py import cookies.json --push  # nạp cookie + backup
+python aistv_web2api.py doctor                      # kiểm tra
+```
+
+Chi tiết: [docs/WEB2API.md](docs/WEB2API.md). Trong chat: `/web2api`.
+
 ## 6. Cấu trúc
 
 ```
@@ -553,6 +570,7 @@ AISTV/
 ├── aistv_skills.py   cài skill chuẩn Agent Skills từ GitHub/zip
 ├── aistv_github_docs.py  đọc README/docs, tìm trong tài liệu và mã GitHub
 ├── aistv_config.py   đồng bộ config/token dùng chung cho mọi runner (sync/check/get/set/doctor)
+├── aistv_web2api.py  dự phòng Gemini Web2API + đồng bộ cookie mã hoá (import/push/pull/start)
 ├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)
 ├── bootstrap.bat     như bootstrap.sh nhưng cho Windows (cmd thuần, khuyên dùng)

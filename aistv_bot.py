@@ -256,6 +256,11 @@ try:
 except Exception:                       # thiếu mô-đun → bot vẫn chạy, chỉ tắt email
     mail = None
 
+try:
+    import aistv_web2api as web2api     # dự phòng khi model chính hết hạn mức
+except Exception:                       # thiếu module → chỉ tắt dự phòng, bot vẫn chạy
+    web2api = None
+
 CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "1") != "0"   # 0 = giữ bản OpenCode đã cài, không xoá & cài lại
 USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google Drive (sống sót khi Colab reset)
 FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
@@ -263,6 +268,8 @@ FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI worksp
 DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"   # model chính, đổi nhanh bằng /model hoặc OPENCODE_MODEL
 LEGACY_GEMINI_MODEL = "google/gemini-3.8-flash"       # bản trước lỡ đặt Gemini làm model chính → tự quay lại DeepSeek
 VISION_MODEL = "gemini-3.8-flash"                     # mắt + tai: đọc ảnh / xem video (không phải model trả lời)
+WEB2API_MODEL = (os.getenv("WEB2API_MODEL") or "gemini-3.6-flash").strip()
+WEB2API_FALLBACK = os.getenv("WEB2API_FALLBACK", "1") != "0"   # 0 = tắt dự phòng Gemini Web2API
 VISION_HANDOFF = os.getenv("AISTV_VISION_HANDOFF", "1") != "0"
                                                       # 1 = Gemini đọc media → DeepSeek (model chính) trả lời
 VISION_FOLLOWUPS = max(0, int(os.getenv("AISTV_VISION_FOLLOWUPS", "2") or 2))
@@ -1140,6 +1147,25 @@ def bootstrap_workspace() -> None:
     cfg = {"$schema": "https://opencode.ai/config.json"}
     if FULL_ACCESS:
         cfg["permission"] = "allow"
+    # Provider dự phòng: Gemini Web2API chạy ngay trên máy này.
+    if web2api is not None and WEB2API_FALLBACK:
+        try:
+            if web2api.enabled():
+                cfg["providers"] = {
+                    "web2api": {
+                        "name": "Gemini Web2API (nội bộ)",
+                        "package": "@opencode/ai/providers/openai-compatible",
+                        "settings": {"baseURL": web2api.base_url() + "/v1"},
+                        "headers": {"Authorization": "Bearer " + web2api.api_key()},
+                        "models": {
+                            WEB2API_MODEL: {"name": f"Gemini {WEB2API_MODEL} (web2api)"},
+                            "gemini-3.5-flash-thinking": {
+                                "name": "Gemini Thinking (web2api)"},
+                        },
+                    }
+                }
+        except Exception:
+            pass
     (WORKSPACE / "opencode.json").write_text(json.dumps(cfg, indent=2) + "\n", "utf-8")
 
 
@@ -2599,53 +2625,145 @@ def _is_opencode_error_output(text: str) -> bool:
     return any(marker in low for marker in _OPENCODE_BAD_OUTPUT)
 
 
+_QUOTA_MARKERS = (
+    "429", "too many requests", "rate limit", "rate-limit", "quota",
+    "resource exhausted", "resource_exhausted", "insufficient",
+    "out of tokens", "token budget", "usage limit", "limit exceeded",
+    "exceeded your", "no credits", "credit balance", "payment required",
+    "billing", "free trial", "402", "exhausted", "daily limit", "monthly limit",
+)
+
+
+def _is_quota_error(text: str) -> bool:
+    """Lỗi hết hạn mức / hết token (không phải lỗi cấu hình model)."""
+    low = (text or "").lower()
+    if not low:
+        return False
+    if any(m in low for m in ("model not found", "model unavailable",
+                              "unknown model", "no model is available")):
+        return False
+    return any(marker in low for marker in _QUOTA_MARKERS)
+
+
+def agent_model_chain() -> list:
+    """Model chính + model dự phòng (Gemini Web2API) khi hết hạn mức."""
+    chain = [opencode_model()]
+    if not WEB2API_FALLBACK or web2api is None:
+        return chain
+    try:
+        if not web2api.enabled():
+            return chain
+    except Exception:
+        return chain
+    raw = (os.getenv("OPENCODE_FALLBACK_MODELS") or "").strip()
+    candidates = raw.split(",") if raw else [f"web2api/{WEB2API_MODEL}"]
+    for item in candidates:
+        item = (item or "").strip()
+        if item and item not in chain:
+            chain.append(item)
+    return chain
+
+
+def _agent_failure(err_text: str, quota: bool = False, tools: bool = False) -> str:
+    if not quota:
+        head = "⚠️ OpenCode không trả về phản hồi."
+    elif tools:
+        head = ("⚠️ Model chính đã hết hạn mức request. Tác vụ đã chạy được một phần "
+                "nên không tự chạy lại để tránh trùng lặp.")
+    else:
+        head = "⚠️ Model chính đã hết hạn mức request và model dự phòng cũng chưa trả lời được."
+    return head + (f"\n\n{err_text[-1200:]}" if err_text else "")
+
+
+async def _run_opencode_once(chat_id: int, prompt: str, env: dict, model: str) -> tuple:
+    """Chạy một lượt OpenCode. Trả (ok, text/lỗi, đã_chạy_tool)."""
+    cmd = [OPENCODE_BIN, "run", "--model", model,
+           "--auto", "--thinking", "--format", "json"]
+    ACTIVITY[chat_id] = []
+    THINKING[chat_id] = []
+    LIVE[chat_id] = []
+    THINK_TOKENS[chat_id] = 0
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=str(WORKSPACE), env=env, limit=2 ** 20,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    RUNNING[chat_id] = proc
+    err_lines: list = []
+    try:
+        coro = _talk(proc, prompt.encode("utf-8"), chat_id, err_lines)
+        out = (await asyncio.wait_for(coro, timeout=AGENT_TIMEOUT)
+               if AGENT_TIMEOUT > 0 else await coro)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+    finally:
+        RUNNING.pop(chat_id, None)
+        _cancel_chat_asks(chat_id)
+    tools_ran = bool(ACTIVITY.get(chat_id) or LIVE.get(chat_id))
+    text = clean_output(out)
+    if text and not _is_opencode_error_output(text):
+        # OpenCode có thể trả rc=1 sau khi tool lỗi nhưng vẫn có câu trả lời hoàn chỉnh.
+        if proc.returncode not in (0, None):
+            log.warning("OpenCode rc=%s nhưng vẫn có câu trả lời — dùng câu trả lời",
+                        proc.returncode)
+        return True, text, tools_ran
+    err_text = "\n".join(err_lines) or text
+    log.warning("OpenCode không trả kết quả (model %s, rc=%s): %s",
+                model, proc.returncode, err_text[-300:])
+    return False, err_text, tools_ran
+
+
 async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
     """Trả về (ok, text).
     Luôn gửi prompt qua stdin + `--format json` để theo dõi tiến độ và tránh giới
-    hạn độ dài dòng lệnh Windows (prompt kèm báo cáo ảnh có thể rất dài)."""
+    hạn độ dài dòng lệnh Windows (prompt kèm báo cáo ảnh có thể rất dài).
+    Hết hạn mức model chính → tự chuyển sang Gemini Web2API (nếu bật)."""
     env = os.environ.copy()
     env.pop("TELEGRAM_BOT_TOKEN", None)          # không để agent nhìn thấy token
     env.update(NO_COLOR="1", TERM="dumb", PWD=str(WORKSPACE), AISTV_CHAT_ID=str(chat_id),
                AISTV_DIR=str(Path(__file__).resolve().parent))
-    err_text = ""
-    for attempt in range(retries + 1):
-        cmd = [OPENCODE_BIN, "run", "--model", opencode_model(),
-               "--auto", "--thinking", "--format", "json"]
-        ACTIVITY[chat_id] = []
-        THINKING[chat_id] = []
-        LIVE[chat_id] = []
-        THINK_TOKENS[chat_id] = 0
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=str(WORKSPACE), env=env, limit=2 ** 20,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        RUNNING[chat_id] = proc
-        err_lines: list = []
+    if web2api is not None:
         try:
-            coro = _talk(proc, prompt.encode("utf-8"), chat_id, err_lines)
-            out = (await asyncio.wait_for(coro, timeout=AGENT_TIMEOUT)
-                   if AGENT_TIMEOUT > 0 else await coro)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return False, f"⏱ Yêu cầu vượt quá {AGENT_TIMEOUT} giây nên đã bị dừng. Hãy chia nhỏ yêu cầu rồi thử lại."
-        finally:
-            RUNNING.pop(chat_id, None)
-            _cancel_chat_asks(chat_id)
-        if chat_id in CANCELLED:
-            CANCELLED.discard(chat_id)
-            return False, "🛑 Đã huỷ tác vụ."
-        text = clean_output(out)
-        if text and not _is_opencode_error_output(text):
-            # OpenCode có thể trả rc=1 sau khi tool lỗi nhưng vẫn có câu trả lời hoàn chỉnh.
-            if proc.returncode not in (0, None):
-                log.warning("OpenCode rc=%s nhưng vẫn có câu trả lời — dùng câu trả lời",
-                            proc.returncode)
-            return True, text
-        err_text = "\n".join(err_lines) or text
-        log.warning("OpenCode không trả kết quả (lần %d, rc=%s): %s",
-                    attempt + 1, proc.returncode, err_text[-300:])
-    return False, "⚠️ OpenCode không trả về phản hồi." + (f"\n\n{err_text[-1200:]}" if err_text else "")
+            env.setdefault("WEB2API_API_KEY", web2api.api_key())
+            env.setdefault("WEB2API_URL", web2api.base_url())
+        except Exception:
+            pass
+    models = agent_model_chain()
+    err_text = ""
+    for index, model in enumerate(models):
+        attempts = (retries if index == 0 else 0) + 1
+        for attempt in range(attempts):
+            try:
+                ok, text, tools_ran = await _run_opencode_once(chat_id, prompt, env, model)
+            except asyncio.TimeoutError:
+                return False, (f"⏱ Yêu cầu vượt quá {AGENT_TIMEOUT} giây nên đã bị dừng. "
+                               "Hãy chia nhỏ yêu cầu rồi thử lại.")
+            if chat_id in CANCELLED:
+                CANCELLED.discard(chat_id)
+                return False, "🛑 Đã huỷ tác vụ."
+            if ok:
+                if index > 0:
+                    log.info("Đã trả lời bằng model dự phòng: %s", model)
+                return True, text
+            err_text = text
+            if not _is_quota_error(err_text):
+                if attempt + 1 < attempts:
+                    continue
+                return False, _agent_failure(err_text)
+            # Hết hạn mức: chỉ chuyển model khi chưa chạy tool nào (tránh trùng tác dụng).
+            if tools_ran:
+                return False, _agent_failure(err_text, quota=True, tools=True)
+            if index + 1 >= len(models):
+                return False, _agent_failure(err_text, quota=True)
+            if web2api is not None:
+                try:
+                    await asyncio.to_thread(web2api.ensure_server)
+                except Exception:
+                    pass
+            log.warning("Hết hạn mức ở %s → chuyển sang %s", model, models[index + 1])
+            break
+    return False, _agent_failure(err_text, quota=True)
 
 
 _SKIP_DIRS = {"memory", "skills", ".agents", ".cursor", "inbox", "node_modules", "__pycache__"}
@@ -2969,6 +3087,22 @@ def image_provider_line() -> str:
     return ", ".join(names) if names else "⚠️ chưa cấu hình (xem /image)"
 
 
+def web2api_line() -> str:
+    """Một dòng trạng thái cho /status (không chặn lâu)."""
+    if web2api is None:
+        return "không có module"
+    if not WEB2API_FALLBACK:
+        return "đã tắt (WEB2API_FALLBACK=0)"
+    try:
+        if not web2api.enabled():
+            return "đã tắt (WEB2API_ENABLE=0)"
+        up = web2api.health(1.2)
+        return ("🟢 đang chạy" if up else "🟡 chưa bật (tự bật khi hết hạn mức)") + \
+               f" · {WEB2API_MODEL}"
+    except Exception:
+        return "chưa rõ"
+
+
 def build_status(chat_id: int) -> str:
     up = int(time.time() - START_TIME)
     to = "không giới hạn" if AGENT_TIMEOUT <= 0 else f"{AGENT_TIMEOUT}s"
@@ -2986,6 +3120,7 @@ def build_status(chat_id: int) -> str:
         f"• Gemini ({VISION_MODEL}) đọc ảnh/video: "
         f"{'✅ sẵn sàng' if GEMINI_READY else '⚠️ thiếu GEMINI_API_KEY'}"
         f"{' · thảo luận 2 chiều' if VISION_HANDOFF else ' · trả lời trực tiếp'}\n"
+        f"• Dự phòng Web2API: {esc(web2api_line())}\n"
         f"• Tạo ảnh: {esc(image_provider_line())}\n"
         f"• Giới hạn 1 yêu cầu: {to}\n"
         f"• Hội thoại: {len(load_history(chat_id)) // 2} lượt đã lưu\n"
@@ -5988,6 +6123,63 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"❌ Email lỗi: {esc(str(e))}", parse_mode=HTML)
 
 
+@guard()
+async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quản lý server Gemini Web2API dự phòng (chỉ chủ bot)."""
+    msg = update.effective_message
+    if web2api is None:
+        await msg.reply_text("⚠️ Thiếu <code>aistv_web2api.py</code> trong repo.", parse_mode=HTML)
+        return
+    action = (context.args[0].lower().lstrip("-") if context.args else "status")
+    if action in ("status", "st", ""):
+        info = await asyncio.to_thread(web2api.status_report)
+        lines = [
+            "🧩 <b>Gemini Web2API (dự phòng)</b>",
+            f"• Bật: {'có' if info['enabled'] and WEB2API_FALLBACK else 'không'} · "
+            f"model <code>{esc(WEB2API_MODEL)}</code>",
+            f"• Server: <code>{esc(info['url'])}</code> "
+            f"({'🟢 chạy' if info['running'] else '🔴 không chạy'})",
+            f"• Cookie: {'✅ có' if info['cookie'] else '❌ chưa có'} · "
+            f"XSRF: {'✅' if info['xsrf'] else '❌'}",
+            f"• Passphrase: {'✅ có' if info['passphrase'] else '❌ chưa có'}",
+            f"• Kho mã hoá: <code>{esc(info['store'])}</code>",
+            "",
+            "Lệnh: <code>/web2api start|stop|restart|refresh|pull|push</code>",
+        ]
+        await msg.reply_text("\n".join(lines), parse_mode=HTML)
+        return
+    if not is_owner(update.effective_user.id):
+        await msg.reply_text("🔒 Chỉ chủ bot được điều khiển Web2API.")
+        return
+    note = await msg.reply_text("⏳ Đang xử lý…")
+    try:
+        if action == "start":
+            ok, detail = await asyncio.to_thread(web2api.start)
+        elif action == "stop":
+            ok, detail = await asyncio.to_thread(web2api.stop)
+        elif action == "restart":
+            await asyncio.to_thread(web2api.stop)
+            ok, detail = await asyncio.to_thread(web2api.start)
+        elif action == "refresh":
+            ok, detail = await asyncio.to_thread(web2api.refresh_xsrf)
+            if ok:
+                detail = "đã cập nhật XSRF token"
+        elif action == "pull":
+            ok, detail = await asyncio.to_thread(web2api.pull_secrets)
+            if ok:
+                await asyncio.to_thread(web2api.refresh_xsrf, True)
+                detail = "đã tải cookie + làm mới XSRF"
+        elif action == "push":
+            ok, detail = await asyncio.to_thread(web2api.push_secrets)
+        else:
+            await note.edit_text("Dùng: <code>/web2api start|stop|restart|refresh|pull|push</code>",
+                                 parse_mode=HTML)
+            return
+        await note.edit_text(("✅ " if ok else "❌ ") + esc(str(detail))[:3800])
+    except Exception as e:
+        await note.edit_text(f"❌ {esc(str(e))}"[:3800])
+
+
 # ════════════════════════════════════════════════════════════════════
 # 9. KHỞI CHẠY
 # ════════════════════════════════════════════════════════════════════
@@ -6006,6 +6198,7 @@ COMMANDS = [
     ("github", "Kết nối / quản lý GitHub"), ("update", "Cập nhật bot từ GitHub"),
     ("restart", "Khởi động lại bot"),
     ("key", "Xem / đặt API key"),
+    ("web2api", "Dự phòng Gemini Web2API"),
     ("files", "File trong workspace"), ("get", "Tải file về"), ("help", "Hướng dẫn"),
 ]
 
@@ -6220,6 +6413,9 @@ async def post_init(app) -> None:
     if PROACTIVE:
         asyncio.create_task(_scheduler_loop(app))
     asyncio.create_task(install_self_watch())
+    if WEB2API_FALLBACK and web2api is not None:
+        # Bật sẵn server nội bộ để lúc hết hạn mức không phải chờ khởi động.
+        asyncio.create_task(asyncio.to_thread(web2api.ensure_server))
     if github_token():
         asyncio.create_task(asyncio.to_thread(_startup_github))
     if owner_id():
@@ -6267,7 +6463,8 @@ def main() -> None:
                       (["summary", "summarize"], cmd_summary), (["email", "mail"], cmd_email),
                       (["github"], cmd_github), (["update"], cmd_update), (["restart"], cmd_restart),
                       (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny),
-                      (["key", "keys"], cmd_key)]:
+                      (["key", "keys"], cmd_key),
+                      (["web2api", "w2a"], cmd_web2api)]:
         app.add_handler(CommandHandler(names, fn))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.PHOTO & filters.UpdateType.MESSAGE, handle_photo))
