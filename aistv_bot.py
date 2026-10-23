@@ -6099,6 +6099,11 @@ def _bootstrap_remote_config() -> int:
     return added
 
 
+def _valid_bot_token(value: str) -> bool:
+    """Token BotFather: 123456789:AAH... — chan dan nham lenh khac vao prompt."""
+    return bool(re.match(r"^\d{6,}:[A-Za-z0-9_-]{30,}$", (value or "").strip()))
+
+
 def get_token() -> str:
     # Runner (run.bat / run.ps1 / run.sh) đã đồng bộ trước khi chạy bot → bỏ qua.
     if not os.getenv("AISTV_CONFIG_SYNCED"):
@@ -6123,17 +6128,27 @@ def get_token() -> str:
         _bootstrap_remote_config()
         _load_dotenv()
         tok = get_secret("TELEGRAM_BOT_TOKEN")
+    if tok and not _valid_bot_token(tok):
+        print("⚠ TELEGRAM_BOT_TOKEN hiện có sai định dạng — bỏ qua, sẽ hỏi lại.")
+        tok = ""
     if not tok:
-        try:
-            tok = getpass.getpass("🔑 Dán Telegram Bot Token (lấy từ @BotFather): ").strip()
-        except (EOFError, OSError):
-            tok = ""
-        if tok:
+        for _attempt in range(3):
+            try:
+                entered = getpass.getpass("🔑 Dán Telegram Bot Token (lấy từ @BotFather): ").strip()
+            except (EOFError, OSError):
+                entered = ""
+            if not entered:
+                break
+            if not _valid_bot_token(entered):
+                print("❌ Token không đúng định dạng (phải dạng 123456:ABC...). Không lưu.")
+                continue
+            tok = entered
             try:
                 path = save_env_var("TELEGRAM_BOT_TOKEN", tok)
                 print(f"✅ Đã lưu token vào {path} — lần sau không cần nhập lại.")
             except Exception:
                 pass
+            break
     if not tok:
         raise SystemExit(
             "❌ Thiếu TELEGRAM_BOT_TOKEN.\n"

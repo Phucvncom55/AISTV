@@ -182,9 +182,15 @@ if not defined TELEGRAM_BOT_TOKEN (
   if defined TOKEN (
     set "AISTV_SECRET_VALUE=!TOKEN!"
     "%PYEXE%" %PYPRE% "%APP_DIR%\aistv_config.py" set TELEGRAM_BOT_TOKEN --from-env AISTV_SECRET_VALUE
-    set "AISTV_SECRET_VALUE="
-    set "TELEGRAM_BOT_TOKEN=!TOKEN!"
-    echo [AI STV] Da luu token vao .env + config.env - lan sau khong can nhap.
+    if errorlevel 1 (
+      set "AISTV_SECRET_VALUE="
+      echo [AI STV] Token khong hop le - khong luu. Token dung co dang 123456:ABC... - dung dan lenh bootstrap vao day.
+      set "TOKEN="
+    ) else (
+      set "AISTV_SECRET_VALUE="
+      set "TELEGRAM_BOT_TOKEN=!TOKEN!"
+      echo [AI STV] Da luu token vao .env + config.env - lan sau khong can nhap.
+    )
   )
 )
 if not defined TELEGRAM_BOT_TOKEN echo [AI STV] Chua co token - bot se dung va huong dan them.

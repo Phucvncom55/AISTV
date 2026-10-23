@@ -192,6 +192,10 @@ EOF
   fi
   line="${line//[[:space:]]/}"
   [[ -n "$line" ]] || return 1
+  if [[ ! "$line" =~ ^[0-9]{6,}:[A-Za-z0-9_-]{30,}$ ]]; then
+    say "⚠ Token không hợp lệ (phải dạng 123456:ABC...) — không lưu. Đừng dán lệnh bootstrap vào đây."
+    return 1
+  fi
   TELEGRAM_BOT_TOKEN="$line"
   export TELEGRAM_BOT_TOKEN
   persist_secret TELEGRAM_BOT_TOKEN "$line"
