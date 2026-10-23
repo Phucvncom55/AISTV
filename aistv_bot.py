@@ -80,6 +80,9 @@ def _env_files():
     return result
 
 
+ENV_FROM_FILES: set = set()     # biến nạp từ .env/config.env (nạp lại khi restart)
+
+
 def _load_env_path(path: Path) -> None:
     """Nạp KEY=VALUE từ một file, không ghi đè biến môi trường đã có."""
     try:
@@ -96,6 +99,7 @@ def _load_env_path(path: Path) -> None:
             value = value.strip().strip("'\"")
             if name and value and name not in os.environ:
                 os.environ[name] = value
+                ENV_FROM_FILES.add(name)
     except Exception:
         pass
 
@@ -1871,6 +1875,9 @@ def restart_bot() -> bool:
         return False
     try:
         env = os.environ.copy()
+        # Bỏ các biến đã nạp từ .env để tiến trình mới đọc lại giá trị mới nhất.
+        for name in ENV_FROM_FILES:
+            env.pop(name, None)
         env["STV_SKIP_SETUP"] = "1"
         argv = [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:]
         if IS_WINDOWS:
