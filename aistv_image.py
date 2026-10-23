@@ -624,8 +624,8 @@ Quy tắc: 4-7 nhánh; mỗi nhánh 2-4 ý; mỗi ý tối đa 8 từ; ngắn g�
 
 def _text_models() -> list:
     first = (secret("AISTV_TEXT_MODEL") or secret("WATCH_GEMINI_MODEL")
-             or "gemini-3-flash-preview")
-    fb = secret("WATCH_GEMINI_FALLBACKS") or "gemini-3.1-flash-lite,gemini-2.5-flash"
+             or "gemini-3.8-flash")
+    fb = secret("WATCH_GEMINI_FALLBACKS") or "gemini-3.7-flash,gemini-3.5-flash"
     return list(dict.fromkeys([first] + [m.strip() for m in fb.split(",") if m.strip()]))
 
 

@@ -30,7 +30,7 @@ python3 "$W" frames "URL" --max-frames 24 --at "1:23,4:56"
 - `--engine auto` (mặc định): dùng Gemini nếu có `GEMINI_API_KEY`, không thì local.
 - `--engine local`: chỉ dùng máy (frames + transcript), không gửi video đi đâu.
 - `--engine gemini`: bắt buộc Gemini; lỗi thì báo, không tự đổi.
-- Model mặc định `gemini-3-flash-preview`, tự fallback `gemini-2.5-flash` → `gemini-3.5-flash-lite`. Đổi bằng `WATCH_GEMINI_MODEL` / `WATCH_GEMINI_FALLBACKS`.
+- Model mặc định `gemini-3.8-flash`, tự fallback `gemini-3.7-flash` → `gemini-3.5-flash`. Đổi bằng `WATCH_GEMINI_MODEL` / `WATCH_GEMINI_FALLBACKS`.
 - Hạn mức miễn phí tham khảo 10 RPM / 1500 RPD; script tự giữ nhịp, retry 429 và báo khi chạm giới hạn. Không chạy song song nhiều lệnh Gemini nếu không cần.
 - `--detail transcript|efficient|balanced|token-burner` → 0 / 12 / 24 / 48 frames.
 - `--start 1:20 --end 4:10` giới hạn đoạn; `--at 1:23,4:56` lấy đúng mốc.

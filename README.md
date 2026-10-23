@@ -480,12 +480,14 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `HF_TOKEN` | trống | Tạo ảnh qua Hugging Face Inference |
 | `AISTV_GEN_IMAGE_TIMEOUT` | `300` | Thời gian tối đa một lần tạo ảnh (giây) |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | trống | Transcript dự phòng cho video không có phụ đề |
-| `WATCH_GEMINI_MODEL` | `gemini-3-flash-preview` | Model Gemini chính (`gemini-2.5-flash` nếu tài khoản chưa mở 3 Flash) |
-| `WATCH_GEMINI_FALLBACKS` | `gemini-2.5-flash,gemini-3.1-flash-lite` | Model dự phòng khi model chính lỗi/hết hạn mức |
+| `WATCH_GEMINI_MODEL` | `gemini-3.8-flash` | Model Gemini chính: đọc ảnh + xem video (context 1M token) |
+| `WATCH_GEMINI_FALLBACKS` | `gemini-3.7-flash,gemini-3.5-flash` | Model dự phòng khi model chính lỗi/hết hạn mức |
+| `WATCH_GEMINI_THINKING` | `low` | Mức suy nghĩ khi đọc ảnh/video: `low` (nhanh) hoặc `high` (kỹ hơn) |
+| `OPENCODE_MODEL` | `google/gemini-3.8-flash` | Model chính của agent; đổi trực tiếp bằng `/model` |
 | `GEMINI_RPM` / `GEMINI_RPD` | `10` / `1500` | Tự giữ nhịp request/phút và request/ngày |
 | `GEMINI_MAX_RETRIES` | `2` | Số lần thử lại khi Gemini trả 429 |
-| `GEMINI_TIMEOUT` | `120` | Thời gian tối đa cho **một** lần gọi Gemini (giây) |
-| `GEMINI_DEADLINE` | `300` | Tổng thời gian tối đa cho cả chuỗi model + retry (giây) |
+| `GEMINI_TIMEOUT` | `240` | Thời gian tối đa cho **một** lần gọi Gemini (giây; đủ cho video dài) |
+| `GEMINI_DEADLINE` | `600` | Tổng thời gian tối đa cho cả chuỗi model + retry (giây) |
 | `GEMINI_QUOTA_DISABLE` | `0` | `1` = tắt theo dõi hạn mức cục bộ |
 | `WATCH_MAX_IMAGE_MB` | `50` | Giới hạn ảnh tải từ URL |
 | `AISTV_IMAGE_TIMEOUT` / `AISTV_VIDEO_TIMEOUT` | `600` / `900` | Giới hạn thời gian đọc ảnh/video trong chat (giây) |
