@@ -74,16 +74,13 @@ if exist "%APP_DIR%\.git" (
 if not exist "%APP_DIR%\aistv_bot.py" goto no_source
 cd /d "%APP_DIR%"
 
-rem -- 2. Doc .env ------------------------------------------------------
-if exist "%APP_DIR%\.env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%APP_DIR%\.env") do (
-    if /i "%%A"=="TELEGRAM_BOT_TOKEN" if not defined TELEGRAM_BOT_TOKEN set "TELEGRAM_BOT_TOKEN=%%B"
-    if /i "%%A"=="ALLOWED_USER_IDS" if not defined ALLOWED_USER_IDS set "ALLOWED_USER_IDS=%%B"
-  )
-)
-if defined TELEGRAM_BOT_TOKEN set "TELEGRAM_BOT_TOKEN=%TELEGRAM_BOT_TOKEN:"=%"
-if defined ALLOWED_USER_IDS set "ALLOWED_USER_IDS=%ALLOWED_USER_IDS:"=%"
-if defined TELEGRAM_BOT_TOKEN set "TELEGRAM_BOT_TOKEN=%TELEGRAM_BOT_TOKEN: =%"
+rem -- 2. Doc .env + config.env dung chung -------------------------------
+rem Cung mot thu tu voi run.ps1 / run.sh: .env cua repo thang config.env.
+set "CFG_FILE=%USERPROFILE%\.config\aistv\config.env"
+if defined AISTV_CONFIG_DIR set "CFG_FILE=%AISTV_CONFIG_DIR%\config.env"
+set "HAD_ENV_TOKEN="
+if defined TELEGRAM_BOT_TOKEN set "HAD_ENV_TOKEN=1"
+call :load_config
 
 rem -- 3. Tim Python 3.10+ ---------------------------------------------
 set "PYEXE="
@@ -160,29 +157,46 @@ if errorlevel 1 goto pip_fail
 if errorlevel 1 goto import_fail
 echo [AI STV] Thu vien Python OK
 
-rem -- 4. Token: .env -> bien moi truong -> hoi truc tiep ---------------
+rem -- 4. Dong bo cau hinh tu GitHub / URL (giong run.ps1, run.sh) ------
+rem Thu tu: AISTV_ENV_URL -> repo private (AISTV_CONFIG_TOKEN / GH_TOKEN /
+rem gh auth token / Colab Secrets). Nho vay token da co tren GitHub thi khong hoi.
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+if exist "%APP_DIR%\aistv_config.py" (
+  if not defined HAD_ENV_TOKEN (
+    set "TELEGRAM_BOT_TOKEN="
+    set "ALLOWED_USER_IDS="
+  )
+  "%PYEXE%" %PYPRE% "%APP_DIR%\aistv_config.py" sync
+  if not defined HAD_ENV_TOKEN call :load_config
+  set "AISTV_CONFIG_SYNCED=1"
+)
+
+rem -- 5. Token: hoi lan cuoi neu GitHub/URL cung khong co ----------------
 if not defined TELEGRAM_BOT_TOKEN (
   echo.
-  echo [AI STV] Chua co Telegram Bot Token.
+  echo [AI STV] Chua co Telegram Bot Token trong .env / config.env / GitHub.
+  echo     Kiem tra nguon cau hinh: "%PYEXE%" %PYPRE% "%APP_DIR%\aistv_config.py" doctor
   echo     Tao bot: nhan @BotFather -^> /newbot -^> lay token 123456:ABC...
   set /p "TOKEN=Dan Telegram Bot Token (Enter de bo qua): "
   if defined TOKEN (
-    set "AISTV_TOK=!TOKEN!"
-    "%PYEXE%" %PYPRE% -c "import os,pathlib;p=pathlib.Path('.env');t=os.environ['AISTV_TOK'];L=[l for l in (p.read_text('utf-8').splitlines() if p.exists() else []) if not l.strip().startswith('TELEGRAM_BOT_TOKEN')];p.write_text(chr(10).join(L+['TELEGRAM_BOT_TOKEN='+t])+chr(10),'utf-8')"
+    set "AISTV_SECRET_VALUE=!TOKEN!"
+    "%PYEXE%" %PYPRE% "%APP_DIR%\aistv_config.py" set TELEGRAM_BOT_TOKEN --from-env AISTV_SECRET_VALUE
+    set "AISTV_SECRET_VALUE="
     set "TELEGRAM_BOT_TOKEN=!TOKEN!"
-    echo [AI STV] Da luu token vao .env - lan sau khong can nhap.
+    echo [AI STV] Da luu token vao .env + config.env - lan sau khong can nhap.
   )
 )
-if not defined TELEGRAM_BOT_TOKEN echo [AI STV] Chua co token - bot se hoi khi khoi dong.
+if not defined TELEGRAM_BOT_TOKEN echo [AI STV] Chua co token - bot se dung va huong dan them.
 
-rem -- 5. Seed workspace lan dau (khong ghi de du lieu da co) ----------
+rem -- 6. Seed workspace lan dau (khong ghi de du lieu da co) ----------
 set "WS=%USERPROFILE%\stv_agent\workspace"
 if defined STV_HOME set "WS=%STV_HOME%\workspace"
 if exist "%APP_DIR%\seed" (
   "%PYEXE%" %PYPRE% -c "import pathlib,shutil;s=pathlib.Path(r'%APP_DIR%\seed');d=pathlib.Path(r'%WS%');[(d/f.relative_to(s)).parent.mkdir(parents=True,exist_ok=True) or shutil.copy2(f,d/f.relative_to(s)) for f in s.rglob('*') if f.is_file() and not (d/f.relative_to(s)).exists()]"
 )
 
-rem -- 6. Chay bot ------------------------------------------------------
+rem -- 7. Chay bot ------------------------------------------------------
 set "PYTHONUNBUFFERED=1"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
@@ -193,6 +207,25 @@ echo [AI STV] Khoi chay AI STV... (Ctrl+C de dung)
 "%PYEXE%" %PYPRE% "%APP_DIR%\aistv_bot.py"
 set "CODE=%errorlevel%"
 endlocal & exit /b %CODE%
+
+rem -- doc cau hinh: .env cua repo truoc, config.env dung chung sau --------
+:load_config
+if exist "%APP_DIR%\.env" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%APP_DIR%\.env") do (
+    if /i "%%A"=="TELEGRAM_BOT_TOKEN" if not defined TELEGRAM_BOT_TOKEN set "TELEGRAM_BOT_TOKEN=%%B"
+    if /i "%%A"=="ALLOWED_USER_IDS" if not defined ALLOWED_USER_IDS set "ALLOWED_USER_IDS=%%B"
+  )
+)
+if defined CFG_FILE if exist "%CFG_FILE%" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%CFG_FILE%") do (
+    if /i "%%A"=="TELEGRAM_BOT_TOKEN" if not defined TELEGRAM_BOT_TOKEN set "TELEGRAM_BOT_TOKEN=%%B"
+    if /i "%%A"=="ALLOWED_USER_IDS" if not defined ALLOWED_USER_IDS set "ALLOWED_USER_IDS=%%B"
+  )
+)
+if defined TELEGRAM_BOT_TOKEN set "TELEGRAM_BOT_TOKEN=%TELEGRAM_BOT_TOKEN:"=%"
+if defined ALLOWED_USER_IDS set "ALLOWED_USER_IDS=%ALLOWED_USER_IDS:"=%"
+if defined TELEGRAM_BOT_TOKEN set "TELEGRAM_BOT_TOKEN=%TELEGRAM_BOT_TOKEN: =%"
+goto :eof
 
 rem -- loi --------------------------------------------------------------
 :no_git

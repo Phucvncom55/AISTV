@@ -14,7 +14,9 @@ CÁCH DÙNG
       curl -fsSL -o "%TEMP%\aistv.bat" "https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.bat?v=1" && call "%TEMP%\aistv.bat"
   • Trên Colab: dán TOÀN BỘ file này vào MỘT ô code → Run (tự cài đặt),
     hoặc thêm secret TELEGRAM_BOT_TOKEN rồi chạy lệnh run.sh ở trên.
-  • Token: đặt TELEGRAM_BOT_TOKEN (env / Colab Secrets / .env). Nếu thiếu, bot sẽ hỏi.
+  • Token: tự lấy từ `.env` / `config.env` / repo private GitHub (gh auth hoặc
+    AISTV_CONFIG_TOKEN). Chỉ hỏi khi tất cả đều chưa có; kiểm tra bằng
+    `python aistv_config.py doctor`.
     Nên đặt ALLOWED_USER_IDS (user id Telegram, hỏi @userinfobot) để khoá bot chắc chắn.
   • Mở Telegram, nhắn /start. Người nhắn đầu tiên là CHỦ BOT.
 
@@ -47,6 +49,11 @@ try:
 except Exception:                       # vẫn chạy được nếu thiếu module (bản cũ)
     skill_lib = None
 
+try:
+    import aistv_config as config_lib   # đồng bộ cấu hình dùng chung cho mọi runner
+except Exception:                       # bản cũ chưa có file → dùng logic dự phòng bên dưới
+    config_lib = None
+
 IS_WINDOWS = os.name == "nt"
 
 
@@ -56,15 +63,23 @@ def _env_files():
     override = os.getenv("AISTV_ENV_FILE", "").strip()
     if override:
         return [Path(override).expanduser()]       # file chỉ định: chỉ đọc file này
-    cfg_dir = Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
-                   or (Path.home() / ".config" / "aistv"))
+    cfg_dirs = []
+    try:
+        if config_lib is not None:
+            cfg_dirs.append(config_lib.config_dir())
+    except Exception:
+        pass
+    default_cfg = Path.home() / ".config" / "aistv"
+    if default_cfg not in cfg_dirs:
+        cfg_dirs.append(default_cfg)
     files = [
         Path(__file__).resolve().parent / ".env",
         Path.cwd() / ".env",
         Path.home() / ".env",
         Path(os.getenv("STV_HOME", "")) / ".env" if os.getenv("STV_HOME") else None,
         # Cấu hình dùng chung, không mất khi clone lại repo / đổi AISTV_DIR.
-        cfg_dir / "config.env",
+        # Trên Colab ưu tiên Drive (giống run.sh); vẫn đọc ~/.config để tương thích bản cũ.
+        *(d / "config.env" for d in cfg_dirs),
     ]
     seen, result = set(), []
     for path in files:
@@ -173,8 +188,12 @@ def save_env_var(name: str, value: str) -> Path:
     """
     global SECRETS_DIRTY
     primary = Path(os.getenv("AISTV_ENV_FILE", "") or (Path(__file__).resolve().parent / ".env"))
-    shared = Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
-                  or (Path.home() / ".config" / "aistv")) / "config.env"
+    try:
+        shared = (config_lib.shared_config_path() if config_lib is not None
+                  else Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
+                            or (Path.home() / ".config" / "aistv")) / "config.env")
+    except Exception:
+        shared = Path.home() / ".config" / "aistv" / "config.env"
     for path in (primary, shared):
         try:
             _write_env_var(path, name, value)
@@ -194,8 +213,12 @@ def _persist_shared_config() -> None:
     """
     if os.getenv("AISTV_ENV_FILE", "").strip():
         return                                # người dùng chỉ định file riêng: không đụng
-    shared = Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
-                  or (Path.home() / ".config" / "aistv")) / "config.env"
+    try:
+        shared = (config_lib.shared_config_path() if config_lib is not None
+                  else Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
+                            or (Path.home() / ".config" / "aistv")) / "config.env")
+    except Exception:
+        shared = Path.home() / ".config" / "aistv" / "config.env"
     for name in ("TELEGRAM_BOT_TOKEN",) + tuple(SECRET_SYNC_KEYS):
         value = (os.getenv(name) or "").strip()
         if not value:
@@ -6009,7 +6032,15 @@ def _merge_env_file(path: Path, text: str) -> int:
 
 
 def _remote_config_text() -> str:
-    """Tải config.env từ AISTV_ENV_URL hoặc repo private (gh / AISTV_CONFIG_TOKEN)."""
+    """Tải config.env từ AISTV_ENV_URL hoặc repo private (dự phòng cho bản cũ)."""
+    try:
+        if config_lib is not None:
+            values, _src = config_lib.read_files()
+            remote, _labels = config_lib.fetch_remote(values)
+            if remote:
+                return "\n".join(f"{k}={v}" for k, v in remote.items())
+    except Exception:
+        pass
     url = (os.getenv("AISTV_ENV_URL") or "").strip()
     if url:
         try:
@@ -6021,7 +6052,11 @@ def _remote_config_text() -> str:
     repo = (os.getenv("AISTV_CONFIG_REPO") or "Phucvncom55/AISTV-secrets").strip()
     if not repo or repo.lower() in ("0", "off"):
         return ""
-    token = (os.getenv("AISTV_CONFIG_TOKEN") or "").strip()
+    token = ""
+    for name in ("AISTV_CONFIG_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        token = (os.getenv(name) or "").strip()
+        if token:
+            break
     if not token:
         try:
             token = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
@@ -6047,11 +6082,16 @@ def _bootstrap_remote_config() -> int:
     """Máy mới: tự nạp token/API key từ config.env dùng chung trên GitHub."""
     if get_secret("TELEGRAM_BOT_TOKEN"):
         return 0
+    # get_token() đã gọi aistv_config.sync; đây là đường dự phòng cho bản cũ.
     text = _remote_config_text()
     if not text or "=" not in text:
         return 0
-    shared = Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
-                  or (Path.home() / ".config" / "aistv")) / "config.env"
+    try:
+        shared = (config_lib.shared_config_path() if config_lib is not None
+                  else Path(os.getenv("AISTV_CONFIG_DIR", "").strip()
+                            or (Path.home() / ".config" / "aistv")) / "config.env")
+    except Exception:
+        shared = Path.home() / ".config" / "aistv" / "config.env"
     added = _merge_env_file(shared, text)
     if added:
         _load_env_path(shared)
@@ -6060,9 +6100,28 @@ def _bootstrap_remote_config() -> int:
 
 
 def get_token() -> str:
+    # Runner (run.bat / run.ps1 / run.sh) đã đồng bộ trước khi chạy bot → bỏ qua.
+    if not os.getenv("AISTV_CONFIG_SYNCED"):
+        if config_lib is not None:
+            try:
+                # Chỉ bảo vệ biến do người dùng đặt thật; key đọc từ file thì
+                # cho phép GitHub cập nhật (đổi token/key trên web là có hiệu lực).
+                protected = set(os.environ) - set(ENV_FROM_FILES)
+                result = config_lib.sync(quiet=True, protected=protected)
+                for name, value in (result.get("values") or {}).items():
+                    if name in ENV_FROM_FILES and value:
+                        os.environ[name] = value
+                _load_dotenv()
+            except Exception:
+                pass
+        else:
+            _bootstrap_remote_config()
+            _load_dotenv()
+        os.environ["AISTV_CONFIG_SYNCED"] = "1"
     tok = get_secret("TELEGRAM_BOT_TOKEN")
-    if not tok:
+    if not tok and config_lib is None:
         _bootstrap_remote_config()
+        _load_dotenv()
         tok = get_secret("TELEGRAM_BOT_TOKEN")
     if not tok:
         try:
@@ -6078,10 +6137,12 @@ def get_token() -> str:
     if not tok:
         raise SystemExit(
             "❌ Thiếu TELEGRAM_BOT_TOKEN.\n"
-            "   • Cách nhanh: tạo file .env trong thư mục AISTV với dòng:\n"
-            "       TELEGRAM_BOT_TOKEN=123456:ABC...\n"
+            "   • Chạy run.bat / run.ps1 / run.sh — tự lấy từ GitHub nếu máy đã đăng nhập gh\n"
+            "     hoặc có AISTV_CONFIG_TOKEN (PAT đọc repo AISTV-secrets).\n"
             "   • Hoặc thêm TELEGRAM_BOT_TOKEN vào Colab Secrets (bật Notebook access).\n"
-            "   • Hoặc chạy run.bat / run.sh — script sẽ hỏi một lần rồi lưu vào .env."
+            "   • Hoặc tạo file .env trong thư mục AISTV với dòng:\n"
+            "       TELEGRAM_BOT_TOKEN=123456:ABC...\n"
+            "   • Kiểm tra: python aistv_config.py doctor"
         )
     return tok
 
