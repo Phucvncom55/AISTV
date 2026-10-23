@@ -2593,6 +2593,9 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> s
                     err = json.dumps(err, ensure_ascii=False)
                 if err:
                     raw.append(str(err))
+            elif ev.get("name") or ev.get("error"):
+                # JSON lỗi không có "type" (UnknownError...) — vẫn phải báo về.
+                raw.append(t)
 
     async def watch_err():
         try:
@@ -2625,6 +2628,28 @@ def _is_opencode_error_output(text: str) -> bool:
     return any(marker in low for marker in _OPENCODE_BAD_OUTPUT)
 
 
+def _is_error_payload(text: str) -> bool:
+    """OpenCode đôi khi in nguyên JSON lỗi (UnknownError...) như 'câu trả lời'."""
+    raw = (text or "").strip()
+    low = raw.lower()
+    if '"unknownerror"' in low or '"unexpected server error"' in low:
+        return True
+    if not raw.startswith("{"):
+        return False
+    candidates = [raw.splitlines()[0].strip(), raw]
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        name = str(data.get("name") or "")
+        if name.endswith("Error") or data.get("type") == "error" or "error" in data:
+            return True
+    return False
+
+
 _QUOTA_MARKERS = (
     "429", "too many requests", "rate limit", "rate-limit", "quota",
     "resource exhausted", "resource_exhausted", "insufficient",
@@ -2643,6 +2668,38 @@ def _is_quota_error(text: str) -> bool:
                               "unknown model", "no model is available")):
         return False
     return any(marker in low for marker in _QUOTA_MARKERS)
+
+
+_SERVER_ERROR_MARKERS = (
+    "unknownerror", "unknown error", "unexpected server error",
+    "internal server error", "server error", "bad gateway",
+    "service unavailable", "overloaded", "upstream", "econnreset",
+    "socket hang up", "fetch failed", "provider error", "502", "503", "504",
+)
+
+
+def _is_server_error(text: str) -> bool:
+    """Lỗi từ nhà cung cấp model (UnknownError, 5xx...) — cũng nên thử dự phòng."""
+    low = (text or "").lower()
+    if not low:
+        return False
+    if any(m in low for m in ("model not found", "model unavailable",
+                              "unknown model", "no model is available")):
+        return False
+    return any(marker in low for marker in _SERVER_ERROR_MARKERS)
+
+
+def _pretty_error(text: str) -> str:
+    """Rút gọn JSON lỗi của OpenCode thành một dòng dễ đọc."""
+    raw = (text or "").strip()
+    match = re.search(r'"message"\s*:\s*"([^"]{3,400})"', raw)
+    if not match:
+        return raw[-1200:]
+    msg = match.group(1)
+    ref = re.search(r'"ref"\s*:\s*"([^"]+)"', raw)
+    if ref:
+        msg += f" (ref {ref.group(1)})"
+    return msg
 
 
 def agent_model_chain() -> list:
@@ -2664,15 +2721,23 @@ def agent_model_chain() -> list:
     return chain
 
 
-def _agent_failure(err_text: str, quota: bool = False, tools: bool = False) -> str:
-    if not quota:
+def _agent_failure(err_text: str, quota: bool = False, tools: bool = False,
+                   server: bool = False) -> str:
+    if server:
+        head = ("⚠️ Model chính gặp lỗi từ nhà cung cấp (UnknownError) và model dự phòng "
+                "cũng chưa trả lời được.")
+        if tools:
+            head = ("⚠️ Model chính gặp lỗi từ nhà cung cấp (UnknownError). Tác vụ đã chạy "
+                    "được một phần nên không tự chạy lại để tránh trùng lặp.")
+    elif not quota:
         head = "⚠️ OpenCode không trả về phản hồi."
     elif tools:
         head = ("⚠️ Model chính đã hết hạn mức request. Tác vụ đã chạy được một phần "
                 "nên không tự chạy lại để tránh trùng lặp.")
     else:
         head = "⚠️ Model chính đã hết hạn mức request và model dự phòng cũng chưa trả lời được."
-    return head + (f"\n\n{err_text[-1200:]}" if err_text else "")
+    detail = _pretty_error(err_text)
+    return head + (f"\n\n{detail}" if detail else "")
 
 
 async def _run_opencode_once(chat_id: int, prompt: str, env: dict, model: str) -> tuple:
@@ -2702,13 +2767,13 @@ async def _run_opencode_once(chat_id: int, prompt: str, env: dict, model: str) -
         _cancel_chat_asks(chat_id)
     tools_ran = bool(ACTIVITY.get(chat_id) or LIVE.get(chat_id))
     text = clean_output(out)
-    if text and not _is_opencode_error_output(text):
+    if text and not _is_opencode_error_output(text) and not _is_error_payload(text):
         # OpenCode có thể trả rc=1 sau khi tool lỗi nhưng vẫn có câu trả lời hoàn chỉnh.
         if proc.returncode not in (0, None):
             log.warning("OpenCode rc=%s nhưng vẫn có câu trả lời — dùng câu trả lời",
                         proc.returncode)
         return True, text, tools_ran
-    err_text = "\n".join(err_lines) or text
+    err_text = "\n".join(x for x in (("\n".join(err_lines)).strip(), text.strip()) if x)
     log.warning("OpenCode không trả kết quả (model %s, rc=%s): %s",
                 model, proc.returncode, err_text[-300:])
     return False, err_text, tools_ran
@@ -2747,21 +2812,24 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
                     log.info("Đã trả lời bằng model dự phòng: %s", model)
                 return True, text
             err_text = text
-            if not _is_quota_error(err_text):
+            quota = _is_quota_error(err_text)
+            server = (not quota) and _is_server_error(err_text)
+            if not quota and not server:
                 if attempt + 1 < attempts:
                     continue
                 return False, _agent_failure(err_text)
-            # Hết hạn mức: chỉ chuyển model khi chưa chạy tool nào (tránh trùng tác dụng).
+            # Hết hạn mức / lỗi server: chỉ chuyển model khi chưa chạy tool nào (tránh trùng tác dụng).
             if tools_ran:
-                return False, _agent_failure(err_text, quota=True, tools=True)
+                return False, _agent_failure(err_text, quota=quota, tools=True, server=server)
             if index + 1 >= len(models):
-                return False, _agent_failure(err_text, quota=True)
+                return False, _agent_failure(err_text, quota=quota, server=server)
             if web2api is not None:
                 try:
                     await asyncio.to_thread(web2api.ensure_server)
                 except Exception:
                     pass
-            log.warning("Hết hạn mức ở %s → chuyển sang %s", model, models[index + 1])
+            log.warning("Lỗi model ở %s (%s) → chuyển sang %s", model,
+                        "hết hạn mức" if quota else "server", models[index + 1])
             break
     return False, _agent_failure(err_text, quota=True)
 
@@ -5305,7 +5373,10 @@ async def ask_model_once(prompt: str, timeout: int = 300) -> tuple:
         return False, oneline(str(e), 200)
     if p.returncode != 0:
         return False, (p.stdout or "")[-400:] or f"mã lỗi {p.returncode}"
-    return True, clean_output(p.stdout or "")
+    out = clean_output(p.stdout or "")
+    if _is_error_payload(out) or _is_opencode_error_output(out):
+        return False, _pretty_error(out)
+    return True, out
 
 
 async def summarize_chat(chat_id: int, force: bool = False) -> Optional[str]:
@@ -6123,6 +6194,25 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"❌ Email lỗi: {esc(str(e))}", parse_mode=HTML)
 
 
+async def _web2api_loop():
+    """Giữ cookie/server luôn mới: dán cookie.txt là tự chạy, máy mới tự kéo."""
+    tick = 0
+    while True:
+        try:
+            if tick == 0:
+                await asyncio.to_thread(web2api.auto, True)
+            else:
+                await asyncio.to_thread(web2api.sync_if_changed)
+                if tick % 12 == 0:
+                    await asyncio.to_thread(web2api.pull_if_safe)
+                if not await asyncio.to_thread(web2api.health):
+                    await asyncio.to_thread(web2api.ensure_server)
+        except Exception as exc:
+            log.debug("Web2API nền: %s", oneline(str(exc), 160))
+        tick += 1
+        await asyncio.sleep(10)
+
+
 @guard()
 async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quản lý server Gemini Web2API dự phòng (chỉ chủ bot)."""
@@ -6140,16 +6230,35 @@ async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Server: <code>{esc(info['url'])}</code> "
             f"({'🟢 chạy' if info['running'] else '🔴 không chạy'})",
             f"• Cookie: {'✅ có' if info['cookie'] else '❌ chưa có'} · "
-            f"XSRF: {'✅' if info['xsrf'] else '❌'}",
-            f"• Passphrase: {'✅ có' if info['passphrase'] else '❌ chưa có'}",
-            f"• Kho mã hoá: <code>{esc(info['store'])}</code>",
+            f"XSRF: {'✅' if info['xsrf'] else '❌'} · "
+            f"GitHub: {'✅ đã đồng bộ' if info['synced'] else '⏳ chưa đẩy'}",
+            f"• File dán cookie: <code>{esc(info['cookie_file'])}</code>",
+            f"• Kho đồng bộ: <code>{esc(info['store'])}</code> (nguyên văn, repo private)",
             "",
-            "Lệnh: <code>/web2api start|stop|restart|refresh|pull|push</code>",
+            "Lệnh: <code>/web2api start|stop|restart|refresh|pull|push|auto</code>",
+            "Dán cookie mới: <code>/web2api import __Secure-1PSID=...; SAPISID=...</code>",
         ]
         await msg.reply_text("\n".join(lines), parse_mode=HTML)
         return
     if not is_owner(update.effective_user.id):
         await msg.reply_text("🔒 Chỉ chủ bot được điều khiển Web2API.")
+        return
+    if action in ("import", "cookie", "set"):
+        text = " ".join(context.args[1:]).strip()
+        if not text:
+            await msg.reply_text("Dùng: <code>/web2api import &lt;chuỗi cookie&gt;</code>",
+                                 parse_mode=HTML)
+            return
+        try:
+            await msg.delete()                     # tin nhắn chứa cookie — xoá ngay
+        except Exception:
+            pass
+        note = await msg.chat.send_message("⏳ Đang nạp cookie…")
+        try:
+            ok, detail = await asyncio.to_thread(web2api.import_text, text)
+            await note.edit_text(("✅ " if ok else "❌ ") + esc(str(detail))[:3800])
+        except Exception as e:
+            await note.edit_text(f"❌ {esc(str(e))}"[:3800])
         return
     note = await msg.reply_text("⏳ Đang xử lý…")
     try:
@@ -6168,11 +6277,14 @@ async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ok, detail = await asyncio.to_thread(web2api.pull_secrets)
             if ok:
                 await asyncio.to_thread(web2api.refresh_xsrf, True)
-                detail = "đã tải cookie + làm mới XSRF"
+                await asyncio.to_thread(web2api.ensure_server, False)
+                detail = "đã tải cookie + làm mới XSRF + bật server"
         elif action == "push":
             ok, detail = await asyncio.to_thread(web2api.push_secrets)
+        elif action in ("auto", "sync"):
+            ok, detail = await asyncio.to_thread(web2api.auto, False)
         else:
-            await note.edit_text("Dùng: <code>/web2api start|stop|restart|refresh|pull|push</code>",
+            await note.edit_text("Dùng: <code>/web2api start|stop|restart|refresh|pull|push|auto</code>",
                                  parse_mode=HTML)
             return
         await note.edit_text(("✅ " if ok else "❌ ") + esc(str(detail))[:3800])
@@ -6414,8 +6526,9 @@ async def post_init(app) -> None:
         asyncio.create_task(_scheduler_loop(app))
     asyncio.create_task(install_self_watch())
     if WEB2API_FALLBACK and web2api is not None:
-        # Bật sẵn server nội bộ để lúc hết hạn mức không phải chờ khởi động.
-        asyncio.create_task(asyncio.to_thread(web2api.ensure_server))
+        # Giữ server + cookie luôn mới: máy mới tự kéo cookie trên GitHub, dán
+        # cookie vào file là tự nạp lại và chạy — không cần lệnh start.
+        asyncio.create_task(_web2api_loop())
     if github_token():
         asyncio.create_task(asyncio.to_thread(_startup_github))
     if owner_id():

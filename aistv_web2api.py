@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AI STV - Gemini Web2API: server nội bộ + đồng bộ cookie mã hoá.
+"""AI STV - Gemini Web2API: server nội bộ + đồng bộ cookie dạng chữ.
 
 Vì sao có file này
 ------------------
-Khi model chính (OpenCode / DeepSeek...) hết hạn mức request, agent tự chuyển
-sang một server Gemini Web2API chạy ngay trên máy chủ của mình. Server đó dùng
-cookie tài khoản Google (Gemini Web) nên KHÔNG cần API key trả phí.
+Khi model chính (OpenCode / DeepSeek...) hết hạn mức request hoặc lỗi server,
+agent tự chuyển sang một server Gemini Web2API chạy ngay trên máy chủ của mình.
+Server đó dùng cookie tài khoản Google (Gemini Web) nên KHÔNG cần API key trả phí.
 
-Cookie là bí mật sống (ai có cookie = vào được tài khoản). Vì vậy:
-  • cookie chỉ nằm trong ~/.config/aistv/web2api/ (không commit);
-  • bản sao lưu trên GitHub được mã hoá AES-256-GCM bằng passphrase;
-  • đổi máy chỉ cần `python aistv_web2api.py pull`.
+Cookie lưu thẳng dạng chữ (KHÔNG mã hoá) để dễ sửa:
+  • file đang dùng: ~/.config/aistv/web2api/cookie.txt (header `name=value; ...`);
+  • bản sao trên GitHub: repo private, `web2api/cookie.txt` — sửa trực tiếp trên
+    web cũng được, máy khác chạy `pull`/`auto` là có ngay;
+  • dán cookie mới vào cookie.txt là server tự nạp lại và chạy, không cần `start`.
+
+Cookie là bí mật sống (ai có cookie = vào được tài khoản). Chỉ đồng bộ vào
+repo PRIVATE, đừng commit vào repo public.
 
 Lệnh thường dùng
 ----------------
   python aistv_web2api.py setup              # tải server + tạo config + cài httpx
   python aistv_web2api.py import cookies.json  # nạp cookie export từ trình duyệt
+  python aistv_web2api.py auto               # kéo cookie mới + bật server (1 lệnh)
   python aistv_web2api.py refresh            # lấy lại XSRF token (SNlM0e)
-  python aistv_web2api.py push               # mã hoá + đẩy lên repo private
-  python aistv_web2api.py pull               # máy mới: tải + giải mã cookie
+  python aistv_web2api.py push               # đẩy cookie nguyên văn lên repo private
+  python aistv_web2api.py pull               # máy mới: tải cookie từ repo private
   python aistv_web2api.py start | stop | status | logs
   python aistv_web2api.py test ["câu hỏi"]   # gọi thử 1 request
   python aistv_web2api.py doctor             # kiểm tra tổng thể, không in bí mật
@@ -53,7 +58,7 @@ except Exception:
 REPO_URL = "https://github.com/Sophomoresty/gemini-web2api.git"
 ZIP_URL = "https://codeload.github.com/Sophomoresty/gemini-web2api/zip/refs/heads/main"
 SECRETS_REPO = "Phucvncom55/AISTV-secrets"
-SECRETS_PATH = "web2api/cookies.enc"
+SECRETS_PATH = "web2api/cookie.txt"          # cookie nguyên văn, sửa được trên GitHub
 DEFAULT_MODEL = "gemini-3.6-flash"
 DEFAULT_KEY = "sk-gemini"
 SAPI_SID_NAMES = ("SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID")
@@ -105,7 +110,9 @@ def app_script() -> Path:
 
 
 def cookie_path() -> Path:
-    return runtime_dir() / "cookie.txt"
+    """File cookie đang dùng; đổi bằng WEB2API_COOKIE_FILE nếu muốn để chỗ khác."""
+    override = (value("WEB2API_COOKIE_FILE") or "").strip()
+    return Path(override).expanduser() if override else runtime_dir() / "cookie.txt"
 
 
 def export_path() -> Path:
@@ -251,14 +258,22 @@ def cookie_header() -> str:
     if cookie_path().exists():
         raw = cookie_path().read_text("utf-8").strip()
         if raw:
+            if raw[0] in "[{" or "\t" in raw:   # dán JSON / Netscape vào cookie.txt
+                try:
+                    cookies = parse_cookie_input(raw)
+                    if cookies:
+                        return _cookie_header(cookies)
+                except Exception:
+                    pass
             return raw
     return _cookie_header(load_cookies())
 
 
 def cleanup_cookie_header(raw: str) -> str:
     """Chuẩn hoá header cookie: bỏ xuống dòng, giữ đúng các cặp name=value."""
-    pairs = [p.strip() for p in (raw or "").replace("\r", "").replace("\n", "").split(";")
-             if "=" in p]
+    raw = (raw or "").replace("\r", "")
+    raw = re.sub(r"(?im)^\s*cookie:\s*", "", raw)      # dán nguyên dòng "Cookie: ..."
+    pairs = [p.strip() for p in raw.replace("\n", "; ").split(";") if "=" in p]
     return "; ".join(pairs)
 
 
@@ -302,73 +317,24 @@ def refresh_xsrf(quiet: bool = False) -> tuple:
 
 
 # ────────────────────────────────────────────────────────────────────
-# Mã hoá AES-256-GCM + đồng bộ repo private
+# Đồng bộ cookie nguyên văn (không mã hoá) + phát hiện thay đổi
 # ────────────────────────────────────────────────────────────────────
-def _crypto():
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
-        return AESGCM, Scrypt
-    except Exception as exc:              # pragma: no cover
-        raise RuntimeError(
-            "Thiếu thư viện cryptography — chạy: python -m pip install cryptography"
-        ) from exc
+def cookie_sig(header: str = "") -> str:
+    """Dấu vân tay ngắn của cookie để biết file vừa được dán mới."""
+    import hashlib
+    raw = cleanup_cookie_header(header or cookie_header())
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16] if raw else ""
 
 
-def passphrase(create: bool = False) -> str:
-    """Passphrase mã hoá cookie: env → config.env → file cục bộ (tạo nếu cần)."""
-    mod = _config_module()
-    for name in ("WEB2API_COOKIE_PASSPHRASE", "AISTV_COOKIE_PASSPHRASE"):
-        raw = value(name)
-        if raw:
-            return raw
-    local = runtime_dir() / "passphrase.txt"
-    if local.exists():
-        raw = local.read_text("utf-8").strip()
-        if raw:
-            return raw
-    if not create:
-        return ""
-    import secrets
-    raw = secrets.token_urlsafe(24)
-    local.write_text(raw, "utf-8")
-    try:
-        local.chmod(0o600)
-    except Exception:
-        pass
-    if mod is not None:
-        try:
-            mod.set_value("WEB2API_COOKIE_PASSPHRASE", raw)
-        except Exception:
-            pass
-    return raw
+def _state_update(**fields) -> dict:
+    state = _read_json(state_path(), {}) or {}
+    state.update(fields)
+    _write_json(state_path(), state)
+    return state
 
 
-def encrypt_blob(plain: bytes, phrase: str) -> dict:
-    AESGCM, Scrypt = _crypto()
-    salt = os.urandom(16)
-    nonce = os.urandom(12)
-    key = Scrypt(salt=salt, length=32, n=2 ** 14, r=8, p=1).derive(phrase.encode("utf-8"))
-    data = AESGCM(key).encrypt(nonce, plain, b"aistv-web2api-v1")
-    return {
-        "v": 1,
-        "alg": "AES-256-GCM",
-        "kdf": "scrypt",
-        "salt": base64.b64encode(salt).decode(),
-        "nonce": base64.b64encode(nonce).decode(),
-        "data": base64.b64encode(data).decode(),
-    }
-
-
-def decrypt_blob(blob: dict, phrase: str) -> bytes:
-    AESGCM, Scrypt = _crypto()
-    if int(blob.get("v") or 0) != 1:
-        raise RuntimeError("định dạng blob không hỗ trợ")
-    salt = base64.b64decode(blob["salt"])
-    nonce = base64.b64decode(blob["nonce"])
-    data = base64.b64decode(blob["data"])
-    key = Scrypt(salt=salt, length=32, n=2 ** 14, r=8, p=1).derive(phrase.encode("utf-8"))
-    return AESGCM(key).decrypt(nonce, data, b"aistv-web2api-v1")
+def _autosync() -> bool:
+    return value("WEB2API_AUTOSYNC", "1").lower() not in ("0", "off", "false", "no")
 
 
 def _gh_tokens() -> list:
@@ -400,13 +366,6 @@ def _remote_repo() -> tuple:
     repo = (value("WEB2API_SECRETS_REPO", "") or SECRETS_REPO).strip()
     path = (value("WEB2API_SECRETS_PATH", "") or SECRETS_PATH).strip().lstrip("/")
     return repo, path
-
-
-def _key_path() -> str:
-    """Cùng thư mục với blob cookie, tên `passphrase`."""
-    _repo, path = _remote_repo()
-    prefix = path.rsplit("/", 1)[0] if "/" in path else ""
-    return (prefix + "/" if prefix else "") + "passphrase"
 
 
 def _gh_put_text(path: str, text: str, message: str) -> tuple:
@@ -455,124 +414,157 @@ def _gh_get_text(path: str) -> str:
     return ""
 
 
-def backup_passphrase(phrase: str) -> tuple:
-    """Lưu passphrase vào repo private để máy mới `pull` được ngay.
-
-    Đặt WEB2API_KEY_BACKUP=0 nếu muốn giữ khoá ngoài GitHub (an toàn hơn,
-    nhưng máy mới phải nhập tay).
-    """
-    if value("WEB2API_KEY_BACKUP", "1").lower() in ("0", "off", "false", "no"):
-        return False, "đã tắt backup khoá"
-    return _gh_put_text(_key_path(), phrase + "\n",
-                        "chore(web2api): backup passphrase ma hoa")
-
-
-def restore_passphrase() -> str:
-    raw = _gh_get_text(_key_path()).strip()
-    if not raw:
-        return ""
-    (runtime_dir() / "passphrase.txt").write_text(raw, "utf-8")
-    mod = _config_module()
-    if mod is not None:
-        try:
-            mod.set_value("WEB2API_COOKIE_PASSPHRASE", raw)
-        except Exception:
-            pass
-    return raw
-
-
 def push_secrets(quiet: bool = False) -> tuple:
-    """Mã hoá cookie + xsrf rồi ghi đè file trên repo private."""
-    cookies = load_cookies()
-    if not cookies:
-        return False, "chưa có cookie — chạy `import` trước"
-    phrase = passphrase(create=True)
-    if not phrase:
-        return False, "chưa có passphrase"
-    cfg = _read_json(config_path(), {})
-    plain = json.dumps({
-        "version": 1,
-        "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "cookies": cookies,
-        "xsrf_token": cfg.get("xsrf_token"),
-        "auth_user": cfg.get("auth_user"),
-    }, ensure_ascii=False).encode("utf-8")
-    blob = encrypt_blob(plain, phrase)
-    blob["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
+    """Đẩy cookie NGUYÊN VĂN lên repo private (một dòng, sửa được trên GitHub)."""
+    header = cleanup_cookie_header(cookie_header())
+    if not header:
+        return False, "chưa có cookie — dán vào cookie.txt hoặc chạy `import` trước"
     repo, path = _remote_repo()
-    tokens = _gh_tokens()
-    if not tokens:
-        return False, "chưa có token GitHub (gh auth login hoặc AISTV_CONFIG_TOKEN)"
-    last = ""
-    for source, token in tokens:
-        if not token:
-            continue
-        url = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}"
-        sha = ""
-        try:
-            status, text = _gh_request(url, token)
-            if status == 200:
-                sha = json.loads(text).get("sha") or ""
-        except urllib.error.HTTPError as exc:
-            if exc.code not in (404, 401, 403):
-                last = f"HTTP {exc.code}"
-                continue
-        payload = {
-            "message": "chore(web2api): cap nhat cookie ma hoa",
-            "content": base64.b64encode(json.dumps(blob, indent=2).encode()).decode(),
-        }
-        if sha:
-            payload["sha"] = sha
-        try:
-            _gh_request(url, token, "PUT", payload)
-            if not quiet:
-                print(f"Đã đẩy cookie mã hoá → {repo}/{path} ({source})")
-            backup_passphrase(phrase)
-            return True, f"{repo}/{path}"
-        except Exception as exc:
-            last = f"{type(exc).__name__}: {exc}"
-    return False, last or "không đẩy được"
+    ok, msg = _gh_put_text(path, header + "\n",
+                           "chore(web2api): cap nhat cookie")
+    if not ok:
+        return False, msg
+    _state_update(synced_sig=cookie_sig(header), synced_at=time.time())
+    if not quiet:
+        print(f"Đã đẩy cookie → {repo}/{path}")
+    return True, f"{repo}/{path}"
 
 
 def pull_secrets(quiet: bool = False) -> tuple:
-    """Tải blob từ repo private, giải mã, ghi cookie.txt + config."""
+    """Tải cookie nguyên văn từ repo private, ghi cookie.txt + cookies.json."""
     repo, path = _remote_repo()
-    tokens = _gh_tokens()
-    if not tokens:
+    if not _gh_tokens():
+        return False, "chưa có token GitHub (gh auth login hoặc AISTV_CONFIG_TOKEN)"
+    text = _gh_get_text(path)
+    if not text.strip():
+        return False, f"không tải được {repo}/{path}"
+    try:
+        cookies = parse_cookie_input(text)
+    except Exception as exc:
+        return False, f"file trên GitHub không đọc được: {exc}"
+    if not cookies:
+        return False, "file trên GitHub không có cookie hợp lệ"
+    header = save_cookies(cookies)
+    sig = cookie_sig(header)
+    _state_update(cookie_sig=sig, synced_sig=sig, pulled_at=time.time())
+    if not quiet:
+        print(f"Đã tải {len(cookies)} cookie từ {repo}/{path}")
+    return True, "ok"
+
+
+def pull_if_safe(quiet: bool = True) -> tuple:
+    """Kéo bản trên GitHub nếu máy này không có sửa đổi chưa đẩy."""
+    if not enabled():
+        return False, "đã tắt"
+    repo, path = _remote_repo()
+    if not _gh_tokens():
         return False, "chưa có token GitHub"
-    phrase = passphrase(create=False)
-    if not phrase:
-        phrase = restore_passphrase()
-    if not phrase:
-        return False, "chưa có passphrase (đặt WEB2API_COOKIE_PASSPHRASE)"
-    url = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}"
-    last = ""
-    for source, token in tokens:
-        if not token:
-            continue
-        try:
-            status, text = _gh_request(url, token, accept="application/vnd.github.raw")
-            if status != 200:
-                last = f"HTTP {status}"
-                continue
-            blob = json.loads(text)
-            plain = json.loads(decrypt_blob(blob, phrase).decode("utf-8"))
-        except Exception as exc:
-            last = f"{type(exc).__name__}: {exc}"
-            continue
-        save_cookies(plain.get("cookies") or [])
-        cfg = _read_json(config_path(), {})
-        if plain.get("xsrf_token"):
-            cfg["xsrf_token"] = plain["xsrf_token"]
-        cfg["auth_user"] = plain.get("auth_user")
-        cfg.setdefault("cookie_file", str(cookie_path()))
-        _write_json(config_path(), cfg)
+    text = _gh_get_text(path)
+    if not text.strip():
+        return False, f"chưa có {repo}/{path}"
+    remote = parse_cookie_input(text)
+    if not remote:
+        return False, "bản trên GitHub không có cookie hợp lệ"
+    remote_header = _cookie_header(remote)
+    rsig = cookie_sig(remote_header)
+    local_header = cleanup_cookie_header(cookie_header())
+    lsig = cookie_sig(local_header)
+    if rsig == lsig:
+        return False, "đã mới nhất"
+    state = _read_json(state_path(), {}) or {}
+    if local_header and lsig != (state.get("synced_sig") or ""):
+        return False, "cookie máy này có thay đổi chưa đẩy — giữ bản local"
+    save_cookies(remote)
+    _state_update(cookie_sig=rsig, synced_sig=rsig, pulled_at=time.time())
+    refresh_xsrf(quiet=True)
+    if health():
+        _reload_server()
+    if not quiet:
+        print(f"Đã lấy cookie mới từ {repo}/{path}")
+    return True, "đã lấy cookie mới từ GitHub"
+
+
+def sync_if_changed(quiet: bool = True, push: bool = None) -> tuple:
+    """Nạp cookie vừa dán trong cookie.txt; tự làm mới XSRF và chạy lại server."""
+    if not enabled():
+        return False, "đã tắt"
+    push = _autosync() if push is None else push
+    header = cleanup_cookie_header(cookie_header())
+    if not header:
+        state = _read_json(state_path(), {}) or {}
+        if time.time() - float(state.get("pull_try") or 0) < 60:
+            return False, f"chưa có cookie — dán vào {cookie_path()}"
+        _state_update(pull_try=time.time())
+        ok, _msg = pull_secrets(quiet=True)
+        if not ok:
+            return False, f"chưa có cookie — dán vào {cookie_path()}"
+        return True, "đã tải cookie từ GitHub"
+    sig = cookie_sig(header)
+    state = _read_json(state_path(), {}) or {}
+    if sig == state.get("cookie_sig"):
+        # Lần trước đẩy GitHub lỗi (mất mạng/chưa có token) → thử lại, đừng bỏ qua.
+        if push and sig != (state.get("synced_sig") or "") \
+                and time.time() - float(state.get("push_try") or 0) > 60:
+            _state_update(push_try=time.time())
+            pushed, _pmsg = push_secrets(quiet=True)
+            if pushed:
+                return True, "đã đẩy cookie lên GitHub"
+        return False, "không đổi"
+    cookies = parse_cookie_input(header)
+    if cookies:
+        header = save_cookies(cookies)
+        sig = cookie_sig(header)
+    ok, xsrf_msg = refresh_xsrf(quiet=True)
+    _state_update(cookie_sig=sig, cookie_changed=time.time(), xsrf_ok=bool(ok))
+    if health():
+        _reload_server()
+    if push and sig != (state.get("synced_sig") or ""):
+        pushed, pmsg = push_secrets(quiet=True)
         if not quiet:
-            print(f"Đã tải cookie từ {repo}/{path} ({source}) — "
-                  f"cập nhật {plain.get('updated') or '?'}")
-        return True, "ok"
-    return False, last or "không tải được"
+            print("Đồng bộ GitHub: " + ("OK" if pushed else pmsg))
+    if not quiet:
+        print("Đã nạp cookie mới" + ("" if ok else f" (XSRF lỗi: {xsrf_msg})"))
+    return True, "đã nạp cookie mới"
+
+
+def auto(quiet: bool = True) -> tuple:
+    """Một lệnh cho máy mới: kéo cookie, nạp cookie vừa dán, bật server."""
+    _pulled, pull_msg = pull_if_safe(quiet=True)
+    _changed, change_msg = sync_if_changed(quiet=True)
+    ok = ensure_server(quiet=True)
+    detail = ("server sẵn sàng" if ok else
+              (change_msg if _changed else pull_msg if _pulled
+               else "chưa có cookie hoặc server không khởi động được"))
+    if not quiet:
+        print(detail)
+    return ok, detail
+
+
+def import_text(text: str, push: bool = None) -> tuple:
+    """Nạp cookie từ chuỗi (header/JSON/Netscape), chạy server + đồng bộ GitHub."""
+    try:
+        cookies = parse_cookie_input(text)
+    except Exception as exc:
+        return False, f"không đọc được cookie: {exc}"
+    if not cookies:
+        return False, "không tìm thấy cookie nào"
+    header = save_cookies(cookies)
+    sig = cookie_sig(header)
+    _state_update(cookie_sig=sig, cookie_changed=time.time())
+    ok_xsrf, xsrf_msg = refresh_xsrf(quiet=True)
+    started, start_msg = start(quiet=True)
+    push = _autosync() if push is None else push
+    sync_msg = ""
+    if push:
+        pushed, pmsg = push_secrets(quiet=True)
+        sync_msg = " · GitHub: " + ("OK" if pushed else pmsg)
+    detail = f"đã nạp {len(cookies)} cookie"
+    if not ok_xsrf:
+        detail += f" · XSRF lỗi: {xsrf_msg}"
+    if not started:
+        detail += f" · server: {start_msg}"
+    detail += sync_msg
+    return bool(ok_xsrf and started), detail
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -598,8 +590,13 @@ def write_config(force: bool = False) -> Path:
     }
     for key, val in defaults.items():
         cfg.setdefault(key, val)
+    # Các giá trị dưới đây luôn theo môi trường hiện tại (đổi URL/API key có hiệu lực ngay).
+    cfg["port"] = defaults["port"]
+    cfg["host"] = "127.0.0.1"
     cfg["cookie_file"] = str(cookie_path())
     cfg["api_keys"] = [api_key()]
+    cfg["default_model"] = default_model()
+    cfg["proxy"] = defaults["proxy"]
     _write_json(config_path(), cfg)
     return config_path()
 
@@ -708,13 +705,13 @@ def start(wait: float = 25.0, quiet: bool = False) -> tuple:
         return True, "đã chạy"
     if not is_local():
         return False, f"server từ xa không phản hồi: {base_url()}"
+    if not cookie_header():
+        return False, f"chưa có cookie — dán vào {cookie_path()}"
     if not app_script().exists():
         ok, msg = setup()
         if not ok:
             return False, msg
     write_config()
-    if not cookie_header():
-        return False, "chưa có cookie (aistv_web2api.py import <file>)"
     if not _read_json(config_path(), {}).get("xsrf_token"):
         refresh_xsrf(quiet=True)
     log = open(log_path(), "ab")
@@ -729,8 +726,7 @@ def start(wait: float = 25.0, quiet: bool = False) -> tuple:
         [_python(), str(app_script()), "--config", str(config_path())],
         cwd=str(app_dir()), stdin=subprocess.DEVNULL, stdout=log, stderr=log,
         **kwargs)
-    _write_json(state_path(), {"pid": proc.pid, "started": time.time(),
-                               "url": base_url()})
+    _state_update(pid=proc.pid, started=time.time(), url=base_url())
     deadline = time.time() + max(3, wait)
     while time.time() < deadline:
         if health():
@@ -756,20 +752,24 @@ def stop() -> tuple:
     except Exception as exc:
         return False, str(exc)
     try:
-        state_path().unlink()
+        _state_update(pid=0, stopped=time.time())
     except Exception:
         pass
     return True, "đã dừng"
 
 
 def ensure_server(quiet: bool = True) -> bool:
-    """Bảo đảm server sẵn sàng; dùng từ bot/watch trước khi fallback."""
+    """Bảo đảm server sẵn sàng; dùng từ bot/watch trước khi fallback.
+
+    Tự kéo cookie trên GitHub (máy mới), tự nạp cookie vừa dán vào cookie.txt
+    và tự bật server — không cần chạy `start`.
+    """
     if not enabled():
         return False
-    if is_local() and cookie_header() and _xsrf_stale():
-        ok, _ = refresh_xsrf(quiet=True)
-        if ok:
-            _reload_server()              # server đọc config lúc khởi động
+    try:
+        sync_if_changed(quiet=True)
+    except Exception:
+        pass
     if health():
         return True
     if not is_local() or not autostart():
@@ -889,32 +889,21 @@ def generate(parts: list, model: str = "", timeout: float = 240,
 # ────────────────────────────────────────────────────────────────────
 # Lệnh
 # ────────────────────────────────────────────────────────────────────
-def cmd_import(path: str, push: bool = False) -> int:
-    raw = Path(path).expanduser().read_text("utf-8", "replace")
+def cmd_import(path: str, push: bool = None) -> int:
     try:
-        cookies = parse_cookie_input(raw)
+        raw = Path(path).expanduser().read_text("utf-8", "replace")
     except Exception as exc:
         print(f"Không đọc được file: {exc}")
         return 1
-    if not cookies:
-        print("Không tìm thấy cookie nào trong file.")
-        return 1
-    header = save_cookies(cookies)
-    print(f"Đã nạp {len(cookies)} cookie ({len(header)} ký tự header).")
-    ok, msg = refresh_xsrf()
-    if not ok:
-        print(f"Cảnh báo XSRF: {msg}")
-    else:
-        _reload_server()
-    if push and ok:
-        pushed, pmsg = push_secrets()
-        print("Đồng bộ: " + ("OK → " + pmsg if pushed else "lỗi — " + pmsg))
+    ok, detail = import_text(raw, push=push)
+    print(("Đã nạp: " if ok else "Lỗi: ") + detail)
     return 0 if ok else 2
 
 
 def status_report() -> dict:
     """Thông tin ngắn cho bot (không in bí mật)."""
     cfg = _read_json(config_path(), {})
+    state = _read_json(state_path(), {}) or {}
     return {
         "enabled": enabled(),
         "url": base_url(),
@@ -923,7 +912,8 @@ def status_report() -> dict:
         "cookie": bool(cookie_header()),
         "xsrf": bool(cfg.get("xsrf_token")),
         "model": default_model(),
-        "passphrase": bool(passphrase(False)),
+        "synced": bool(state.get("cookie_sig")) and state.get("cookie_sig") == state.get("synced_sig"),
+        "cookie_file": str(cookie_path()),
         "store": "/".join(_remote_repo()),
     }
 
@@ -931,14 +921,17 @@ def status_report() -> dict:
 def cmd_doctor() -> int:
     print("== Gemini Web2API ==")
     print(f"Runtime      : {runtime_dir()}")
+    print(f"Cookie file  : {cookie_path()}")
     print(f"Server       : {base_url()} ({'local' if is_local() else 'remote'})")
     print(f"Đang chạy    : {'có' if health() else 'không'}")
     cfg = _read_json(config_path(), {})
+    state = _read_json(state_path(), {}) or {}
     header = cookie_header()
     print(f"Cookie       : {'có' if header else 'chưa có'} ({len(header)} ký tự)")
     print(f"XSRF token   : {'có' if cfg.get('xsrf_token') else 'chưa có'}")
     print(f"Model mặc định: {default_model()}")
-    print(f"Passphrase   : {'có' if passphrase(False) else 'chưa có'}")
+    print(f"Đồng bộ      : {'✅' if header and state.get('cookie_sig') and state.get('cookie_sig') == state.get('synced_sig') else '⏳ chưa đẩy'}"
+          f" ({'nguyên văn, không mã hoá' if header else 'chưa có cookie'})")
     repo, path = _remote_repo()
     print(f"Repo bí mật  : {repo}/{path}")
     print(f"Token GitHub : {', '.join(s for s, t in _gh_tokens() if t) or 'không có'}")
@@ -958,9 +951,30 @@ def cmd_test(prompt: str) -> int:
     return 0 if text else 1
 
 
+def cmd_watch(interval: float = 5.0) -> int:
+    """Theo dõi cookie.txt: dán cookie mới là tự nạp lại + chạy server."""
+    print(f"Đang theo dõi {cookie_path()} — dán cookie mới là tự chạy (Ctrl+C để dừng).")
+    auto(quiet=False)
+    last_remote = time.time()
+    try:
+        while True:
+            time.sleep(max(2, interval))
+            changed, detail = sync_if_changed(quiet=False)
+            if changed:
+                ensure_server()
+            if time.time() - last_remote > 120:
+                pull_if_safe(quiet=True)
+                last_remote = time.time()
+            if not health():
+                ensure_server()
+    except KeyboardInterrupt:
+        print("Đã dừng theo dõi.")
+        return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Gemini Web2API nội bộ + đồng bộ cookie mã hoá cho AISTV")
+        description="Gemini Web2API nội bộ + đồng bộ cookie nguyên văn cho AISTV")
     sub = parser.add_subparsers(dest="cmd")
 
     p_setup = sub.add_parser("setup", help="tải server + tạo config")
@@ -968,15 +982,16 @@ def main(argv=None) -> int:
 
     p_import = sub.add_parser("import", help="nạp cookie export từ trình duyệt")
     p_import.add_argument("file")
-    p_import.add_argument("--push", action="store_true", help="đẩy bản mã hoá lên GitHub")
+    p_import.add_argument("--push", action="store_true", help="(mặc định) đẩy cookie lên GitHub")
+    p_import.add_argument("--no-push", action="store_true", help="không đẩy lên GitHub")
 
     p_refresh = sub.add_parser("refresh", help="lấy lại XSRF token")
     p_refresh.add_argument("--push", action="store_true")
 
-    sub.add_parser("push", help="mã hoá + đẩy cookie lên repo private")
-    sub.add_parser("pull", help="tải + giải mã cookie từ repo private")
-    p_pass = sub.add_parser("passphrase", help="xem / tạo lại passphrase mã hoá")
-    p_pass.add_argument("--new", action="store_true", help="tạo mới (nhớ push lại)")
+    sub.add_parser("push", help="đẩy cookie nguyên văn lên repo private")
+    sub.add_parser("pull", help="tải cookie từ repo private")
+    sub.add_parser("auto", help="kéo cookie + nạp cookie mới + bật server")
+    sub.add_parser("watch", help="theo dõi cookie.txt, dán mới là tự chạy")
     sub.add_parser("start", help="chạy server nền")
     sub.add_parser("stop", help="dừng server")
     sub.add_parser("restart", help="chạy lại server")
@@ -995,7 +1010,13 @@ def main(argv=None) -> int:
             print(msg)
             return 0 if ok else 1
         if cmd == "import":
-            return cmd_import(args.file, push=args.push)
+            push = False if args.no_push else None
+            return cmd_import(args.file, push=push)
+        if cmd == "auto":
+            ok, msg = auto(quiet=False)
+            return 0 if ok else 2
+        if cmd == "watch":
+            return cmd_watch()
         if cmd == "refresh":
             ok, msg = refresh_xsrf()
             print(msg)
@@ -1014,25 +1035,8 @@ def main(argv=None) -> int:
             print(("Đã tải ← " if ok else "Lỗi: ") + msg)
             if ok:
                 refresh_xsrf()
-                _reload_server()
+                ensure_server(quiet=False)
             return 0 if ok else 1
-        if cmd == "passphrase":
-            if args.new:
-                import secrets
-                phrase = secrets.token_urlsafe(24)
-                (runtime_dir() / "passphrase.txt").write_text(phrase, "utf-8")
-                mod = _config_module()
-                if mod is not None:
-                    try:
-                        mod.set_value("WEB2API_COOKIE_PASSPHRASE", phrase)
-                    except Exception:
-                        pass
-                print(phrase)
-                print("Đã đổi passphrase — chạy `push` để mã hoá lại bản backup.")
-                return 0
-            phrase = passphrase(False)
-            print(phrase if phrase else "(chưa có passphrase — chạy `push` để tạo)")
-            return 0 if phrase else 1
         if cmd == "start":
             ok, msg = start(quiet=False)
             print(msg)
@@ -1059,11 +1063,14 @@ def main(argv=None) -> int:
             return cmd_test(args.prompt)
         # status
         cfg = _read_json(config_path(), {})
+        state = _read_json(state_path(), {}) or {}
         print(f"Web2API: {'ON' if enabled() else 'OFF'} · {base_url()} · "
               f"{'đang chạy' if health() else 'không chạy'}")
         print(f"Cookie : {'có' if cookie_header() else 'chưa có'} · "
               f"XSRF: {'có' if cfg.get('xsrf_token') else 'chưa có'} · "
               f"model: {default_model()}")
+        print(f"File   : {cookie_path()} · "
+              f"GitHub: {'đã đồng bộ' if cookie_header() and state.get('cookie_sig') and state.get('cookie_sig') == state.get('synced_sig') else 'chưa đẩy'}")
         return 0
     except RuntimeError as exc:
         print(f"Lỗi: {exc}")

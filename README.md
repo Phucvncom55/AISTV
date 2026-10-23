@@ -520,9 +520,10 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `WATCH_GEMINI_FALLBACKS` | `gemini-3.7-flash,gemini-3.5-flash` | Model dự phòng khi model chính lỗi/hết hạn mức |
 | `WATCH_GEMINI_THINKING` | `low` | Mức suy nghĩ khi đọc ảnh/video: `low` (nhanh) hoặc `high` (kỹ hơn) |
 | `OPENCODE_MODEL` | `opencode/deepseek-v4.1-flash-free` | Model chính của agent (DeepSeek v4.1); đổi trực tiếp bằng `/model` |
-| `WEB2API_FALLBACK` | `1` | `1` = khi model chính hết hạn mức (429/hết token) tự chuyển sang Gemini Web2API nội bộ |
+| `WEB2API_FALLBACK` | `1` | `1` = khi model chính hết hạn mức (429/hết token) hoặc lỗi server/UnknownError tự chuyển sang Gemini Web2API nội bộ |
 | `WEB2API_URL` / `WEB2API_MODEL` | `http://127.0.0.1:8081` / `gemini-3.6-flash` | Server + model dự phòng |
-| `WEB2API_COOKIE_PASSPHRASE` | trống | Khoá mã hoá cookie khi backup lên repo private (`python aistv_web2api.py pull` ở máy mới) |
+| `WEB2API_COOKIE_FILE` | `~/.config/aistv/web2api/cookie.txt` | File dán cookie mới; dán vào là server tự nạp lại |
+| `WEB2API_AUTOSYNC` | `1` | `1` = tự kéo/đẩy cookie nguyên văn với repo private |
 | `GEMINI_RPM` / `GEMINI_RPD` | `10` / `1500` | Tự giữ nhịp request/phút và request/ngày |
 | `AISTV_VISION_HANDOFF` | `1` | `1` = Gemini đọc → DeepSeek đối chiếu/hỏi lại → DeepSeek trả lời; `0` = Gemini trả lời trực tiếp |
 | `AISTV_VISION_FOLLOWUPS` | `2` | Số lần DeepSeek được hỏi lại Gemini (tool `ask_gemini`) cho mỗi ảnh/video |
@@ -544,17 +545,20 @@ Cấu hình nâng cao nằm ở đầu `aistv_bot.py` (model, timeout, số lị
 
 ### Dự phòng khi hết hạn mức (Gemini Web2API)
 
-Model chính hết token/429 → bot tự chạy lại bằng server Gemini Web2API ngay trên máy
-(không cần API key trả phí). Cookie Google được mã hoá AES-256-GCM và backup trong
-repo private, nên đổi máy chỉ cần `python aistv_web2api.py pull`.
+Model chính hết token/429 hoặc lỗi từ nhà cung cấp (`UnknownError`, 5xx) → bot tự chạy
+lại bằng server Gemini Web2API ngay trên máy (không cần API key trả phí). Cookie Google
+lưu **nguyên văn** trong `~/.config/aistv/web2api/cookie.txt` và backup ở repo private
+(`web2api/cookie.txt`), nên đổi máy chỉ cần chạy bot — hoặc `python aistv_web2api.py auto`.
 
 ```bash
-python aistv_web2api.py setup                       # lần đầu
-python aistv_web2api.py import cookies.json --push  # nạp cookie + backup
-python aistv_web2api.py doctor                      # kiểm tra
+python aistv_web2api.py auto             # kéo cookie + bật server, không cần start
+python aistv_web2api.py import cookies.json   # nạp cookie + tự chạy + tự đẩy GitHub
+python aistv_web2api.py doctor           # kiểm tra
 ```
 
-Chi tiết: [docs/WEB2API.md](docs/WEB2API.md). Trong chat: `/web2api`.
+Dán cookie mới (header `name=value; ...`) vào `cookie.txt` là server tự nạp lại và chạy.
+Trong chat: `/web2api` hoặc `/web2api import <chuỗi cookie>` (tin nhắn chứa cookie tự xoá).
+Chi tiết: [docs/WEB2API.md](docs/WEB2API.md).
 
 ## 6. Cấu trúc
 
@@ -570,7 +574,7 @@ AISTV/
 ├── aistv_skills.py   cài skill chuẩn Agent Skills từ GitHub/zip
 ├── aistv_github_docs.py  đọc README/docs, tìm trong tài liệu và mã GitHub
 ├── aistv_config.py   đồng bộ config/token dùng chung cho mọi runner (sync/check/get/set/doctor)
-├── aistv_web2api.py  dự phòng Gemini Web2API + đồng bộ cookie mã hoá (import/push/pull/start)
+├── aistv_web2api.py  dự phòng Gemini Web2API + đồng bộ cookie nguyên văn (auto/import/push/pull)
 ├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)
 ├── bootstrap.bat     như bootstrap.sh nhưng cho Windows (cmd thuần, khuyên dùng)
@@ -593,6 +597,7 @@ Dữ liệu chạy nằm ngoài repo tại `STV_HOME` (mặc định `~/stv_agen
 - Token chỉ đọc từ biến môi trường / Colab Secrets / `.env`; agent không nhìn thấy token (đã xoá khỏi môi trường tiến trình con).
 - `FULL_ACCESS = False` mặc định: agent chỉ ghi trong workspace và bị OpenCode chặn thao tác cần quyền.
 - Repo public **không chứa bí mật**; đừng commit `.env`.
+- Cookie Gemini Web2API lưu **nguyên văn** (không mã hoá) ở `~/.config/aistv/web2api/cookie.txt` và repo **private** `AISTV-secrets`. Ai có cookie vào được tài khoản Google — chỉ đồng bộ vào repo private, đừng dán vào chat công khai; lộ thì đăng xuất mọi thiết bị rồi export cookie mới.
 - **Firebase Rules:** mặc định bot chỉ lưu URL database, không nhúng API key. Nếu Rules đang `true` (mở), **ai biết URL cũng đọc/ghi/xoá được** — hãy siết Rules và chỉ cho phép đúng namespace `aistv/<bot id>`, hoặc bật `AISTV_FIREBASE_SECRET`. Không lưu dữ liệu nhạy cảm (mật khẩu, token) vào trí nhớ.
 - **Bí mật đồng bộ luôn được mã hoá trước khi gửi cloud** (PBKDF2 + HMAC-SHA256, khoá suy ra từ token bot), nên kể cả Rules mở thì token/API key cũng không đọc được nếu không có token bot. Hội thoại/trí nhớ thì vẫn là văn bản thô — đừng dán mật khẩu vào chat.
 
