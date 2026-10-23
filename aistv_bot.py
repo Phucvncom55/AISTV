@@ -676,6 +676,18 @@ def save_state() -> None:
     STATE_FILE.write_text(json.dumps(STATE, ensure_ascii=False, indent=2), "utf-8")
 
 
+def opencode_model() -> str:
+    """Chuỗi --model đúng cú pháp OpenCode: provider/model#variant.
+    Bản CLI hiện tại không có --variant; variant phải nằm trong --model."""
+    model = (STATE.get("model") or DEFAULT_MODEL).strip()
+    variant = (STATE.get("variant") or "").strip()
+    if variant.lower() in ("off", "auto", "default", "0"):
+        variant = ""
+    if variant and "#" not in model:
+        model = f"{model}#{variant}"
+    return model
+
+
 # Máy đã lỡ lưu model Gemini 3.8 Flash làm model chính → tự quay lại DeepSeek v4.1
 # (Gemini chỉ còn là mắt/tai đọc ảnh, xem video). Chỉ đổi một lần, tôn trọng /model của chủ bot.
 if (not os.getenv("OPENCODE_MODEL")
@@ -2584,10 +2596,8 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
     err_text = ""
     for attempt in range(retries + 1):
         via_stdin = attempt == 0
-        cmd = [OPENCODE_BIN, "run", "--dir", str(WORKSPACE), "--model", STATE["model"],
+        cmd = [OPENCODE_BIN, "run", "--model", opencode_model(),
                "--auto", "--thinking"]
-        if STATE.get("variant"):
-            cmd += ["--variant", STATE["variant"]]
         if via_stdin:
             cmd += ["--format", "json"]
         else:
@@ -2617,6 +2627,11 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
             CANCELLED.discard(chat_id)
             return False, "🛑 Đã huỷ tác vụ."
         text = clean_output(out)
+        if proc.returncode not in (0, None):
+            err_text = "\n".join(err_lines) or text
+            log.warning("OpenCode lỗi (lần %d, rc=%s): %s",
+                        attempt + 1, proc.returncode, err_text[-300:])
+            continue
         if text:
             return True, text
         err_text = "\n".join(err_lines)
@@ -5136,9 +5151,7 @@ async def ask_model_once(prompt: str, timeout: int = 300) -> tuple:
     env = os.environ.copy()
     env.pop("TELEGRAM_BOT_TOKEN", None)
     env.update(NO_COLOR="1", TERM="dumb")
-    cmd = [OPENCODE_BIN, "run", "--dir", str(WORKSPACE), "--model", STATE["model"], "--auto"]
-    if STATE.get("variant"):
-        cmd += ["--variant", STATE["variant"]]
+    cmd = [OPENCODE_BIN, "run", "--model", opencode_model(), "--auto"]
     cmd.append(prompt[:MAX_PROMPT_BYTES - 2000])
     try:
         p = await asyncio.to_thread(subprocess.run, cmd, cwd=str(WORKSPACE), env=env,
