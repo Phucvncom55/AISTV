@@ -1313,12 +1313,26 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
                 err = f"Gemini không trả lời{(' (' + feedback + ')') if feedback else ''}"
             errors.append(f"{model}: {err}")
             low = str(err).lower()
-            if "429" in str(err) or "resource exhausted" in low or "rate limit" in low:
+            code_match = re.search(r"\b(429|500|502|503|504)\b", str(err))
+            code = code_match.group(1) if code_match else ""
+            rate_limited = code == "429" or "resource exhausted" in low or "rate limit" in low
+            transient = code in ("500", "502", "503", "504") or any(
+                x in low for x in ("overloaded", "unavailable", "high demand",
+                                   "try again later", "temporarily"))
+            if rate_limited or transient:
                 if attempt < retries:
-                    delay = min(10 * (attempt + 1), max(1, int(deadline - time.monotonic()) - 5))
-                    ep(f"⏳ Gemini 429 — thử lại sau {delay}s ({model})…")
+                    if rate_limited:
+                        delay = min(10 * (attempt + 1),
+                                    max(1, int(deadline - time.monotonic()) - 5))
+                        tag = "429"
+                    else:
+                        delay = min(5 * (attempt + 1), 15)
+                        delay = max(1, min(delay, int(deadline - time.monotonic()) - 5))
+                        tag = code or "quá tải"
+                    ep(f"⏳ Gemini {tag} — thử lại sau {delay}s ({model})…")
                     time.sleep(delay)
                     continue
+                ep(f"↪︎ Gemini {code or 'tạm thời'} — thử model dự phòng…")
                 break
             if any(x in low for x in ("404", "not found", "not supported", "does not exist",
                                       "unsupported model", "invalid model", "permission denied")):
