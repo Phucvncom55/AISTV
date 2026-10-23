@@ -164,52 +164,38 @@ if ($scriptDir -and (Test-Path -LiteralPath (Join-Path $scriptDir "aistv_bot.py"
 
 Set-Location -LiteralPath $script:AppDir
 $script:CfgFile = Join-Path $(if ($env:AISTV_CONFIG_DIR) { $env:AISTV_CONFIG_DIR } else { Join-Path $UserHome ".config\aistv" }) "config.env"
+$script:FileEnv = @{}
+
 # Thu tu uu tien giong run.sh: .env cua repo truoc, config.env dung chung sau.
-foreach ($envVarsFile in @((Join-Path $script:AppDir ".env"), $script:CfgFile)) {
-    if (-not (Test-Path -LiteralPath $envVarsFile)) { continue }
-    foreach ($line in (Get-Content -LiteralPath $envVarsFile -Encoding UTF8)) {
-        $line = $line.TrimStart([char]0xFEFF)
-        if ($line -match "^\s*#" -or $line -notmatch "=") { continue }
-        $idx = $line.IndexOf("=")
-        $key = $line.Substring(0, $idx).Trim()
-        $value = $line.Substring($idx + 1).Trim().Trim('"').Trim("'")
-        if ($key -eq "TELEGRAM_BOT_TOKEN" -and -not $env:TELEGRAM_BOT_TOKEN) { $env:TELEGRAM_BOT_TOKEN = $value }
-        elseif ($key -eq "ALLOWED_USER_IDS" -and -not $env:ALLOWED_USER_IDS) { $env:ALLOWED_USER_IDS = $value }
-        elseif ($key -eq "GEMINI_API_KEY" -and -not $env:GEMINI_API_KEY) { $env:GEMINI_API_KEY = $value }
+function Import-EnvFiles {
+    foreach ($envVarsFile in @((Join-Path $script:AppDir ".env"), $script:CfgFile)) {
+        if (-not (Test-Path -LiteralPath $envVarsFile)) { continue }
+        foreach ($line in (Get-Content -LiteralPath $envVarsFile -Encoding UTF8)) {
+            $line = $line.TrimStart([char]0xFEFF)
+            if ($line -match "^\s*#" -or $line -notmatch "=") { continue }
+            $idx = $line.IndexOf("=")
+            $key = $line.Substring(0, $idx).Trim()
+            if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
+            if ($script:FileEnv.ContainsKey($key)) { continue }
+            if (Test-Path -LiteralPath "env:$key") { continue }
+            $value = $line.Substring($idx + 1).Trim().Trim('"').Trim("'")
+            if (-not $value) { continue }
+            Set-Item -Path "env:$key" -Value $value
+            $script:FileEnv[$key] = $true
+        }
     }
 }
 
-# -- 2. Token: .env -> bien moi truong -> hoi truc tiep -----------------
-if (-not $env:TELEGRAM_BOT_TOKEN) {
-    $canPrompt = $true
-    try { $canPrompt = -not [Console]::IsInputRedirected } catch { $canPrompt = $true }
-    try {
-        if (-not $canPrompt) { throw "non-interactive" }
-        $secure = Read-Host "Dan Telegram Bot Token (Enter de bo qua)" -AsSecureString
-        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-        try { $token = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
-        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
-        $token = ($token -replace "\s", "")
-        if ($token) {
-            $env:TELEGRAM_BOT_TOKEN = $token
-            Save-EnvToken $token
-        }
-    } catch { }
+function Reset-FileEnv {
+    foreach ($key in @($script:FileEnv.Keys)) {
+        Remove-Item -Path "env:$key" -ErrorAction SilentlyContinue
+    }
+    $script:FileEnv = @{}
 }
 
-if (-not $env:TELEGRAM_BOT_TOKEN) {
-    Write-Host ""
-    Write-Host "x Chua co Telegram Bot Token." -ForegroundColor Red
-    Write-Host "  * Tao bot: nhan @BotFather -> /newbot -> lay token 123456:ABC..."
-    Write-Host "  * Tao file .env trong thu muc repo:"
-    Write-Host "        TELEGRAM_BOT_TOKEN=123456:ABC..."
-    Write-Host "        ALLOWED_USER_IDS=123456789        (nen dat, de khoa bot)"
-    Write-Host "  * Hoac chay: `$env:TELEGRAM_BOT_TOKEN='123456:ABC...'; .\run.ps1"
-    Write-Host ""
-    exit 1
-}
+Import-EnvFiles
 
-# -- 3. Moi truong Python: venv -> Python he thong ---------------------
+# -- 2. Moi truong Python: venv -> Python he thong ---------------------
 Say "AI STV runner (Windows)"
 
 $pyVersion = Initialize-Python
@@ -267,7 +253,49 @@ if ($importCheck.Code -ne 0) {
 }
 Say "Thu vien Python OK"
 
-# -- 4. Seed workspace lan dau (SOUL, AGENTS, skills) -----------------
+# -- 4. Dong bo cau hinh tu GitHub / URL (giong run.bat / run.sh) -----
+# AISTV_ENV_URL -> repo private (AISTV_CONFIG_TOKEN / GH_TOKEN / gh auth token /
+# Colab Secrets). Nho vay token da co tren GitHub thi khong hoi lai.
+$configScript = Join-Path $script:AppDir "aistv_config.py"
+if (Test-Path -LiteralPath $configScript) {
+    Reset-FileEnv
+    Invoke-Py $configScript "sync"
+    Import-EnvFiles
+    $env:AISTV_CONFIG_SYNCED = "1"
+}
+
+# -- 5. Token: hoi lan cuoi neu GitHub/URL cung khong co ----------------
+if (-not $env:TELEGRAM_BOT_TOKEN) {
+    $canPrompt = $true
+    try { $canPrompt = -not [Console]::IsInputRedirected } catch { $canPrompt = $true }
+    if ($canPrompt) {
+        Write-Host ""
+        Write-Host "x Chua co Telegram Bot Token trong .env / config.env / GitHub." -ForegroundColor Red
+        Write-Host "  * Kiem tra nguon: $script:PyExe $configScript doctor"
+        Write-Host "  * Tao bot: nhan @BotFather -> /newbot -> lay token 123456:ABC..."
+        Write-Host ""
+        try {
+            $secure = Read-Host "Dan Telegram Bot Token (Enter de bo qua)" -AsSecureString
+            $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+            try { $token = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) }
+            finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+            $token = ($token -replace "\s", "")
+            if ($token) {
+                $env:TELEGRAM_BOT_TOKEN = $token
+                Save-EnvToken $token
+            }
+        } catch { }
+    }
+}
+
+if (-not $env:TELEGRAM_BOT_TOKEN) {
+    Fail "Thieu TELEGRAM_BOT_TOKEN. Da thu .env, config.env, GitHub (gh/PAT) va Colab Secrets.
+  * Dang nhap GitHub: gh auth login   (hoac dat AISTV_CONFIG_TOKEN)
+  * Hoac them TELEGRAM_BOT_TOKEN vao Colab Secrets / .env roi chay lai.
+  * Kiem tra: $script:PyExe $configScript doctor"
+}
+
+# -- 6. Seed workspace lan dau (SOUL, AGENTS, skills) -----------------
 $seed = Join-Path $script:AppDir "seed"
 if (Test-Path -LiteralPath $seed) {
     if ($env:STV_HOME) {
@@ -279,7 +307,7 @@ if (Test-Path -LiteralPath $seed) {
     Copy-Seed $seed $workspace
 }
 
-# -- 5. Chay bot ------------------------------------------------------
+# -- 7. Chay bot ------------------------------------------------------
 $env:PYTHONUNBUFFERED = "1"
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"

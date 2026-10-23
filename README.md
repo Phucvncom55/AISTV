@@ -72,26 +72,31 @@ Muốn dùng repo khác, truyền link GitHub trực tiếp:
 bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=3) https://github.com/Phucvncom55/AISTV
 ```
 
-Lần đầu script sẽ: tải repo → lấy/hỏi token → tạo `.venv` → cài thư viện → cài OpenCode → chạy bot.
-Token lấy theo thứ tự: `.env` → biến môi trường → Colab Secrets → hỏi trực tiếp (máy có terminal).
+Lần đầu script sẽ: tải repo → đồng bộ token/API key → tạo `.venv` → cài thư viện → cài OpenCode → chạy bot.
+Nguồn token: biến môi trường → `.env` của repo → `config.env` dùng chung → repo private
+`Phucvncom55/AISTV-secrets` (qua `gh auth`, `AISTV_CONFIG_TOKEN` hoặc Colab Secrets) → chỉ hỏi
+trực tiếp khi tất cả đều chưa có.
 
 ### Chạy trên Google Colab
 
 1. Dán link repo của bạn vào ô dưới (thay `Phucvncom55/AISTV`), **hoặc** dùng
    `bash <(curl -fsSL .../bootstrap.sh) https://github.com/Phucvncom55/AISTV`.
 2. Mở 🔑 **Secrets** (cột trái) → thêm `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`),
-   bật **Notebook access**.
+   bật **Notebook access**. Tuỳ chọn: thêm `AISTV_CONFIG_TOKEN` (PAT đọc repo
+   `AISTV-secrets`) để tự lấy toàn bộ token/API key còn lại.
 3. Dán vào một ô code rồi Run:
 
 ```python
 !bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=3)
 ```
 
-Script tự: clone/cập nhật repo → lấy token từ Secrets → chọn Python (venv → hệ thống → uv) → cài thư viện → cài OpenCode → chạy bot.
-Không có Secrets thì script báo rõ cách thêm và dừng, không cài lan man.
+Script tự: clone/cập nhật repo → đồng bộ config từ Colab Secrets / GitHub → chọn Python (venv → hệ thống → uv) → cài thư viện → cài OpenCode → chạy bot.
+Không có token ở bất kỳ nguồn nào thì script báo rõ cách thêm, không cài lan man.
 
 > Colab không có terminal tương tác nên **không nhập token bằng tay** được — hãy dùng Secrets
-> (hoặc `!TELEGRAM_BOT_TOKEN=123:abc bash <(curl ...)` nếu không ngại lộ token trong notebook).
+> hoặc `AISTV_CONFIG_TOKEN`, hoặc `!TELEGRAM_BOT_TOKEN=123:abc bash <(curl ...)` nếu không ngại
+> lộ token trong notebook. Các giá trị lấy từ Secrets được lưu vào Drive `config.env`, nên các
+> phiên sau không cần bật lại quyền đọc Secrets.
 
 ### Chạy trên DataCamp (log không nhập được gì)
 
@@ -100,6 +105,14 @@ chờ nhập liệu. Chỉ cần truyền bí mật bằng biến môi trường
 
 ```bash
 TELEGRAM_BOT_TOKEN=123456:ABC... GEMINI_API_KEY=AQ... ALLOWED_USER_IDS=123456789 \
+  bash -c "curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9' | bash"
+```
+
+Hoặc chỉ truyền PAT một lần — `run.sh` tự lấy token/API key từ repo private và lưu vào
+`~/.config/aistv/config.env` cho các lần sau:
+
+```bash
+AISTV_CONFIG_TOKEN=github_pat_xxx \
   bash -c "curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9' | bash"
 ```
 
@@ -153,8 +166,9 @@ curl -fsSL -o "%TEMP%\aistv.bat" "https://raw.githubusercontent.com/Phucvncom55/
 Hoặc trong thư mục repo: nhấp đôi `run.bat` (dùng `bootstrap.bat` nếu muốn tự cập nhật code trước).
 
 `run.bat` / `bootstrap.bat` viết bằng **cmd thuần**, tự tải/cập nhật repo, tạo `.venv`,
-cài thư viện, hỏi token lần đầu rồi chạy bot — không phụ thuộc PowerShell 5.1/7.
-Bản PowerShell (`bootstrap.ps1`, `run.ps1`) vẫn còn cho ai muốn dùng.
+cài thư viện, **tự lấy token từ GitHub** (nếu máy đã đăng nhập `gh` hoặc có `AISTV_CONFIG_TOKEN`)
+rồi chạy bot — không phụ thuộc PowerShell 5.1/7, chỉ hỏi token khi thật sự chưa có.
+Bản PowerShell (`bootstrap.ps1`, `run.ps1`) dùng **cùng logic đồng bộ** với `run.bat` và `run.sh`.
 
 **Cần có sẵn:**
 
@@ -162,22 +176,26 @@ Bản PowerShell (`bootstrap.ps1`, `run.ps1`) vẫn còn cho ai muốn dùng.
 - Git: `winget install --id Git.Git -e`
 - OpenCode: script tự cài (npm nếu có, không thì tải bản Windows chính thức từ GitHub Releases)
 
-Script tự tạo `.venv`, cài thư viện, hỏi token lần đầu (lưu vào `.env`), rồi chạy bot.
+Script tự tạo `.venv`, cài thư viện, tự đồng bộ token/API key từ `.env`, `config.env`
+hoặc repo private trên GitHub, rồi chạy bot. Chỉ hỏi token khi cả ba nguồn đều chưa có.
 Dữ liệu vẫn ở `%USERPROFILE%\stv_agent` (đổi bằng `STV_HOME`).
 
 > OpenCode khuyến nghị WSL2 để đầy đủ tính năng; bản Windows native (cmd/PowerShell) vẫn chạy được.
 > Nếu dùng WSL thì làm theo hướng dẫn Linux ở trên.
 
-### Token bot: nhập một lần, dùng mãi
+### Token bot: tự đồng bộ, không phải nhập lại
 
-Có **2 chỗ** lưu bí mật, cả hai đều bị `.gitignore` nên không bị push:
+Có **3 nơi** lưu bí mật, đều bị `.gitignore` nên không bị push:
 
-| File | Khi nào dùng |
+| Nơi lưu | Khi nào dùng |
 |---|---|
-| `.env` cạnh `aistv_bot.py` | riêng cho bản clone đó |
-| `~/.config/aistv/config.env` (`%USERPROFILE%\.config\aistv\config.env` trên Windows) | **dùng chung** — clone lại repo, đổi `AISTV_DIR` vẫn còn |
+| `.env` cạnh `aistv_bot.py` | riêng cho bản clone đó (ưu tiên cao nhất trong các file) |
+| `~/.config/aistv/config.env` (`%USERPROFILE%\.config\aistv\config.env` trên Windows) | **dùng chung** — clone lại repo, đổi `AISTV_DIR` vẫn còn. Trên Colab: `MyDrive/aistv/config.env` |
+| repo private `Phucvncom55/AISTV-secrets` | **nguồn chuẩn** để mọi máy đồng bộ; cần `gh` đã đăng nhập, `AISTV_CONFIG_TOKEN` hoặc `AISTV_ENV_URL` |
 
-Thứ tự đọc: biến môi trường → `.env` của repo → `config.env` dùng chung.
+Thứ tự đọc: biến môi trường → `.env` của repo → `config.env` dùng chung → tải từ GitHub/URL.
+Nếu GitHub có key mới hơn, `aistv_config.py sync` cập nhật lại `.env` + `config.env` (trừ biến
+môi trường đang được đặt tay).
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=123456:ABC...
@@ -185,12 +203,23 @@ ALLOWED_USER_IDS=123456789
 GEMINI_API_KEY=...
 ```
 
-- Lần đầu chạy `run.sh`/`run.bat`, script **hỏi token đúng một lần** rồi ghi vào cả hai file.
-- Token truyền qua biến môi trường (`TELEGRAM_BOT_TOKEN=... bash run.sh`) cũng được tự lưu lại.
+- **Mọi đường chạy dùng chung một bộ đồng bộ** `aistv_config.py`: `run.bat` (cmd),
+  `run.ps1` (PowerShell), `run.sh` (Linux/macOS/Colab/DataCamp) và cả `aistv_bot.py`.
+  Sửa `config.env` trên GitHub là máy nào chạy cũng thấy — không còn cảnh cmd hỏi token
+  dù token đã có trên GitHub.
+- Chỉ **hỏi token khi** cả biến môi trường, `.env`, `config.env` và GitHub/URL đều không có;
+  token nhập tay được lưu vào cả hai file.
+- Token GitHub để tải repo private lấy theo thứ tự: `AISTV_CONFIG_TOKEN` → `GH_TOKEN` /
+  `GITHUB_TOKEN` / `AISTV_GITHUB_TOKEN` → `gh auth token` → Colab Secrets.
+  Không cần cài `gh` nếu đã có PAT.
+- Trên Colab: thêm `TELEGRAM_BOT_TOKEN` và (tuỳ chọn) `AISTV_CONFIG_TOKEN` vào 🔑 **Secrets**,
+  bật *Notebook access*. Lần đầu `run.sh` lưu các giá trị vào Drive `config.env`; các phiên sau
+  không cần quyền đọc Secrets nữa.
 - Prompt có **giới hạn thời gian** (`AISTV_PROMPT_TIMEOUT`, mặc định 180s) — không bao giờ treo chờ vô hạn.
-- Trên Colab: dùng 🔑 **Secrets** (`TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`) và bật *Notebook access*.
-- **Máy mới**: nếu máy đã đăng nhập `gh` (hoặc đặt `AISTV_CONFIG_TOKEN`), bot tự tải `config.env` từ repo private `Phucvncom55/AISTV-secrets` khi thiếu token; các key còn lại khôi phục từ cloud — không phải chép file thủ công.
-- Khi bot khởi động, token/API key đang có được tự thêm vào `config.env` dùng chung (chỉ thêm, không ghi đè giá trị cũ).
+- Kiểm tra nguồn cấu hình (không in bí mật): `python aistv_config.py doctor`.
+- Tắt tự đồng bộ: `AISTV_CONFIG_SYNC=0`. Tắt tải repo private: `AISTV_CONFIG_REPO=0`.
+- Khi bot khởi động, token/API key đang có được tự thêm vào `config.env` dùng chung
+  (chỉ thêm, không ghi đè giá trị cũ) và các key còn lại khôi phục từ cloud.
 
 ### Xác nhận chủ bot kiểu "device flow"
 
@@ -233,23 +262,25 @@ Trên Colab, nếu đã mount Drive (`/content/drive/MyDrive`), `run.sh` tự d�
 
 **GitHub Actions secrets không dùng được** cho `bash <(curl ...)`: chúng chỉ tồn tại bên trong runner của Actions, script chạy trên VPS/Colab không đọc được.
 
-Cách chạy được: để `config.env` trong một **repo private**, cho `run.sh` tải về bằng PAT chỉ-đọc:
+Cách chạy được: để `config.env` trong một **repo private**, cho runner tải về bằng PAT chỉ-đọc.
+`run.sh`, `run.bat`, `run.ps1` và `aistv_bot.py` đều dùng **cùng một logic** (`aistv_config.py`):
 
 ```bash
-AISTV_CONFIG_REPO=Phucvncom55/AISTV-secrets \
 AISTV_CONFIG_TOKEN=github_pat_xxx \
-bash <(curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=8')
+  bash <(curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9')
 ```
 
-- Repo private đã có sẵn: **`Phucvncom55/AISTV-secrets`** (đang chứa `GEMINI_API_KEY`).
-- Thêm `TELEGRAM_BOT_TOKEN=...` vào `config.env` của repo đó (sửa trên web GitHub) là đủ để bot tự chạy.
-- **Máy đã đăng nhập `gh` thì không cần PAT**: `run.sh` tự dùng `gh auth token` để tải repo private. Lệnh chỉ còn:
-  ```bash
-  bash <(curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9')
-  ```
-  (`AISTV_CONFIG_REPO=0` để tắt việc tự tải.)
-- PAT: *Settings → Developer settings → Fine-grained tokens* → chỉ chọn repo `AISTV-secrets`, quyền **Contents: Read-only**.
-- Lưu lệnh trên vào ghi chú/alias → các lần sau chạy là bot lên, không hỏi gì. Chỉ PAT nằm trong lệnh, không phải token bot.
+- Repo private đã có sẵn: **`Phucvncom55/AISTV-secrets`** — chứa token bot, Gemini, Groq/OpenAI,
+  Cloudflare, email… Sửa `config.env` trên web GitHub là **mọi máy** (Windows cmd, PowerShell,
+  Colab, DataCamp, VPS) nhận thay đổi ở lần chạy sau.
+- **Máy đã đăng nhập `gh` thì không cần PAT**: cả `run.bat` và `run.sh` tự dùng `gh auth token`.
+  Windows chỉ cần dán lệnh `bootstrap.bat` ở trên — không hỏi token nếu repo private đã có.
+- **Colab / DataCamp không có `gh`**: đặt `AISTV_CONFIG_TOKEN` một lần (Colab Secrets hoặc biến
+  môi trường). Trên Colab, `run.sh` lưu luôn PAT + config vào Drive để các phiên sau không cần nhập lại.
+- PAT: *Settings → Developer settings → Fine-grained tokens* → chỉ chọn repo `AISTV-secrets`,
+  quyền **Contents: Read-only**.
+- Lưu lệnh trên vào ghi chú/alias → các lần sau chạy là bot lên, không hỏi gì.
+  Chỉ PAT nằm trong lệnh, không phải token bot.
 - Nếu để config ở nơi khác: `AISTV_ENV_URL=https://.../config.env` (tải trực tiếp, không cần token).
 
 Đổi lại: lệnh có chứa PAT. Ai đọc được lệnh thì đọc được đúng repo đó — nên đặt *Contents: Read-only* và chỉ chọn 1 repo.
@@ -451,8 +482,9 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `AISTV_PROMPT_TIMEOUT` | `180` | Số giây chờ nhập token/key (chống treo) |
 | `AISTV_ASK_GEMINI` | `0` | `1` = hỏi Gemini key trong terminal; mặc định không hỏi |
 | `AISTV_CONFIG_REPO` | `Phucvncom55/AISTV-secrets` | `user/repo` private chứa `config.env`; `0` = tắt |
-| `AISTV_CONFIG_TOKEN` | tự lấy từ `gh` | PAT chỉ-đọc để tải `config.env` từ repo private |
+| `AISTV_CONFIG_TOKEN` | tự lấy từ `gh` | PAT chỉ-đọc; cũng nhận `GH_TOKEN` / `GITHUB_TOKEN` / Colab Secrets |
 | `AISTV_CONFIG_PATH` | `config.env` | Đường dẫn file cấu hình trong repo private |
+| `AISTV_CONFIG_SYNC` | `1` | `0` = không tự tải/đồng bộ config từ xa |
 | `AISTV_ENV_URL` | trống | URL tải thẳng `config.env` (không cần token) |
 | `STV_HOME` | `~/stv_agent` (`%USERPROFILE%\stv_agent`) | Nơi lưu `workspace/`, `sessions/`, `archive/` |
 | `OPENCODE_BIN` | tự tìm | Đường dẫn `opencode` |
@@ -520,6 +552,7 @@ AISTV/
 ├── aistv_image.py    tạo ảnh (Gemini/Cloudflare/Together/HF) + vẽ sơ đồ tư duy Pillow
 ├── aistv_skills.py   cài skill chuẩn Agent Skills từ GitHub/zip
 ├── aistv_github_docs.py  đọc README/docs, tìm trong tài liệu và mã GitHub
+├── aistv_config.py   đồng bộ config/token dùng chung cho mọi runner (sync/check/get/set/doctor)
 ├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)
 ├── bootstrap.bat     như bootstrap.sh nhưng cho Windows (cmd thuần, khuyên dùng)
