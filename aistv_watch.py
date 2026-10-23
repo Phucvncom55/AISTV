@@ -1319,7 +1319,9 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
             rate_limited = code == "429" or "resource exhausted" in low or "rate limit" in low
             transient = code in ("500", "502", "503", "504") or any(
                 x in low for x in ("overloaded", "unavailable", "high demand",
-                                   "try again later", "temporarily"))
+                                   "try again later", "temporarily", "timed out",
+                                   "timeout", "connection reset", "connection aborted",
+                                   "remote end closed", "network is unreachable"))
             if rate_limited or transient:
                 if attempt < retries:
                     if rate_limited:
@@ -1329,7 +1331,12 @@ def gemini_generate(parts, timeout=900, temperature=0.2, max_output_tokens=8192,
                     else:
                         delay = min(5 * (attempt + 1), 15)
                         delay = max(1, min(delay, int(deadline - time.monotonic()) - 5))
-                        tag = code or "quá tải"
+                        if code:
+                            tag = code
+                        elif any(x in low for x in ("timed out", "timeout", "connection", "network")):
+                            tag = "mạng"
+                        else:
+                            tag = "quá tải"
                     ep(f"⏳ Gemini {tag} — thử lại sau {delay}s ({model})…")
                     time.sleep(delay)
                     continue
