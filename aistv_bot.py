@@ -111,6 +111,16 @@ def _load_dotenv():
 
 _load_dotenv()
 
+# Bản cũ có thể còn giữ model Gemini cũ trong môi trường (restart cũ không nạp lại
+# .env) → tự chuyển một lần sang model mới để /restart đầu tiên là có hiệu lực.
+for _k, _old, _new in (
+    ("WATCH_GEMINI_MODEL", "gemini-3-flash-preview", "gemini-3.8-flash"),
+    ("WATCH_GEMINI_FALLBACKS", "gemini-2.5-flash,gemini-3.1-flash-lite",
+     "gemini-3.7-flash,gemini-3.5-flash"),
+):
+    if os.getenv(_k) == _old:
+        os.environ[_k] = _new
+
 # Bí mật được đồng bộ lên Firebase (mã hoá bằng token bot) để sang máy/terminal
 # khác không phải đăng nhập lại. Thêm tên biến vào đây nếu muốn sync thêm.
 SECRETS_DIRTY = False
