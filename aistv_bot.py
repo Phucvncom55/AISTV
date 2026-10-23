@@ -120,6 +120,7 @@ for _k, _old, _new in (
 ):
     if os.getenv(_k) == _old:
         os.environ[_k] = _new
+        ENV_FROM_FILES.add(_k)
 
 # Bí mật được đồng bộ lên Firebase (mã hoá bằng token bot) để sang máy/terminal
 # khác không phải đăng nhập lại. Thêm tên biến vào đây nếu muốn sync thêm.
