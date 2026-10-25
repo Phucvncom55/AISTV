@@ -1545,10 +1545,14 @@ def download_image(source: str, workdir: Path, index: int = 1):
     return dest, mime, None
 
 
-def gemini_image(sources, workdir: Path, question=""):
-    """Đọc một hoặc nhiều ảnh bằng Gemini; trả về (answer dict, lỗi)."""
+def gemini_image(sources, workdir: Path, question="", engine="auto"):
+    """Đọc một hoặc nhiều ảnh bằng Gemini; trả về (answer dict, lỗi).
+
+    engine: auto = Gemini API rồi tự lùi Web2API; gemini = chỉ API;
+    web2api = chỉ server Gemini Web nội bộ (không cần API key).
+    """
     key = api_key("GEMINI_API_KEY") or api_key("GOOGLE_API_KEY")
-    if not key:
+    if engine != "web2api" and not key:
         return None, "chưa có GEMINI_API_KEY"
     paths = []
     errors = []
@@ -1568,7 +1572,7 @@ def gemini_image(sources, workdir: Path, question=""):
     parts = []
     try:
         for index, (path, mime) in enumerate(paths, 1):
-            if total <= inline_limit:
+            if engine == "web2api" or total <= inline_limit:
                 part = {"inline_data": {
                     "mime_type": mime,
                     "data": base64.b64encode(path.read_bytes()).decode("ascii"),
@@ -1598,7 +1602,10 @@ def gemini_image(sources, workdir: Path, question=""):
             )
         if errors:
             instructions += "\n\nGhi chú: một số nguồn không tải được: " + "; ".join(errors)
-        answer, err = gemini_generate(parts + [{"text": instructions}], timeout=300)
+        if engine == "web2api":
+            answer, err = web2api_generate(parts + [{"text": instructions}], timeout=300)
+        else:
+            answer, err = gemini_generate(parts + [{"text": instructions}], timeout=300)
         if err:
             return None, clean_secret(err, [key])
         answer["images"] = [
@@ -1615,7 +1622,8 @@ def gemini_image(sources, workdir: Path, question=""):
 def do_image(args):
     sources = list(args.source)
     workdir = make_workdir(sources[0], args.out_dir)
-    answer, err = gemini_image(sources, workdir, args.question)
+    answer, err = gemini_image(sources, workdir, args.question,
+                               engine=getattr(args, "engine", "auto"))
     if not answer:
         return None, f"Gemini lỗi: {err}", 1
     lines = [
@@ -1628,7 +1636,7 @@ def do_image(args):
         lines.append(f"- **Ảnh:** `{item['path']}` ({item['mime']}, {item['bytes'] / 1024:.1f} KB)")
     if answer.get("errors"):
         lines += ["", "## Nguồn lỗi"] + [f"- {e}" for e in answer["errors"]]
-    lines += ["", "## Answer (from Gemini)", "", answer["text"].strip(), ""]
+    lines += ["", "## Answer", "", answer["text"].strip(), ""]
     report = "\n".join(lines).strip() + "\n"
     (workdir / "report.md").write_text(report, "utf-8")
     payload = {
@@ -2032,6 +2040,8 @@ def main():
     p = sub.add_parser("image", aliases=["vision", "read-image"], help="đọc ảnh bằng Gemini")
     p.add_argument("source", nargs="+", help="đường dẫn ảnh hoặc URL (có thể nhiều ảnh)")
     p.add_argument("-q", "--question", default="")
+    p.add_argument("--engine", choices=("auto", "gemini", "web2api"), default="auto",
+                   help="auto = API rồi lùi Web2API; web2api = chỉ Gemini Web nội bộ")
     p.add_argument("--out-dir")
     p.add_argument("--json", action="store_true")
 

@@ -1345,6 +1345,10 @@ def _image_mime(raw: bytes) -> str:
     return "image/png"
 
 
+_IMAGE_VERB_RE = re.compile(
+    r"(?i)^\s*(create|generate|draw|make|paint|render)\s+(an?\s+)?(image|picture|photo)")
+
+
 def generate_image(prompt: str, model: str = "", timeout: float = 240,
                    response_format: str = "b64_json") -> tuple:
     """Tạo ảnh qua /v1/images/generations của server đã vá.
@@ -1356,10 +1360,17 @@ def generate_image(prompt: str, model: str = "", timeout: float = 240,
         return None, "", "thiếu mô tả ảnh"
     if not ensure_server():
         return None, "", "Web2API chưa sẵn sàng"
-    payload = {"prompt": prompt, "n": 1, "response_format": response_format}
+    # Gemini Web đôi khi trả lời bằng văn bản (công thức, hướng dẫn) nếu câu lệnh
+    # không nói rõ là tạo ảnh. Thêm tiền tố để luôn vào chế độ sinh ảnh.
+    full = prompt if _IMAGE_VERB_RE.match(prompt) else f"Create an image: {prompt}"
+    payload = {"prompt": full, "n": 1, "response_format": response_format}
     if model:
         payload["model"] = model
     data, err = _http_json(base_url() + IMAGE_ENDPOINT, payload, timeout)
+    if err and "no generated image" in err.lower():
+        # Gemini Web thỉnh thoảng trả lời bằng chữ thay vì ảnh → thử lại 1 lần.
+        payload["prompt"] = f"Generate an image. Do not reply with text: {prompt}"
+        data, err = _http_json(base_url() + IMAGE_ENDPOINT, payload, timeout)
     if err:
         low = err.lower()
         if "404" in low or "501" in low or "not found" in low:

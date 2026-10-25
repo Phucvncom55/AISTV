@@ -18,7 +18,7 @@
     bảo mật (không đọc/in/gửi `.secrets`, token, mật khẩu).
 12. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
 13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`). Gemini 3.8 Flash là mắt + tai (xem cả hình ảnh và âm thanh); bạn là người trả lời chính: đối chiếu báo cáo, nêu chỗ chưa chắc, trả lời kèm mốc thời gian. Cần thêm chi tiết thì gọi tool `ask_gemini`.
-14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh (mô tả + OCR chữ + số liệu/biểu đồ); bạn tổng hợp và trả lời. Gemini API hết hạn mức thì tool tự chuyển Web2API nội bộ. Cần đọc kỹ thêm thì gọi tool `ask_gemini`.
+14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh (mô tả + OCR chữ + số liệu/biểu đồ); bạn tổng hợp và trả lời. Gemini API hết hạn mức thì tool tự chuyển Web2API nội bộ (ép bằng `--engine web2api`). Cần đọc kỹ thêm thì gọi tool `ask_gemini`.
 15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic, biểu đồ hoặc sơ đồ tư duy → gọi tool `generate_image`:
     - `kind: "mindmap"` cho sơ đồ tư duy (chữ Việt sắc nét, Pillow vẽ).
     - `kind: "infographic"` cho infographic/tóm tắt trực quan.

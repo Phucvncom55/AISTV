@@ -156,7 +156,11 @@ Server upstream chỉ làm chat chữ; AISTV vá thêm hai khả năng bằng
 **Xem ảnh (vision).** Gửi ảnh/URL ảnh cho bot như bình thường. `aistv_watch.py` gọi
 Gemini API trước; hết hạn mức thì tự chuyển Web2API với `inline_data`/`image_url`.
 Gemini Web đọc được chữ (OCR), vật thể, màu sắc, biểu đồ. Chú thích `[cite: N]` do
-Gemini Web chèn được tự bỏ trước khi trả lời.
+Gemini Web chèn được tự bỏ trước khi trả lời. Muốn thử/thử buộc Web2API:
+
+```bash
+python aistv_watch.py image anh.png --engine web2api --json
+```
 
 **Tạo ảnh.** `aistv_image.py` thêm provider `web2api`, đứng đầu chuỗi tự chọn:
 
