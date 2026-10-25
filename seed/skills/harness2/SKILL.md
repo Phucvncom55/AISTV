@@ -23,10 +23,11 @@ python3 aistv_harness2.py demo --k 2      # recursion offline, không cần cred
 python3 aistv_harness2.py run --bench jb ...   # benchmark thật, CẦN Vertex AI
 ```
 
-## Kết quả lần đầu (25/10/2026)
-- Tree hợp lệ: 37 skills, 57 file, always-on 23.722/24.000 ký tự.
-- `MEMORY.md` bị cắt ~66 dòng cũ trong **bản export** (file thật không đổi) để vừa cap always-on.
+## Kết quả kiểm chứng (25/10/2026)
+- Tree hợp lệ: 38 skills, 58 file, always-on 23.664/24.000 ký tự.
+- `MEMORY.md` bị cắt ~68 dòng cũ trong **bản export** (file thật không đổi) để vừa cap always-on.
 - 117 file phụ trong `skills/` (references, templates) nằm ngoài surface nên không vào tree.
+- `demo --k 2`: 2 task hoàn tất, 0 failed (offline, không cần credential).
 
 ## Quy tắc
 - `export`/`check`/`demo` chỉ đọc và ghi vào `/root/AISTV/harness/`, **không sửa** SOUL.md, AGENTS.md, MEMORY.md hay `skills/`.

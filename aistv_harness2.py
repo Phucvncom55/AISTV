@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import re as _RE
+import shutil
 import subprocess
 import sys
 import time
@@ -285,18 +286,28 @@ def cmd_status(a) -> int:
     ok_repo = (H2_ROOT / "pyproject.toml").is_file()
     print(f"{'✅' if ok_repo else '❌'} Harness²: {H2_ROOT} (commit {h2_commit() if ok_repo else '-'})")
     print(f"{'✅' if H2_PY.is_file() else '⚠️ '} venv: {H2_PY}")
-    demo = H2_ROOT / "runs" / "demo" / "demo.json"
-    if demo.is_file():
+    # `demo` tạo thư mục theo timestamp (demo-YYYYmmdd-HHMMSS) để không ghi đè lần trước.
+    demos = sorted((H2_ROOT / "runs").glob("demo*/demo.json"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    demo = demos[0] if demos else None
+    if demo:
         try:
-            d = json.loads(demo.read_text())
+            d = json.loads(demo.read_text(encoding="utf-8"))
             print(f"✅ demo offline: {d.get('n_tasks')} task, failed={d.get('failed')} "
                   f"({time.strftime('%d/%m %H:%M', time.localtime(demo.stat().st_mtime))})")
         except Exception:
             print(f"⚠️  demo có file nhưng không đọc được: {demo}")
     else:
         print("⚠️  chưa chạy demo offline (`demo`)")
-    print(f"{'✅' if Path('/tools/node/bin/opencode').exists() else '⚠️ '} opencode CLI: "
-          f"{subprocess.run(['opencode', '--version'], capture_output=True, text=True).stdout.strip() or '?'}")
+    oc = shutil.which("opencode")
+    oc_ver = ""
+    if oc:
+        try:
+            oc_ver = subprocess.run([oc, "--version"], capture_output=True, text=True,
+                                    timeout=20).stdout.strip()
+        except Exception:
+            pass
+    print(f"{'✅' if oc_ver else '⚠️ '} opencode CLI: {oc_ver or 'không thấy trong PATH'}")
     c = creds()
     ready = all(v == "đã đặt" for v in c.values())
     print(f"{'✅' if ready else '⚠️ '} credential chạy benchmark thật: " +

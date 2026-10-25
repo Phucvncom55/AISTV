@@ -643,6 +643,9 @@ bằng luật surface `opencode` (skill phải có `name:`/`description:` và đ
 script được nhắc phải tồn tại). Chạy benchmark thật (JobBench/LAB/WorkBuddy) cần `GOOGLE_CLOUD_PROJECT`,
 `HARNESS2_*_MODEL` và `gcloud auth application-default login`.
 
+Đã kiểm chứng 25/10/2026 trên commit `1cfe254`: tree 38 skills / 58 file / 23.664 ký tự always-on,
+`check` hợp lệ và `demo --k 2` hoàn tất 2 task, 0 failed.
+
 Dữ liệu chạy nằm ngoài repo tại `STV_HOME` (mặc định `~/stv_agent`), nên cập nhật code không mất trí nhớ.
 
 ## 7. Bảo mật
