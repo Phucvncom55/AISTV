@@ -1211,12 +1211,17 @@ export default tool({
     }
     const base = url.replace(/\/$/, "")
     const headers = { "content-type": "application/json", "x-aistv-token": token }
-    const started = await fetch(base + "/github-login", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ chat_id: chat, reason: String(args.reason || "") }),
-    })
-    const data = await started.json()
+    let data
+    try {
+      const started = await fetch(base + "/github-login", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ chat_id: chat, reason: String(args.reason || "") }),
+      })
+      data = await started.json()
+    } catch (e) {
+      return "github_login failed: " + e + ". Tell the user to send /github login."
+    }
     if (data.already) {
       return "GitHub is already connected" + (data.login ? " as " + data.login : "") + "."
     }
@@ -1227,13 +1232,18 @@ export default tool({
     const deadline = Date.now() + Math.min(Number(data.expires_in || 900) * 1000, 900000)
     while (Date.now() < deadline) {
       await sleep(5000)
-      const res = await fetch(base + "/github-login-status", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ id: data.id, chat_id: chat }),
-      })
-      if (!res.ok) continue
-      const state = await res.json()
+      let res, state
+      try {
+        res = await fetch(base + "/github-login-status", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ id: data.id, chat_id: chat }),
+        })
+        if (!res.ok) continue
+        state = await res.json()
+      } catch (e) {
+        continue
+      }
       if (state.status === "done" && state.ok) {
         return "GitHub connected" + (state.login ? " as " + state.login : "") +
           ". Continue with the user's request."
@@ -1720,6 +1730,7 @@ async def _gh_login_notice(chat_id: int, text: str) -> None:
 
 def _sync_config_after_login() -> int:
     """Sau khi đăng nhập GitHub: kéo token/API key còn thiếu từ repo private."""
+    global ENV_ALLOWED
     if config_lib is None:
         return 0
     try:
@@ -1729,6 +1740,9 @@ def _sync_config_after_login() -> int:
             if name in ENV_FROM_FILES and value:
                 os.environ[name] = value
         _load_dotenv()
+        ids = [int(x) for x in re.findall(r"\d+", os.environ.get("ALLOWED_USER_IDS") or "")]
+        if ids:
+            ENV_ALLOWED = ids        # áp dụng ngay, không phải khởi động lại
         return int(result.get("added") or 0)
     except Exception as e:
         log.warning("Đồng bộ config sau đăng nhập GitHub: %s", oneline(str(e), 160))
@@ -1829,7 +1843,7 @@ class _AskHandler(BaseHTTPRequestHandler):
 
     def _handle_post(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
-        if path not in ("/ask", "/image", "/vision"):
+        if path not in ("/ask", "/image", "/vision", "/github-login", "/github-login-status"):
             self._json(404, {"error": "not found"})
             return
         got = self.headers.get("x-aistv-token", "")
