@@ -529,7 +529,7 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `WATCH_GEMINI_MODEL` | `gemini-3.8-flash` | Model Gemini chính: đọc ảnh + xem video (context 1M token) |
 | `WATCH_GEMINI_FALLBACKS` | `gemini-3.7-flash,gemini-3.5-flash` | Model dự phòng khi model chính lỗi/hết hạn mức |
 | `WATCH_GEMINI_THINKING` | `low` | Mức suy nghĩ khi đọc ảnh/video: `low` (nhanh) hoặc `high` (kỹ hơn) |
-| `OPENCODE_MODEL` | `opencode/deepseek-v4.1-flash-free` | Model chính của agent (DeepSeek v4.1); đổi trực tiếp bằng `/model` |
+| `OPENCODE_MODEL` | `opencode/glm-5.3-flash-free` | Model chính của agent (GLM 5.3 Flash, có reasoning); đổi trực tiếp bằng `/model` |
 | `WEB2API_FALLBACK` | `1` | `1` = khi model chính hết hạn mức (429/hết token) hoặc lỗi server/UnknownError tự chuyển sang Gemini Web2API nội bộ |
 | `WEB2API_URL` / `WEB2API_MODEL` | `http://127.0.0.1:8081` / `gemini-3.6-flash` | Server + model dự phòng |
 | `WEB2API_COOKIE_FILE` | `~/.config/aistv/web2api/cookie.txt` | File dán cookie mới; dán vào là server tự nạp lại |

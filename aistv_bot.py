@@ -265,8 +265,12 @@ CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "1") != "0"   # 0 = giữ bản
 USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google Drive (sống sót khi Colab reset)
 FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
                                 #        không cần hỏi quyền (mọi tool của OpenCode đều được auto-approve)
-DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"   # model chính, đổi nhanh bằng /model hoặc OPENCODE_MODEL
-LEGACY_GEMINI_MODEL = "google/gemini-3.8-flash"       # bản trước lỡ đặt Gemini làm model chính → tự quay lại DeepSeek
+# Model chính, đổi nhanh bằng /model hoặc OPENCODE_MODEL.
+# Chọn model CÓ trả "reasoning" thì khung 💭 Suy nghĩ mới có nội dung:
+# deepseek-v4.1-flash-free không phát event reasoning (chỉ text), còn
+# glm-5.3-flash-free / flint-40b-free / nemotron thì có.
+DEFAULT_MODEL = "opencode/glm-5.3-flash-free"
+LEGACY_GEMINI_MODEL = "google/gemini-3.8-flash"       # bản trước lỡ đặt Gemini làm model chính → tự quay lại model mặc định
 VISION_MODEL = "gemini-3.8-flash"                     # mắt + tai: đọc ảnh / xem video (không phải model trả lời)
 WEB2API_MODEL = (os.getenv("WEB2API_MODEL") or "gemini-3.6-flash").strip()
 WEB2API_FALLBACK = os.getenv("WEB2API_FALLBACK", "1") != "0"   # 0 = tắt dự phòng Gemini Web2API
@@ -735,6 +739,7 @@ THINKING: dict = {}                # chat_id -> [các đoạn reasoning model đ
 LIVE: dict = {}                    # chat_id -> dòng thời gian sự kiện (think/tool) để cuộn như terminal
 THINK_TOKENS: dict = {}            # chat_id -> số token reasoning
 THINKING_LAST: dict = {}           # chat_id -> thời điểm nhận reasoning gần nhất
+NO_THINK: dict = {}                # model (bỏ #variant) -> True nếu lượt chạy không trả reasoning
 GH_TOKEN_CACHE = ""                # token GitHub đang dùng (để che trong log/output)
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
@@ -1186,7 +1191,7 @@ def bootstrap_workspace() -> None:
                 old = old.rstrip() + (
                     "\n\n## Thảo luận 2 model (mặc định)\n"
                     "- Gemini 3.8 Flash là mắt + tai: đọc ảnh/video (dưới 45 phút) và trả về báo cáo.\n"
-                    "- Model chính (DeepSeek v4.1) đối chiếu báo cáo, phản biện, gọi tool `ask_gemini` "
+                    "- Model chính (đổi bằng /model) đối chiếu báo cáo, phản biện, gọi tool `ask_gemini` "
                     "nếu thiếu chi tiết, rồi trả lời người dùng.\n"
                     "- Trả lời cuối cùng luôn do model chính viết, không dán nguyên báo cáo Gemini.\n"
                 )
@@ -1224,7 +1229,7 @@ def bootstrap_workspace() -> None:
             if "ask_gemini" not in old:
                 old = old.rstrip() + (
                     "\n23. Luồng ảnh/video: Gemini 3.8 Flash đọc trước → bạn đối chiếu, phản biện, hỏi lại "
-                    "nếu cần (tool `ask_gemini`) → bạn trả lời cuối cùng. DeepSeek v4.1 vẫn là model chính. "
+                    "nếu cần (tool `ask_gemini`) → bạn trả lời cuối cùng. Model chính vẫn viết câu trả lời. "
                     "Không nói mình đã trực tiếp xem ảnh/video khi chỉ có báo cáo; không bịa ngoài báo cáo.\n"
                 )
                 changed = True
@@ -2444,6 +2449,16 @@ def _status_rows(chat_id: int, limit: int = PROGRESS_KEEP) -> list:
     return rows
 
 
+def _model_base(name: str = "") -> str:
+    """Tên model bỏ phần #variant để so sánh."""
+    return (name or STATE.get("model") or DEFAULT_MODEL).split("#")[0].strip()
+
+
+def _model_has_no_thinking() -> bool:
+    """Model hiện tại đã từng chạy mà không trả reasoning (vd bản flash free)."""
+    return bool(NO_THINK.get(_model_base()))
+
+
 def _thinking_text(chat_id: int) -> str:
     parts = THINKING.get(chat_id) or []
     if not parts:
@@ -2514,7 +2529,12 @@ def _live_blocks(chat_id: int, detailed: bool = False) -> list:
             if not text:
                 continue
             lines = _wrap_live(text[-900:])
-            shown = "\n".join(lines[-6:])
+            if len(lines) > 6:
+                # Reasoning của OpenCode v2 về thành 1 cục ở cuối lượt: giữ cả mở đầu
+                # lẫn kết luận để không bị đọc như đoạn cắt giữa câu.
+                shown = "\n".join(lines[:2] + ["…"] + lines[-3:])
+            else:
+                shown = "\n".join(lines)
             blocks.append("💭 <i>Suy nghĩ</i>\n<i>" + esc(shown) + "</i>")
         else:
             e = ev.get("entry") or {}
@@ -2562,6 +2582,10 @@ def _render_status(chat_id: int, started: float, frame: str = "🧠") -> str:
             + (f" · {esc(last)}" if last else "") + " · /stop để huỷ")
     detailed = bool(STATE.get("show_activity", False))
     blocks = _live_blocks(chat_id, detailed=detailed)
+    if (STATE.get("show_thinking", True) and not THINKING.get(chat_id)
+            and _model_has_no_thinking()):
+        blocks.append("💭 <i>Model này không trả phần suy nghĩ — đổi bằng /model "
+                      "(xem /models)</i>")
     kept, cut = _tail_blocks(blocks, PROGRESS_LINES + (4 if detailed else 0))
     if not kept:
         return head + "\n⏳ <i>Đang chờ model phản hồi…</i>"
@@ -2980,6 +3004,13 @@ async def _run_opencode_once(chat_id: int, prompt: str, env: dict, model: str) -
     finally:
         RUNNING.pop(chat_id, None)
         _cancel_chat_asks(chat_id)
+    # Ghi nhớ model nào không trả reasoning để lần sau báo rõ thay vì khung 💭 trống.
+    base = _model_base(model)
+    if base:
+        if THINKING.get(chat_id) or THINK_TOKENS.get(chat_id):
+            NO_THINK.pop(base, None)
+        else:
+            NO_THINK[base] = True
     tools_ran = bool(ACTIVITY.get(chat_id) or LIVE.get(chat_id))
     text = clean_output(out)
     if text and not _is_opencode_error_output(text) and not _is_error_payload(text):
@@ -3588,7 +3619,7 @@ def welcome_text() -> str:
         "• <b>Gemini 3.8 Flash đọc ảnh</b>: gửi ảnh + câu hỏi → mô tả, OCR chữ, phân tích biểu đồ\n"
         "• <b>Tạo ảnh &amp; sơ đồ tư duy</b>: /image mô tả · /mindmap chủ đề → gửi ảnh ngay\n"
         "• <b>Gemini xem video</b>: gửi link/file (&lt; 45 phút) + câu hỏi → tóm tắt kèm mốc thời gian\n"
-        "• <b>DeepSeek v4.1 là model chính</b> — Gemini đọc ảnh/video rồi thảo luận, DeepSeek trả lời\n"
+        "• <b>Model chính (đổi bằng /model)</b> — Gemini đọc ảnh/video rồi thảo luận, model chính trả lời\n"
         "• <b>Không giới hạn 10 phút</b> — dự án lớn chạy tới khi xong (/stop để huỷ)\n"
         "• Kết nối GitHub 1 lần — /github login; tự cập nhật — /update\n\n"
         "Gửi câu hỏi hoặc yêu cầu để bắt đầu 👇"
@@ -3614,13 +3645,13 @@ HELP_TEXT = (
     "/watch git owner/repo — báo commit mới · /watch log &lt;file&gt; — báo lỗi mới\n"
     "/watch file &lt;đường dẫn&gt; — báo khi thay đổi · /watch del &lt;mã|all&gt;\n\n"
     "<b>File &amp; Video</b>\nGửi file cho bot → lưu vào <code>inbox/</code> để agent đọc\n/files — file trong workspace\n/get &lt;đường dẫn&gt; — tải file về\n"
-    "Gửi ảnh + câu hỏi → Gemini 3.8 Flash đọc ảnh (OCR, biểu đồ) rồi DeepSeek trả lời\n"
+    "Gửi ảnh + câu hỏi → Gemini 3.8 Flash đọc ảnh (OCR, biểu đồ) rồi model chính trả lời\n"
     "Gửi tin nhắn thoại → bot tự nghe rồi làm theo lời bạn (tiếng Việt/Anh)\n"
     "/image &lt;mô tả&gt; — tạo ảnh (--style anime, --aspect 16:9) · reply ảnh + /image — vẽ lại theo ảnh\n"
     "/image --mindmap &lt;chủ đề&gt; · /mindmap &lt;chủ đề&gt; — sơ đồ tư duy\n"
-    "/see &lt;url|đường dẫn&gt; [câu hỏi] — Gemini đọc ảnh, DeepSeek trả lời\n"
-    "Gửi link/file video (&lt; 45 phút) + câu hỏi → Gemini xem hình ảnh + âm thanh, DeepSeek trả lời kèm mốc thời gian\n"
-    "/video &lt;url|đường dẫn&gt; [câu hỏi] — Gemini xem video, DeepSeek trả lời\n\n"
+    "/see &lt;url|đường dẫn&gt; [câu hỏi] — Gemini đọc ảnh, model chính trả lời\n"
+    "Gửi link/file video (&lt; 45 phút) + câu hỏi → Gemini xem hình ảnh + âm thanh, model chính trả lời kèm mốc thời gian\n"
+    "/video &lt;url|đường dẫn&gt; [câu hỏi] — Gemini xem video, model chính trả lời\n\n"
     "<b>Reply / trích dẫn</b>\nTrả lời (reply) một tin nhắn rồi nhắn yêu cầu → agent hiểu “cái này/đoạn trên” là tin đó\n"
     "Bôi đen một phần rồi reply → agent ưu tiên đúng phần được trích dẫn\n"
     "Reply tin nhắn rồi gõ /remember → lưu chính tin đó vào trí nhớ\n\n"
@@ -3682,7 +3713,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     new = context.args[0].strip()
     if not re.fullmatch(r"[\w.\-]+/[\w.\-:/]+", new):
-        await msg.reply_text("⚠️ Sai định dạng. Ví dụ: <code>/model opencode/deepseek-v4.1-flash-free</code>", parse_mode=HTML)
+        await msg.reply_text("⚠️ Sai định dạng. Ví dụ: <code>/model opencode/glm-5.3-flash-free</code>", parse_mode=HTML)
         return
     STATE["model"] = new
     save_state()
@@ -3725,9 +3756,15 @@ async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     save_state()
     on = STATE.get("show_thinking", True)
+    extra = ""
+    if on and _model_has_no_thinking():
+        extra = ("\n⚠️ Model hiện tại <code>" + esc(_model_base())
+                 + "</code> không trả reasoning — đổi sang model khác bằng /model "
+                   "thì mới thấy suy nghĩ.")
     await msg.reply_text(
         f"💭 Hiển thị suy nghĩ (reasoning): <b>{'BẬT' if on else 'TẮT'}</b>\n"
-        "Suy nghĩ hiện trực tiếp trong tin nhắn tiến độ, cuộn xuống theo thời gian thực.",
+        "Suy nghĩ hiện trực tiếp trong tin nhắn tiến độ, cuộn xuống theo thời gian thực."
+        + extra,
         parse_mode=HTML)
 
 
