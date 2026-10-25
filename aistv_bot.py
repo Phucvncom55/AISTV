@@ -261,7 +261,7 @@ try:
 except Exception:                       # thiếu module → chỉ tắt dự phòng, bot vẫn chạy
     web2api = None
 
-CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "1") != "0"   # 0 = giữ bản OpenCode đã cài, không xoá & cài lại
+CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "0") != "0"   # 1 = xoá & cài lại OpenCode; 0 = giữ bản đã cài
 USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google Drive (sống sót khi Colab reset)
 FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
                                 #        không cần hỏi quyền (mọi tool của OpenCode đều được auto-approve)
@@ -405,8 +405,9 @@ def find_opencode() -> Optional[str]:
     env_bin = (os.getenv("OPENCODE_BIN") or "").strip()
     if env_bin and Path(env_bin).exists():
         return env_bin                    # người dùng chỉ định rõ thì tôn trọng
-    if _OPENCODE_PICK:
+    if _OPENCODE_PICK and Path(_OPENCODE_PICK).exists():
         return _OPENCODE_PICK
+    _OPENCODE_PICK = None                 # binary đã bị xoá/dời → quét lại
     cands = []
     found = shutil.which("opencode")
     if found:
@@ -433,118 +434,105 @@ def find_opencode() -> Optional[str]:
     return pick
 
 
-def _install_opencode_windows() -> Optional[str]:
-    """Windows: npm → tải binary chính thức từ GitHub Releases."""
-    if shutil.which("npm"):
-        print("   • Thử cài bằng npm…")
-        _sh("npm install -g opencode-ai", timeout=900)
-        if find_opencode():
-            return find_opencode()
-    print("   • Tải bản Windows từ GitHub Releases…")
-    import platform
-    import tempfile
-    import zipfile
-    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
-    api = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
-    req = urllib.request.Request(api, headers={"User-Agent": "AISTV-bot",
-                                              "Accept": "application/vnd.github+json"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.load(resp)
-    except Exception as e:
-        print(f"   ⚠️ Không lấy được thông tin bản phát hành: {e}")
-        return None
-    assets = {a.get("name"): a.get("browser_download_url") for a in data.get("assets") or []}
-    url = assets.get(f"opencode-windows-{arch}.zip") or assets.get("opencode-windows-x64.zip")
-    if not url:
-        print("   ⚠️ Bản phát hành không có file Windows.")
-        return None
-    dest = Path.home() / ".opencode" / "bin"
-    dest.mkdir(parents=True, exist_ok=True)
-    tmp_zip = None
-    try:
-        with urllib.request.urlopen(url, timeout=600) as resp:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as fh:
-                tmp_zip = fh.name
-                shutil.copyfileobj(resp, fh)
-        with zipfile.ZipFile(tmp_zip) as zf:
-            zf.extractall(dest)
-    except Exception as e:
-        print(f"   ⚠️ Tải/cài OpenCode thất bại: {e}")
-        return None
-    finally:
-        if tmp_zip:
-            try:
-                os.unlink(tmp_zip)
-            except Exception:
-                pass
-    for exe in dest.rglob("opencode.exe"):
-        if exe.parent != dest:
-            try:
-                shutil.copy2(exe, dest / "opencode.exe")
-            except Exception:
-                pass
-        break
-    find_opencode()
-    return find_opencode()
+# OpenCode 2 có kênh cài riêng: https://opencode.ai/install chỉ cài bản 1.x,
+# còn bản 2 nằm ở /v2/install (gói npm @opencode/cli). Dùng nhầm kênh là lỗi
+# "cài opencode cũ" quen thuộc: bot cài xong vẫn ra v1 rồi hỏng phiên v2.
+OPENCODE_INSTALL_URL = "https://opencode.ai/v2/install"
+OPENCODE_NPM_PKG = "@opencode/cli"
+OPENCODE_NPM_META = "https://opencode.ai/update/api/latest/cli/npm"
 
 
-def _install_opencode_unix() -> Optional[str]:
-    """Linux: tải thẳng binary từ GitHub Releases (dự phòng khi script cài bị chặn)."""
+def _npm_cli_targets() -> list:
+    """Tên gói npm chứa binary v2 cho nền tảng hiện tại (khớp CPU/libc trước)."""
     import platform
+    machine = platform.machine().lower()
+    arm = machine in ("arm64", "aarch64")
+    if IS_WINDOWS:
+        return ["windows-arm64"] if arm else ["windows-x64"]
+    if sys.platform == "darwin":
+        return ["darwin-arm64"] if arm else ["darwin-x64", "darwin-x64-baseline"]
+    if arm:
+        return ["linux-arm64", "linux-arm64-musl"]
+    return ["linux-x64", "linux-x64-baseline", "linux-x64-musl", "linux-x64-baseline-musl"]
+
+
+def _install_opencode_npm_tarball() -> Optional[str]:
+    """Dự phòng khi không có npm/script cài: tải thẳng binary v2 từ gói npm.
+
+    Gói @opencode/cli-<nền tảng> chứa sẵn binary (package/bin/opencode[.exe]) nên
+    không phụ thuộc GitHub Releases — nơi bản "latest" vẫn là OpenCode 1.
+    """
     import tarfile
     import tempfile
 
-    machine = platform.machine().lower()
-    arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
-    api = "https://api.github.com/repos/anomalyco/opencode/releases/latest"
-    req = urllib.request.Request(api, headers={"User-Agent": "AISTV-bot",
-                                              "Accept": "application/vnd.github+json"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.load(resp)
-    except Exception as e:
-        print(f"   ⚠️ Không lấy được thông tin bản phát hành: {e}")
-        return None
-
-    assets = {a.get("name"): a.get("browser_download_url") for a in data.get("assets") or []}
-    candidates = [f"opencode-linux-{arch}.tar.gz", f"opencode-linux-{arch}-musl.tar.gz",
-                  f"opencode-linux-{arch}-baseline.tar.gz"]
-    url = next((assets[n] for n in candidates if n in assets), None)
-    if not url:
-        print(f"   ⚠️ Không có file Linux {arch} trong bản phát hành.")
-        return None
-
     dest = Path.home() / ".opencode" / "bin"
     dest.mkdir(parents=True, exist_ok=True)
-    tmp_tar = None
+    ua = {"User-Agent": "AISTV-bot"}
     try:
-        with urllib.request.urlopen(url, timeout=600) as resp:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as fh:
-                tmp_tar = fh.name
-                shutil.copyfileobj(resp, fh)
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            with tarfile.open(tmp_tar, "r:gz") as tf:
-                try:
-                    tf.extractall(tmp_dir, filter="data")
-                except TypeError:  # Python < 3.12
-                    tf.extractall(tmp_dir)
-            found = next((p for p in Path(tmp_dir).rglob("*")
-                          if p.is_file() and p.name in ("opencode", "opencode.exe")), None)
-            if not found:
-                print("   ⚠️ Gói tải về không có file opencode.")
-                return None
-            shutil.copy2(found, dest / "opencode")
-            (dest / "opencode").chmod(0o755)
+        req = urllib.request.Request(OPENCODE_NPM_META, headers=ua)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            ver = str((json.load(resp) or {}).get("version") or "").strip()
     except Exception as e:
-        print(f"   ⚠️ Tải/cài OpenCode thất bại: {e}")
+        print(f"   ⚠️ Không lấy được phiên bản OpenCode 2: {e}")
         return None
-    finally:
+    if not ver:
+        print("   ⚠️ Không lấy được phiên bản OpenCode 2.")
+        return None
+
+    exe = "opencode.exe" if IS_WINDOWS else "opencode"
+    for target in _npm_cli_targets():
+        pkg = f"@opencode/cli-{target}"
+        url = f"https://registry.npmjs.org/{pkg}/-/{pkg.rsplit('/', 1)[-1]}-{ver}.tgz"
+        tmp_tar = None
         try:
-            os.unlink(tmp_tar)
-        except Exception:
-            pass
-    return find_opencode()
+            req = urllib.request.Request(url, headers=ua)
+            with urllib.request.urlopen(req, timeout=900) as resp:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".tgz") as fh:
+                    tmp_tar = fh.name
+                    shutil.copyfileobj(resp, fh)
+            with tarfile.open(tmp_tar, "r:gz") as tf:
+                member = next((m for m in tf.getmembers()
+                               if m.isfile() and m.name.replace("\\", "/")
+                               in (f"package/bin/{exe}", "package/bin/opencode")), None)
+                src = tf.extractfile(member) if member else None
+                if src is None:
+                    raise FileNotFoundError("gói không có binary opencode")
+                with open(dest / exe, "wb") as out:
+                    shutil.copyfileobj(src, out)
+            (dest / exe).chmod(0o755)
+            _reset_opencode_cache()
+            if _opencode_major(_opencode_version(str(dest / exe))) >= 2:
+                print(f"   • Đã cài {pkg} {ver}")
+                return find_opencode()
+            print(f"   ⚠️ {pkg} {ver}: binary không chạy được trên máy này, thử bản khác…")
+        except Exception as e:
+            print(f"   ⚠️ {pkg} {ver}: {e}")
+        finally:
+            if tmp_tar:
+                try:
+                    os.unlink(tmp_tar)
+                except Exception:
+                    pass
+    return None
+
+
+def _install_opencode_windows() -> Optional[str]:
+    """Windows: npm (gói v2) → tải binary v2 từ npm."""
+    if shutil.which("npm"):
+        print("   • Thử cài bằng npm…")
+        _sh(f"npm install -g {OPENCODE_NPM_PKG}", timeout=900)
+        _reset_opencode_cache()           # npm có thể đặt binary ở thư mục khác
+        found = find_opencode()
+        if found and _opencode_major(_opencode_version(found)) >= 2:
+            return found
+    print("   • Tải binary OpenCode 2 từ npm…")
+    return _install_opencode_npm_tarball()
+
+
+def _install_opencode_unix() -> Optional[str]:
+    """Linux/macOS: tải thẳng binary v2 từ npm (dự phòng khi script cài bị chặn)."""
+    print("   • Tải binary OpenCode 2 từ npm…")
+    return _install_opencode_npm_tarball()
 
 
 def _reset_opencode_cache() -> None:
@@ -562,15 +550,16 @@ def _upgrade_opencode() -> None:
     if IS_WINDOWS:
         _install_opencode_windows()
         return
-    print("   • Đang nâng cấp OpenCode lên bản mới (giữ nguyên dữ liệu phiên)…")
-    res = _sh("curl -fsSL https://opencode.ai/install | bash")
+    print("   • Đang nâng cấp OpenCode lên v2 (giữ nguyên dữ liệu phiên)…")
+    res = _sh(f"curl -fsSL {OPENCODE_INSTALL_URL} | bash")
     if res.returncode != 0:
         print("\n".join(res.stdout.splitlines()[-15:]))
+    _reset_opencode_cache()               # bản mới có thể nằm ở thư mục khác bản cũ
     if _opencode_major(_opencode_version(find_opencode() or "")) < 2 and shutil.which("npm"):
         print("   • Thử cài bằng npm…")
-        _sh("npm install -g opencode-ai", timeout=900)
+        _sh(f"npm install -g {OPENCODE_NPM_PKG}", timeout=900)
+        _reset_opencode_cache()
     if _opencode_major(_opencode_version(find_opencode() or "")) < 2:
-        print("   • Tải binary trực tiếp từ GitHub Releases…")
         _install_opencode_unix()
 
 
@@ -601,22 +590,23 @@ def setup_environment() -> None:
     elif CLEAN_INSTALL or not current:
         _reset_opencode_cache()
         _sh("rm -rf ~/.local/share/opencode ~/.opencode")
-        res = _sh("curl -fsSL https://opencode.ai/install | bash")
+        res = _sh(f"curl -fsSL {OPENCODE_INSTALL_URL} | bash")
         if res.returncode != 0:
             print("\n".join(res.stdout.splitlines()[-15:]))
         if not find_opencode() and shutil.which("npm"):
             print("   • Thử cài bằng npm…")
-            _sh("npm install -g opencode-ai", timeout=900)
+            _sh(f"npm install -g {OPENCODE_NPM_PKG}", timeout=900)
         if not find_opencode():
-            print("   • Tải binary trực tiếp từ GitHub Releases…")
             _install_opencode_unix()
     elif outdated:
         _upgrade_opencode()
+    _reset_opencode_cache()               # đừng dùng lại kết quả quét trước khi cài
     binary = find_opencode()
     if not binary:
         raise SystemExit("❌ Không cài được OpenCode.\n"
-                         + ("   Cài thủ công: npm install -g opencode-ai  (hoặc choco/scoop install opencode)"
-                            if IS_WINDOWS else "   Chạy lại ô này hoặc kiểm tra mạng Colab."))
+                         + ("   Cài thủ công: npm install -g @opencode/cli  (hoặc choco/scoop install opencode)"
+                            if IS_WINDOWS else
+                            "   Cài thủ công: curl -fsSL https://opencode.ai/v2/install | bash"))
     print(f"✅ [3/3] OpenCode sẵn sàng: {binary}")
 
 
@@ -3020,7 +3010,7 @@ def _pretty_error(text: str) -> str:
     low = raw.lower()
     if "has no session table" in low:
         return ("OpenCode đang chạy bản cũ (v1) trên dữ liệu của bản mới (v2). "
-                "Cài bản mới rồi chạy lại bot: curl -fsSL https://opencode.ai/install | bash "
+                "Cài bản mới rồi chạy lại bot: curl -fsSL https://opencode.ai/v2/install | bash "
                 "(hoặc đặt OPENCODE_BIN trỏ tới binary v2).")
     if "free usage limit" in low or "provider.free-limit" in low \
             or "freeusagelimiterror" in low:
@@ -7029,7 +7019,7 @@ def main() -> None:
         msg = (f"⚠️ OpenCode đang dùng bản cũ ({OPENCODE_VERSION or '?'}): {OPENCODE_BIN}\n"
                "   Dữ liệu phiên bản mới (v2) sẽ không đọc được → lỗi "
                "\"Database is not empty and has no session table\" và /models trống.\n"
-               "   Cài bản mới: curl -fsSL https://opencode.ai/install | bash "
+               "   Cài bản mới: curl -fsSL https://opencode.ai/v2/install | bash "
                "(hoặc đặt OPENCODE_BIN trỏ tới binary v2) rồi chạy lại bot.")
         print(msg)
         log.warning(msg)

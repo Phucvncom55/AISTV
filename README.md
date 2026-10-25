@@ -137,7 +137,7 @@ Lưu ý:
 
 **Không nên chạy bot trực tiếp trong Termux.** OpenCode chỉ phát hành binary cho Linux
 (glibc/musl), macOS và Windows — **không có bản Android**. Termux dùng libc riêng (bionic) nên
-`npm install -g opencode-ai` cài xong sẽ báo lỗi kiểu `cannot execute: required file not found`,
+`npm install -g @opencode/cli` cài xong sẽ báo lỗi kiểu `cannot execute: required file not found`,
 và `aistv_bot.py` sẽ dừng ở bước `Không tìm thấy lệnh opencode`.
 
 Nếu vẫn muốn dùng điện thoại làm server, phải chạy trong **proot-distro Ubuntu**:
@@ -174,7 +174,7 @@ Bản PowerShell (`bootstrap.ps1`, `run.ps1`) dùng **cùng logic đồng bộ**
 
 - Python 3.10+: `winget install --id Python.Python.3.12 -e` (nhớ chọn *Add python.exe to PATH*)
 - Git: `winget install --id Git.Git -e`
-- OpenCode: script tự cài (npm nếu có, không thì tải bản Windows chính thức từ GitHub Releases)
+- OpenCode: script tự cài (npm nếu có, không thì tải binary OpenCode 2 từ gói npm)
 
 Script tự tạo `.venv`, cài thư viện, tự đồng bộ token/API key từ `.env`, `config.env`
 hoặc repo private trên GitHub, rồi chạy bot. Chỉ hỏi token khi cả ba nguồn đều chưa có.
@@ -308,10 +308,10 @@ Nếu bot báo `Database is not empty and has no session table` (thường kèm 
 máy còn binary OpenCode **v1** ở `~/.opencode/bin/opencode` trong khi dữ liệu phiên đã là **v2**.
 Khi đó **mọi model chạy qua OpenCode** đều trả `Unexpected server error`, bot chuyển sang Web2API
 chat-only (không có tool) — trông như "model hỏng" dù model vẫn ổn. Bot tự ưu tiên binary v2;
-nếu vẫn lỗi thì cài lại rồi xoá bản cũ:
+nếu vẫn lỗi thì cài lại bản v2 rồi xoá bản cũ:
 
 ```bash
-curl -fsSL https://opencode.ai/install | bash
+curl -fsSL https://opencode.ai/v2/install | bash   # /install (không có /v2) chỉ cài bản 1.x
 rm -rf ~/.opencode           # bản v1 cũ (dữ liệu phiên v2 giữ nguyên)
 # hoặc ghim đường dẫn tuyệt đối (lấy bằng `command -v opencode`) vào .env:
 # OPENCODE_BIN=/usr/local/bin/opencode
@@ -501,7 +501,7 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `AISTV_ENV_URL` | trống | URL tải thẳng `config.env` (không cần token) |
 | `STV_HOME` | `~/stv_agent` (`%USERPROFILE%\stv_agent`) | Nơi lưu `workspace/`, `sessions/`, `archive/` |
 | `OPENCODE_BIN` | tự tìm | Đường dẫn `opencode` |
-| `AISTV_CLEAN_INSTALL` | `1` | `0` = không xoá & cài lại OpenCode mỗi lần chạy |
+| `AISTV_CLEAN_INSTALL` | `0` | `1` = xoá & cài lại OpenCode mỗi lần chạy (mất dữ liệu phiên OpenCode) |
 | `AISTV_VENV` | `1` | `0` = dùng Python hệ thống, không tạo `.venv` |
 | `AISTV_REPO` | URL trong `run.sh` / `run.bat` | Repo khác để tải mã nguồn |
 | `AISTV_DIR` | `~/AISTV` (`%USERPROFILE%\AISTV`) | Nơi clone khi chạy one-liner |
