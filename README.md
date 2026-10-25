@@ -79,6 +79,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/boots
 ```
 
 Lần đầu script sẽ: tải repo → đồng bộ token/API key → tạo `.venv` → cài thư viện → cài OpenCode → chạy bot.
+Mỗi lần khởi động, bot tự kiểm tra bản OpenCode mới trên npm và **nâng tại chỗ, giữ nguyên phiên**
+(dữ liệu `~/.local/share/opencode` không bị xoá) — tắt bằng `AISTV_OPENCODE_UPDATE=0`.
 Nguồn token: biến môi trường → `.env` của repo → `config.env` dùng chung → repo private
 `Phucvncom55/AISTV-secrets` (qua `gh auth`, `AISTV_CONFIG_TOKEN` hoặc Colab Secrets) → chỉ hỏi
 trực tiếp khi tất cả đều chưa có.
@@ -449,6 +451,7 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `STV_HOME` | `~/stv_agent` (`%USERPROFILE%\stv_agent`) | Nơi lưu `workspace/`, `sessions/`, `archive/` |
 | `OPENCODE_BIN` | tự tìm | Đường dẫn `opencode` |
 | `AISTV_CLEAN_INSTALL` | `0` | `1` = xoá & cài lại OpenCode mỗi lần chạy (mất dữ liệu phiên OpenCode) |
+| `AISTV_OPENCODE_UPDATE` | `1` | `0` = không tự kiểm tra/nâng OpenCode lên bản mới trên npm mỗi lần khởi động |
 | `AISTV_VENV` | `1` | `0` = dùng Python hệ thống, không tạo `.venv` |
 | `AISTV_REPO` | URL trong `run.sh` / `run.bat` | Repo khác để tải mã nguồn |
 | `AISTV_DIR` | `~/AISTV` (`%USERPROFILE%\AISTV`) | Nơi clone khi chạy one-liner |

@@ -563,6 +563,65 @@ def _upgrade_opencode() -> None:
         _install_opencode_unix()
 
 
+def _opencode_ver_tuple(ver: str) -> tuple:
+    """Chuỗi phiên bản ("2.1.4" / "opencode v2.1.4") → (2, 1, 4); () nếu không đọc được."""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", ver or "")
+    return tuple(int(x) for x in m.groups()) if m else ()
+
+
+def _opencode_latest_version() -> str:
+    """Bản OpenCode 2 mới nhất trên npm ("" nếu không kiểm tra được)."""
+    try:
+        req = urllib.request.Request(OPENCODE_NPM_META, headers={"User-Agent": "AISTV-bot"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            return str((json.load(resp) or {}).get("version") or "").strip()
+    except Exception:
+        return ""
+
+
+def _best_opencode(cands: list) -> Optional[str]:
+    """Chọn binary v2 có phiên bản cao nhất trong danh sách."""
+    best, best_ver = None, ()
+    for c in cands:
+        if not c or not Path(c).exists() or _opencode_major(_opencode_version(c)) < 2:
+            continue
+        ver = _opencode_ver_tuple(_opencode_version(c))
+        if ver > best_ver:
+            best, best_ver = c, ver
+    return best
+
+
+def _maybe_update_opencode(binary: str) -> str:
+    """Tự nâng OpenCode 2 lên bản mới nhất trên npm, giữ nguyên phiên.
+
+    Tắt bằng AISTV_OPENCODE_UPDATE=0. Bỏ qua khi người dùng ghim OPENCODE_BIN
+    (đã chỉ định rõ binary thì không tự đổi).
+    """
+    global _OPENCODE_PICK
+    if os.getenv("AISTV_OPENCODE_UPDATE", "1") == "0" or os.getenv("OPENCODE_BIN"):
+        return binary
+    cur = _opencode_ver_tuple(_opencode_version(binary))
+    latest = _opencode_ver_tuple(_opencode_latest_version())
+    if not cur or not latest or latest <= cur:
+        return binary
+    print(f"   • OpenCode {'.'.join(map(str, latest))} mới hơn bản đang dùng "
+          f"{'.'.join(map(str, cur))} — nâng (giữ nguyên phiên)…")
+    _upgrade_opencode()
+    new = _best_opencode([str(Path.home() / ".opencode" / "bin" /
+                              ("opencode.exe" if IS_WINDOWS else "opencode")),
+                          find_opencode() or ""]) or binary
+    new_ver = _opencode_ver_tuple(_opencode_version(new))
+    if new_ver >= latest:
+        print(f"   • Đã nâng OpenCode lên {'.'.join(map(str, new_ver))}")
+        _OPENCODE_PICK = new
+        folder = str(Path(new).parent)
+        if folder not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+    else:
+        print(f"   ⚠️ Chưa nâng được lên {'.'.join(map(str, latest))} — dùng bản hiện có.")
+    return new
+
+
 def setup_environment() -> None:
     print("⏳ [1/3] Kiểm tra thư viện Python (python-telegram-bot, nest_asyncio)...")
     missing = [name for name in ("telegram", "nest_asyncio")
@@ -607,6 +666,7 @@ def setup_environment() -> None:
                          + ("   Cài thủ công: npm install -g @opencode/cli  (hoặc choco/scoop install opencode)"
                             if IS_WINDOWS else
                             "   Cài thủ công: curl -fsSL https://opencode.ai/v2/install | bash"))
+    binary = _maybe_update_opencode(binary)
     print(f"✅ [3/3] OpenCode sẵn sàng: {binary}")
 
 
