@@ -344,7 +344,7 @@ def _sh(cmd: str, timeout: int = 900) -> subprocess.CompletedProcess:
 
 
 def _safe_is_dir(p: Path) -> bool:
-    """is_dir() nhưng không nổ khi gặp thư mục không có quyền (vd /root trên DataCamp)."""
+    """is_dir() nhưng không nổ khi gặp thư mục không có quyền (vd /root trên Colab/VPS)."""
     try:
         return p.is_dir()
     except OSError:
@@ -363,7 +363,7 @@ def _opencode_dirs() -> list:
             if base:
                 dirs.append(Path(base).joinpath(*parts))
     elif hasattr(os, "geteuid") and os.geteuid() == 0:
-        # /root không đọc được với user thường (DataCamp, Colab) → chỉ thêm khi là root
+        # /root không đọc được với user thường (Colab) → chỉ thêm khi là root
         dirs.append(Path("/root/.opencode/bin"))
     return dirs
 
@@ -724,6 +724,8 @@ ASK_TOKEN = ""
 ASK_REQUESTS: dict = {}            # ask_id -> yêu cầu đang chờ người dùng trả lời
 ASK_BY_CHAT: dict = {}             # chat_id -> ask_id
 ASK_LOCK = threading.Lock()
+GH_LOGIN_TASKS: dict = {}          # id -> phiên device login (tool github_login)
+AUTO_PUSH = os.getenv("AISTV_AUTO_PUSH", "1").strip().lower() not in ("0", "off", "false", "no")
 
 THINKING: dict = {}                # chat_id -> [các đoạn reasoning model đã trả về]
 LIVE: dict = {}                    # chat_id -> dòng thời gian sự kiện (think/tool) để cuộn như terminal
@@ -926,6 +928,11 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 21. Cloudflare: dùng `python3 aistv_cloudflare.py ...` (skill `cloudflare-aistv`) cho Workers AI, upload web (Pages/Workers), DNS, R2; token ở `.secrets/cloudflare_token` hoặc env `CLOUDFLARE_API_TOKEN`, không in token ra chat/log.
 22. Railway: dùng `python3 aistv_railway.py ...` (skill `railway`) cho deploy, log, biến môi trường, domain; không in giá trị biến bí mật ra chat/log.
 23. Luồng ảnh/video: Gemini đọc trước → bạn đối chiếu, phản biện, hỏi lại nếu cần (`ask_gemini`) → bạn trả lời cuối cùng. Không nói mình đã trực tiếp xem ảnh/video khi chỉ có báo cáo; không bịa chi tiết ngoài báo cáo.
+24. Người dùng muốn đăng nhập/kết nối GitHub, hoặc cần GitHub mà chưa có token → gọi tool `github_login`
+    (bot tự gửi mã vào chat, bạn chờ tới khi người dùng Authorize rồi mới làm tiếp). Không bảo người dùng
+    dán token/PAT vào chat.
+25. Sau khi sửa code trong repo chính, bot tự đẩy lên GitHub (nếu bật) để Windows CMD chạy `run.bat`
+    nhận đúng bản mới; nếu người dùng muốn đẩy ngay, dùng lệnh `/push`.
 """
 
 MEMORY_HEADER = "# MEMORY — Trí nhớ dài hạn\n"
@@ -1118,6 +1125,73 @@ export default tool({
 '''
 
 
+# Tool đăng nhập GitHub bằng mã: bot gửi mã vào chat, agent chờ bạn xác nhận rồi chạy tiếp.
+GITHUB_LOGIN_TOOL_JS = r'''import { tool } from "@opencode-ai/plugin"
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+export default tool({
+  description: [
+    "Connect the user's GitHub account with the device flow (github.com/login/device).",
+    "Use this when the user asks to log in / connect GitHub, or when GitHub access is missing.",
+    "The bot sends the one-time code to the Telegram chat automatically; the user authorizes it",
+    "on GitHub and this tool returns as soon as the account is connected. Do not ask the user",
+    "to paste the code anywhere else.",
+  ].join(" "),
+  args: {
+    reason: tool.schema.string().optional()
+      .describe("Short reason shown in the chat, e.g. 'to pull config from the private repo'"),
+  },
+  async execute(args) {
+    const url = process.env.AISTV_ASK_URL
+    const token = process.env.AISTV_TOOL_TOKEN || ""
+    const chat = Number(process.env.AISTV_CHAT_ID || 0)
+    if (!url) {
+      return "github_login is unavailable. Tell the user to send /github login."
+    }
+    const base = url.replace(/\/$/, "")
+    const headers = { "content-type": "application/json", "x-aistv-token": token }
+    const started = await fetch(base + "/github-login", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ chat_id: chat, reason: String(args.reason || "") }),
+    })
+    const data = await started.json()
+    if (data.already) {
+      return "GitHub is already connected" + (data.login ? " as " + data.login : "") + "."
+    }
+    if (!data.ok) {
+      return "Could not start GitHub login: " + (data.error || "unknown") +
+        ". Tell the user to send /github login."
+    }
+    const deadline = Date.now() + Math.min(Number(data.expires_in || 900) * 1000, 900000)
+    while (Date.now() < deadline) {
+      await sleep(5000)
+      const res = await fetch(base + "/github-login-status", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ id: data.id, chat_id: chat }),
+      })
+      if (!res.ok) continue
+      const state = await res.json()
+      if (state.status === "done" && state.ok) {
+        return "GitHub connected" + (state.login ? " as " + state.login : "") +
+          ". Continue with the user's request."
+      }
+      if (state.status === "error") {
+        return "GitHub login failed: " + (state.error || "unknown") +
+          ". Tell the user briefly and continue without GitHub."
+      }
+      if (state.status === "timeout") {
+        return "The GitHub code expired before the user authorized it. Tell the user to send /github login again."
+      }
+    }
+    return "GitHub login is still pending. Tell the user the code may have expired and to send /github login."
+  },
+})
+'''
+
+
 def bootstrap_workspace() -> None:
     files = {
         WORKSPACE / "SOUL.md": SOUL_MD,
@@ -1128,6 +1202,7 @@ def bootstrap_workspace() -> None:
         WORKSPACE / ".opencode" / "tools" / "ask_user.js": ASK_TOOL_JS,
         WORKSPACE / ".opencode" / "tools" / "generate_image.js": IMAGE_TOOL_JS,
         WORKSPACE / ".opencode" / "tools" / "ask_gemini.js": ASK_GEMINI_TOOL_JS,
+        WORKSPACE / ".opencode" / "tools" / "github_login.js": GITHUB_LOGIN_TOOL_JS,
     }
     for path, content in files.items():
         if not path.exists():
@@ -1222,6 +1297,15 @@ def bootstrap_workspace() -> None:
                     "\n23. Luồng ảnh/video: Gemini 3.8 Flash đọc trước → bạn đối chiếu, phản biện, hỏi lại "
                     "nếu cần (tool `ask_gemini`) → bạn trả lời cuối cùng. Model chính vẫn viết câu trả lời. "
                     "Không nói mình đã trực tiếp xem ảnh/video khi chỉ có báo cáo; không bịa ngoài báo cáo.\n"
+                )
+                changed = True
+            if "github_login" not in old:
+                old = old.rstrip() + (
+                    "\n24. Người dùng muốn đăng nhập/kết nối GitHub, hoặc cần GitHub mà chưa có token → "
+                    "gọi tool `github_login` (bot tự gửi mã vào chat; bạn chờ tới khi người dùng Authorize "
+                    "rồi làm tiếp). Không bảo người dùng dán token/PAT vào chat.\n"
+                    "25. Sau khi sửa code trong repo chính, bot tự đẩy lên GitHub (nếu bật) để Windows CMD "
+                    "chạy `run.bat` nhận bản mới; muốn đẩy ngay thì dùng `/push`.\n"
                 )
                 changed = True
             if changed:
@@ -1563,6 +1647,97 @@ async def _deliver_ask(rec: dict) -> None:
         _ask_pop(rec["id"], cancelled=True)
 
 
+# ── Device login GitHub cho agent (tool github_login) ────────────────
+async def _gh_login_notice(chat_id: int, text: str) -> None:
+    if BOT_OBJ is None:
+        return
+    try:
+        await BOT_OBJ.send_message(chat_id, text, parse_mode=HTML,
+                                   link_preview_options=NO_PREVIEW)
+    except Exception as e:
+        log.debug("Không gửi được thông báo github_login: %s", e)
+
+
+def _sync_config_after_login() -> int:
+    """Sau khi đăng nhập GitHub: kéo token/API key còn thiếu từ repo private."""
+    if config_lib is None:
+        return 0
+    try:
+        protected = set(os.environ) - set(ENV_FROM_FILES)
+        result = config_lib.sync(quiet=True, protected=protected)
+        for name, value in (result.get("values") or {}).items():
+            if name in ENV_FROM_FILES and value:
+                os.environ[name] = value
+        _load_dotenv()
+        return int(result.get("added") or 0)
+    except Exception as e:
+        log.warning("Đồng bộ config sau đăng nhập GitHub: %s", oneline(str(e), 160))
+        return 0
+
+
+async def _deliver_github_login(chat_id: int, rid: str, device: dict) -> None:
+    state = GH_LOGIN_TASKS.get(rid) or {}
+    if BOT_OBJ is None:
+        state.update(status="error", error="bot chưa sẵn sàng")
+        return
+    try:
+        await BOT_OBJ.send_message(
+            chat_id,
+            "🐙 <b>Kết nối GitHub</b>\n"
+            f"1. Mở: {esc(state.get('url'))}\n"
+            f"2. Nhập mã: <code>{esc(state.get('code'))}</code>\n"
+            "3. Bấm <b>Authorize</b> — mình tự chạy tiếp ngay khi bạn xác nhận.\n"
+            "<i>Không cần nhắn gì thêm. Mã có hiệu lực khoảng 15 phút.</i>",
+            parse_mode=HTML, link_preview_options=NO_PREVIEW)
+    except Exception as e:
+        state.update(status="error", error=oneline(str(e), 160))
+        return
+    asyncio.create_task(_gh_login_wait(chat_id, rid, device))
+
+
+async def _gh_login_wait(chat_id: int, rid: str, device: dict) -> None:
+    state = GH_LOGIN_TASKS.get(rid) or {}
+    interval = max(5, int(device.get("interval") or 5))
+    deadline = time.time() + int(device.get("expires_in") or 900)
+    while time.time() < deadline and state.get("status") == "waiting":
+        await asyncio.sleep(interval)
+        try:
+            r = await asyncio.to_thread(_gh_device_poll, device["device_code"])
+        except Exception:
+            continue
+        err = str(r.get("error") or "")
+        if err == "authorization_pending":
+            continue
+        if err == "slow_down":
+            interval += 5
+            continue
+        if err:
+            state.update(status="error", error=err)
+            await _gh_login_notice(chat_id, f"❌ Đăng nhập GitHub thất bại: <code>{esc(err)}</code>")
+            return
+        token = str(r.get("access_token") or "")
+        if not token:
+            continue
+        try:
+            info = await asyncio.to_thread(save_github_token, token)
+        except Exception as e:
+            state.update(status="error", error=oneline(str(e), 160))
+            await _gh_login_notice(chat_id, f"❌ Không lưu được token GitHub: {esc(oneline(str(e), 200))}")
+            return
+        added = await asyncio.to_thread(_sync_config_after_login)
+        login = str(info.get("login") or "")
+        state.update(status="done", ok=True, login=login)
+        text = (f"✅ <b>Đã kết nối GitHub</b> · <b>{esc(login or '?')}</b>\n"
+                "• Token đã lưu — lần sau không phải đăng nhập lại.")
+        if added:
+            text += f"\n• Đã đồng bộ thêm {added} mục cấu hình từ repo private."
+        await _gh_login_notice(chat_id, text)
+        return
+    if state.get("status") == "waiting":
+        state.update(status="timeout", error="expired")
+        await _gh_login_notice(chat_id, "⌛ Mã đăng nhập đã hết hạn — gửi /github login để lấy mã mới.")
+
+
 class _AskHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1609,6 +1784,10 @@ class _AskHandler(BaseHTTPRequestHandler):
             chat_id = int(data.get("chat_id") or 0)
         except Exception as e:
             self._json(400, {"error": f"bad request: {e}"})
+            return
+
+        if path in ("/github-login", "/github-login-status"):
+            self._handle_github_login(path, data)
             return
 
         if path == "/vision":                # agent hỏi lại Gemini về ảnh/video vừa gửi
@@ -1685,6 +1864,65 @@ class _AskHandler(BaseHTTPRequestHandler):
         if not rec["event"].wait(ASK_TIMEOUT if ASK_TIMEOUT > 0 else None):
             _ask_pop(rec["id"], cancelled=True)
         self._json(200, {"answer": rec.get("answer"), "cancelled": bool(rec.get("cancelled"))})
+
+    def _handle_github_login(self, path: str, data: dict) -> None:
+        """Bắt đầu / kiểm tra phiên đăng nhập GitHub bằng mã cho agent."""
+        chat_id = int(data.get("chat_id") or 0)
+        if path == "/github-login-status":
+            rid = str(data.get("id") or "")
+            state = GH_LOGIN_TASKS.get(rid)
+            if not state:
+                self._json(404, {"ok": False, "status": "unknown", "error": "not found"})
+                return
+            self._json(200, {"ok": bool(state.get("ok")), "status": state.get("status"),
+                             "login": state.get("login") or "",
+                             "error": state.get("error") or ""})
+            return
+        if chat_id <= 0:
+            self._json(400, {"ok": False, "error": "missing chat_id"})
+            return
+        token = github_token()
+        if token:
+            try:
+                info = apply_github_config(token)
+                self._json(200, {"ok": True, "already": True,
+                                 "login": str(info.get("login") or "")})
+                return
+            except Exception:
+                pass
+        for rid, state in GH_LOGIN_TASKS.items():
+            if state.get("chat_id") == chat_id and state.get("status") == "waiting":
+                self._json(200, {"ok": True, "id": rid, "code": state.get("code"),
+                                 "url": state.get("url"),
+                                 "expires_in": state.get("expires_in")})
+                return
+        try:
+            device = _gh_device_start()
+        except Exception as e:
+            self._json(200, {"ok": False, "error": oneline(str(e), 200)})
+            return
+        now = time.time()
+        for old in [k for k, v in GH_LOGIN_TASKS.items()
+                    if now - float(v.get("created") or 0) > 1800]:
+            GH_LOGIN_TASKS.pop(old, None)
+        rid = secrets.token_hex(4)
+        GH_LOGIN_TASKS[rid] = {
+            "chat_id": chat_id, "code": str(device.get("user_code") or ""),
+            "url": str(device.get("verification_uri") or "https://github.com/login/device"),
+            "expires_in": int(device.get("expires_in") or 900),
+            "status": "waiting", "ok": False, "login": "", "error": "",
+            "created": now}
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _deliver_github_login(chat_id, rid, device), BOT_LOOP).result(timeout=20)
+        except Exception as e:
+            GH_LOGIN_TASKS[rid].update(status="error", error=oneline(str(e), 160))
+        state = GH_LOGIN_TASKS[rid]
+        if state.get("status") == "error":
+            self._json(200, {"ok": False, "error": state.get("error") or "unknown"})
+            return
+        self._json(200, {"ok": True, "id": rid, "code": state.get("code"),
+                         "url": state.get("url"), "expires_in": state.get("expires_in")})
 
 
 class _AskServer(ThreadingHTTPServer):
@@ -3203,6 +3441,35 @@ async def _run_web2api_direct(prompt: str, model: str) -> tuple:
     return False, "Web2API: " + (err or "không trả lời")
 
 
+async def _autopush_after_agent(chat_id: int) -> None:
+    """Đẩy code agent vừa sửa lên GitHub để Windows CMD pull được bản mới."""
+    if not AUTO_PUSH or not github_token():
+        return
+    rd = repo_dir()
+    if not rd:
+        return
+    try:
+        rc, dirty = await asyncio.to_thread(_git, ["status", "--porcelain"], rd)
+        if rc != 0 or not dirty.strip():
+            return
+        slug = current_repo_slug() or repo_remote_slug()
+        if not slug or not await asyncio.to_thread(repo_can_push, slug, github_token()):
+            return
+        await asyncio.to_thread(gh_push_code, slug)
+    except Exception as e:
+        log.warning("Tự đẩy code lên GitHub thất bại: %s", oneline(str(e), 200))
+        return
+    if BOT_OBJ is not None:
+        try:
+            await BOT_OBJ.send_message(
+                chat_id,
+                "⬆️ Đã đẩy code lên GitHub.\n"
+                "Windows chạy <code>run.bat</code> (hoặc <code>/update</code>) sẽ nhận bản này.",
+                parse_mode=HTML)
+        except Exception:
+            pass
+
+
 async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
     """Trả về (ok, text).
     Luôn gửi prompt qua stdin + `--format json` để theo dõi tiến độ và tránh giới
@@ -3234,6 +3501,7 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
             if ok:
                 if index > 0:
                     log.info("Đã trả lời bằng model dự phòng: %s", model)
+                asyncio.create_task(_autopush_after_agent(chat_id))
                 return True, text
             err_text = text
             quota = _is_quota_error(err_text)
@@ -3792,6 +4060,7 @@ HELP_TEXT = (
     "/github repos — quét repo của tài khoản, bấm nút để chọn repo đích\n"
     "/github repo use owner/name — đặt repo đích · /github repo create tên [private]\n"
     "/github status · /github repo · /github logout\n"
+    "/push — đẩy code lên GitHub ngay (Windows chạy run.bat là có bản mới)\n"
     "/update — pull bản mới trên GitHub rồi khởi động lại\n/restart — khởi động lại bot\n\n"
     "<b>Hệ thống (chủ bot)</b>\n/model [provider/tên] — xem/đổi model\n/models — danh sách model\n/allow &lt;id&gt; · /deny &lt;id&gt; — cấp/thu hồi quyền"
 )
@@ -4258,6 +4527,33 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(1)
     if not restart_bot():
         await msg.reply_text("ℹ️ Không tự khởi động lại được trong notebook. Hãy dừng ô và chạy lại lệnh run.")
+
+
+@guard(owner_only=True)
+async def cmd_push(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Đẩy code hiện tại lên GitHub để Windows CMD chạy run.bat là có bản mới."""
+    msg = update.effective_message
+    if not github_token():
+        await msg.reply_text("⚠️ Chưa kết nối GitHub. Dùng /github login rồi thử lại.")
+        return
+    rd = repo_dir()
+    if not rd:
+        await msg.reply_text("⚠️ Không tìm thấy repo (.git) trên máy.")
+        return
+    slug = current_repo_slug() or repo_remote_slug()
+    if not slug:
+        await msg.reply_text("⚠️ Chưa đặt repo đích. Dùng /github repos để chọn.")
+        return
+    await msg.reply_text(f"⏳ Đang đẩy code lên <code>{esc(slug)}</code>…", parse_mode=HTML)
+    try:
+        out = await asyncio.to_thread(gh_push_code, slug)
+    except Exception as e:
+        await msg.reply_text(f"⚠️ {esc(oneline(str(e), 500))}", parse_mode=HTML)
+        return
+    await msg.reply_text(
+        f"✅ Đã đẩy code lên <code>{esc(slug)}</code>.\n"
+        "Windows chỉ cần chạy <code>run.bat</code> để nhận bản mới.\n"
+        f"<pre>{esc(out[-500:])}</pre>", parse_mode=HTML)
 
 
 @guard(owner_only=True)
@@ -6767,6 +7063,7 @@ COMMANDS = [
     ("mindmap", "Vẽ sơ đồ tư duy"), ("video", "Xem video bằng Gemini"),
     ("summary", "Tóm tắt hội thoại vào trí nhớ"), ("email", "Đọc / gửi email"),
     ("github", "Kết nối / quản lý GitHub"), ("update", "Cập nhật bot từ GitHub"),
+    ("push", "Đẩy code lên GitHub (đồng bộ sang Windows)"),
     ("restart", "Khởi động lại bot"),
     ("key", "Xem / đặt API key"),
     ("web2api", "Dự phòng Gemini Web2API"),
@@ -7043,7 +7340,8 @@ def main() -> None:
                       (["mindmap", "sodotuduy"], cmd_mindmap),
                       (["video"], cmd_video),
                       (["summary", "summarize"], cmd_summary), (["email", "mail"], cmd_email),
-                      (["github"], cmd_github), (["update"], cmd_update), (["restart"], cmd_restart),
+                      (["github"], cmd_github), (["update"], cmd_update), (["push"], cmd_push),
+                      (["restart"], cmd_restart),
                       (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny),
                       (["key", "keys"], cmd_key),
                       (["web2api", "w2a"], cmd_web2api)]:

@@ -9,7 +9,7 @@
 #      bash keepalive.sh --status # xem trạng thái
 #
 #  Lưu ý: script này chống CRASH và chống tắt terminal/SSH.
-#  Nó KHÔNG chống được việc nền tảng (DataCamp/Colab) thu hồi máy —
+#  Nó KHÔNG chống được việc nền tảng (Colab) thu hồi máy —
 #  lúc đó cần chạy lại lệnh, hoặc dùng host chạy 24/7 (VPS/Railway).
 # ─────────────────────────────────────────────────────────────────────
 set -uo pipefail

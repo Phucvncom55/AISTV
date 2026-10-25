@@ -195,7 +195,7 @@ def _friendly(e: Exception) -> str:
         code = getattr(e, "errno", None)
         hint = ""
         if code in (101, 111, 113):
-            hint = (" — máy chủ này đang chặn cổng IMAP/SMTP (DataCamp, Colab thường chặn); "
+            hint = (" — máy chủ này đang chặn cổng IMAP/SMTP (Colab thường chặn); "
                     "thử trên VPS/Windows")
         return f"Không kết nối được máy chủ email ({s or 'timeout'}){hint}."
     return s or e.__class__.__name__

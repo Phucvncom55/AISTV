@@ -15,7 +15,7 @@ Engine (tự chọn theo thứ tự có sẵn)
   DOCX: python-docx → đọc trực tiếp word/document.xml (không cần thư viện)
   Ảnh : tesseract CLI → pytesseract
 
-Cài trên Debian/Ubuntu (DataCamp/Colab/VPS)
+Cài trên Debian/Ubuntu (Colab/VPS)
   sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr \
        tesseract-ocr-vie
   pip install pymupdf python-docx pytesseract

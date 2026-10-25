@@ -58,11 +58,18 @@ if exist "%APP_DIR%\.git" (
   echo [AI STV] Cap nhat ma nguon trong "%APP_DIR%"
   git -C "%APP_DIR%" pull --ff-only
   if errorlevel 1 (
-    echo [AI STV] Khong fast-forward duoc - lay dung ban %BRANCH% tren GitHub.
-    git -C "%APP_DIR%" fetch --depth 1 origin %BRANCH%
-    if errorlevel 1 goto fetch_fail
-    git -C "%APP_DIR%" reset --hard FETCH_HEAD
-    if errorlevel 1 goto reset_fail
+    set "LOCAL_DIRTY="
+    for /f "delims=" %%L in ('git -C "%APP_DIR%" status --porcelain') do set "LOCAL_DIRTY=1"
+    if defined LOCAL_DIRTY (
+      echo [AI STV] Co thay doi chua commit - dung ban hien co, khong reset de tranh mat code.
+      echo [AI STV] Muon lay ban moi: commit/stash roi chay lai, hoac dung /push ben Colab.
+    ) else (
+      echo [AI STV] Khong fast-forward duoc - lay dung ban %BRANCH% tren GitHub.
+      git -C "%APP_DIR%" fetch --depth 1 origin %BRANCH%
+      if errorlevel 1 goto fetch_fail
+      git -C "%APP_DIR%" reset --hard FETCH_HEAD
+      if errorlevel 1 goto reset_fail
+    )
   )
 ) else (
   echo [AI STV] Tai ma nguon tu %REPO%

@@ -37,6 +37,8 @@ if [[ -d "$APP_DIR/.git" ]]; then
   say "Cập nhật mã nguồn trong $APP_DIR"
   if git -C "$APP_DIR" pull --ff-only >/dev/null 2>&1; then
     :
+  elif [[ -n "$(git -C "$APP_DIR" status --porcelain 2>/dev/null)" ]]; then
+    say "Có thay đổi chưa commit — dùng bản hiện có (không reset để tránh mất code)."
   else
     say "Không fast-forward được — lấy đúng bản $BRANCH trên GitHub."
     git -C "$APP_DIR" fetch --depth 1 origin "$BRANCH" >/dev/null 2>&1 \

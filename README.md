@@ -41,7 +41,13 @@ Trong bot Telegram (chủ bot):
 /github repos                  # quét repo của tài khoản, bấm nút chọn repo đích
 /github repo use owner/name    # đặt repo đích bằng chữ
 /github repo create ten private  # tạo repo mới rồi tự push code
+/push                          # đẩy code vừa sửa lên GitHub ngay
 ```
+
+Sau mỗi lượt agent sửa code trong repo, bot **tự commit + push** (`AISTV_AUTO_PUSH=1`,
+mặc định) để Windows chạy `run.bat` là nhận đúng bản Colab vừa chạy được.
+Agent cũng có tool `github_login`: thiếu quyền GitHub thì tự xin mã
+`https://github.com/login/device`, gửi vào chat, **chờ bạn xác nhận rồi chạy tiếp**.
 
 Đổi token sang tài khoản khác: `/github token <PAT>` — nếu repo đang dùng không
 truy cập được, bot tự quét repo của tài khoản mới và hiện bảng chọn.
@@ -93,67 +99,9 @@ trực tiếp khi tất cả đều chưa có.
 Script tự: clone/cập nhật repo → đồng bộ config từ Colab Secrets / GitHub → chọn Python (venv → hệ thống → uv) → cài thư viện → cài OpenCode → chạy bot.
 Không có token ở bất kỳ nguồn nào thì script báo rõ cách thêm, không cài lan man.
 
-> Colab không có terminal tương tác nên **không nhập token bằng tay** được — hãy dùng Secrets
-> hoặc `AISTV_CONFIG_TOKEN`, hoặc `!TELEGRAM_BOT_TOKEN=123:abc bash <(curl ...)` nếu không ngại
-> lộ token trong notebook. Các giá trị lấy từ Secrets được lưu vào Drive `config.env`, nên các
-> phiên sau không cần bật lại quyền đọc Secrets.
-
-### Chạy trên DataCamp (log không nhập được gì)
-
-DataCamp Workspace là notebook, **không có stdin** — mọi prompt bị bỏ qua, script không bao giờ
-chờ nhập liệu. Chỉ cần truyền bí mật bằng biến môi trường, một dòng duy nhất:
-
-```bash
-TELEGRAM_BOT_TOKEN=123456:ABC... GEMINI_API_KEY=AQ... ALLOWED_USER_IDS=123456789 \
-  bash -c "curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9' | bash"
-```
-
-Hoặc chỉ truyền PAT một lần — `run.sh` tự lấy token/API key từ repo private và lưu vào
-`~/.config/aistv/config.env` cho các lần sau:
-
-```bash
-AISTV_CONFIG_TOKEN=github_pat_xxx \
-  bash -c "curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9' | bash"
-```
-
-Trong ô code của DataCamp thì thêm `!` ở đầu:
-
-```python
-!TELEGRAM_BOT_TOKEN=123456:ABC... GEMINI_API_KEY=AQ... ALLOWED_USER_IDS=123456789 bash -c "curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9' | bash"
-```
-
-Lưu ý:
-
-- **Chỉ cần `TELEGRAM_BOT_TOKEN`** nếu bí mật đã đồng bộ lên cloud (mặc định bot tự đẩy lên):
-  `GEMINI_API_KEY`, GitHub token, email… sẽ tự khôi phục khi khởi động, không phải nhập lại.
-- Dùng `curl | bash`, **không** dùng `bash <(curl ...)` — notebook chạy bằng `sh` nên
-  process substitution bị lỗi cú pháp.
-- Script tự lưu token vào `~/.config/aistv/config.env`; workspace còn file thì lần sau chỉ cần
-  `!bash -c "curl -fsSL ... | bash"`.
-- Không có TTY nên bước "xác nhận chủ bot" tự bỏ qua (không treo 180s). Muốn khoá bot thì
-  đặt `ALLOWED_USER_IDS` — nếu để trống, người nhắn riêng đầu tiên sẽ thành chủ bot.
-
-### Chạy trên Termux (Android)?
-
-**Không nên chạy bot trực tiếp trong Termux.** OpenCode chỉ phát hành binary cho Linux
-(glibc/musl), macOS và Windows — **không có bản Android**. Termux dùng libc riêng (bionic) nên
-`npm install -g @opencode/cli` cài xong sẽ báo lỗi kiểu `cannot execute: required file not found`,
-và `aistv_bot.py` sẽ dừng ở bước `Không tìm thấy lệnh opencode`.
-
-Nếu vẫn muốn dùng điện thoại làm server, phải chạy trong **proot-distro Ubuntu**:
-
-```bash
-pkg update && pkg install -y proot-distro
-proot-distro install ubuntu
-proot-distro login ubuntu
-# trong Ubuntu: cài python3, git, curl, ffmpeg rồi chạy như Linux bình thường
-```
-
-Kèm `termux-wake-lock` và tắt tối ưu pin cho Termux. Tuy vậy Android vẫn hay kill tiến trình
-nền, tốn pin/nóng máy — không phù hợp cho bot chạy 24/7.
-
-Cách đúng: bot chạy trên **VPS/cloud free** (Oracle Cloud ARM free tier, Google Cloud e2-micro…),
-còn điện thoại chỉ mở Telegram để **ra lệnh bằng giọng nói** — không cần Termux.
+> Chưa có `gh` lẫn `AISTV_CONFIG_TOKEN`? Script in mã `XXXX-XXXX` + `https://github.com/login/device`
+> ngay trong ô Colab; bạn nhập mã trên điện thoại/máy khác, script tự chạy tiếp và lưu token vào
+> Drive `config.env` — các phiên sau không cần làm lại.
 
 ### Chạy trên Windows (cmd / PowerShell)
 
@@ -204,7 +152,7 @@ GEMINI_API_KEY=...
 ```
 
 - **Mọi đường chạy dùng chung một bộ đồng bộ** `aistv_config.py`: `run.bat` (cmd),
-  `run.ps1` (PowerShell), `run.sh` (Linux/macOS/Colab/DataCamp) và cả `aistv_bot.py`.
+  `run.ps1` (PowerShell), `run.sh` (Colab/Linux/macOS) và cả `aistv_bot.py`.
   Sửa `config.env` trên GitHub là máy nào chạy cũng thấy — không còn cảnh cmd hỏi token
   dù token đã có trên GitHub.
 - Chỉ **hỏi token khi** cả biến môi trường, `.env`, `config.env` và GitHub/URL đều không có;
@@ -221,23 +169,16 @@ GEMINI_API_KEY=...
 - Khi bot khởi động, token/API key đang có được tự thêm vào `config.env` dùng chung
   (chỉ thêm, không ghi đè giá trị cũ) và các key còn lại khôi phục từ cloud.
 
-### Xác nhận chủ bot kiểu "device flow"
+### Chủ bot: chỉ cần `ALLOWED_USER_IDS`
 
-Không cần tự tìm `user id` rồi chép vào `.env`. Khi chưa có `ALLOWED_USER_IDS`, script:
+Không còn bước "xác nhận chủ bot" khi khởi động — bot kiểm tra **user id Telegram** ở mọi tin
+nhắn. Chỉ cần `ALLOWED_USER_IDS` có trong `config.env` (repo private lo sẵn), bot chạy là dùng
+được ngay, không hỏi gì.
 
-1. Gọi `getMe` → in link dạng `https://t.me/<bot>?start=<mã>`;
-2. **Chờ bạn bấm Start** (long-poll `getUpdates`), hiện đếm ngược;
-3. Nhận đúng mã → lưu `ALLOWED_USER_IDS` vào `config.env` + `.env` rồi chạy tiếp.
-
-Giống luồng `github.com/login/device`: bạn làm bên ngoài, script đợi rồi tự đi tiếp.
-
-```bash
-python aistv_pair.py                      # chạy riêng bước xác nhận
-python aistv_pair.py --timeout 300        # chờ lâu hơn (mặc định 180s)
-AISTV_PAIR=0 bash run.sh                  # bỏ qua, người nhắn đầu tiên thành chủ bot
-```
-
-Hết thời gian chờ → bot vẫn khởi động bình thường (không treo ở bước này).
+- Lấy id: nhắn `@userinfobot` trên Telegram, hoặc nhắn cho bot lần đầu — bot trả về id của bạn.
+- Nhiều người: `ALLOWED_USER_IDS=123456789,987654321`.
+- Nếu để trống, người nhắn tin riêng đầu tiên sẽ thành chủ bot (tiện cho lần chạy đầu).
+- Cấp/thu quyền thêm trong chat: `/allow <id>`, `/deny <id>` (chủ bot).
 
 ### Gemini key: không bắt nhập khi chạy
 
@@ -272,13 +213,17 @@ AISTV_CONFIG_TOKEN=github_pat_xxx \
 
 - Repo private đã có sẵn: **`Phucvncom55/AISTV-secrets`** — chứa token bot, Gemini, Groq/OpenAI,
   Cloudflare, email… Sửa `config.env` trên web GitHub là **mọi máy** (Windows cmd, PowerShell,
-  Colab, DataCamp, VPS) nhận thay đổi ở lần chạy sau.
+  Colab, VPS) nhận thay đổi ở lần chạy sau.
 - **Máy đã đăng nhập `gh` thì không cần PAT**: cả `run.bat` và `run.sh` tự dùng `gh auth token`.
   Windows chỉ cần dán lệnh `bootstrap.bat` ở trên — không hỏi token nếu repo private đã có.
-- **Colab / DataCamp không có `gh`**: đặt `AISTV_CONFIG_TOKEN` một lần (Colab Secrets hoặc biến
-  môi trường). Trên Colab, `run.sh` lưu luôn PAT + config vào Drive để các phiên sau không cần nhập lại.
-- PAT: *Settings → Developer settings → Fine-grained tokens* → chỉ chọn repo `AISTV-secrets`,
-  quyền **Contents: Read-only**.
+- **Chưa có `gh` lẫn PAT**: runner tự mở **device login** — in mã `XXXX-XXXX` và
+  `https://github.com/login/device`, chờ bạn nhập (tối đa `AISTV_DEVICE_TIMEOUT`, mặc định 600s)
+  rồi lưu token vào `config.env` và chạy tiếp, không phải nhập lại lần sau.
+  Tắt bằng `AISTV_DEVICE_LOGIN=0`.
+- Token đã lưu bởi `/github login` trong bot (`<STV_HOME>/.secrets/github_token`) cũng được
+  dùng để đọc repo private — đăng nhập một lần là cả hai phía dùng chung.
+- PAT (nếu muốn tự cấp): *Settings → Developer settings → Fine-grained tokens* → chỉ chọn repo
+  `AISTV-secrets`, quyền **Contents: Read-only**.
 - Lưu lệnh trên vào ghi chú/alias → các lần sau chạy là bot lên, không hỏi gì.
   Chỉ PAT nằm trong lệnh, không phải token bot.
 - Nếu để config ở nơi khác: `AISTV_ENV_URL=https://.../config.env` (tải trực tiếp, không cần token).
@@ -331,6 +276,7 @@ rm -rf ~/.opencode           # bản v1 cũ (dữ liệu phiên v2 giữ nguyên
 | `/skill add <github-url\|owner/repo/path>` | Cài skill chuẩn Agent Skills (chủ bot); thêm `--force`, `--name`, `--ref`, `--allow-restricted` |
 | `/files` `/get <đường dẫn>` | Liệt kê / tải file agent tạo |
 | `/allow <id>` `/deny <id>` | Cấp / thu hồi quyền (chủ bot) |
+| `/push` | Commit + push code đang có trong repo lên GitHub (chủ bot) — Windows `run.bat` nhận ngay |
 | `/key [gemini\|groq\|openai\|jina] [giá trị]` | Xem / đặt API key ngay trong chat (chủ bot); tin nhắn chứa key tự xoá |
 
 **Chủ động & trí nhớ**
@@ -490,12 +436,13 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `TELEGRAM_BOT_TOKEN` | — | Token từ BotFather (bắt buộc) |
 | `ALLOWED_USER_IDS` | trống | Danh sách user id được phép, cách nhau `,` |
 | `AISTV_CONFIG_DIR` | `~/.config/aistv` | Nơi lưu `config.env` dùng chung + hạn mức Gemini |
-| `AISTV_PAIR` | `1` | `0` = bỏ bước chờ bấm Start xác nhận chủ bot |
-| `AISTV_PAIR_TIMEOUT` | `180` | Số giây chờ xác nhận chủ bot trước khi chạy tiếp |
 | `AISTV_PROMPT_TIMEOUT` | `180` | Số giây chờ nhập token/key (chống treo) |
 | `AISTV_ASK_GEMINI` | `0` | `1` = hỏi Gemini key trong terminal; mặc định không hỏi |
 | `AISTV_CONFIG_REPO` | `Phucvncom55/AISTV-secrets` | `user/repo` private chứa `config.env`; `0` = tắt |
-| `AISTV_CONFIG_TOKEN` | tự lấy từ `gh` | PAT chỉ-đọc; cũng nhận `GH_TOKEN` / `GITHUB_TOKEN` / Colab Secrets |
+| `AISTV_CONFIG_TOKEN` | tự lấy từ `gh` | PAT chỉ-đọc; cũng nhận `GH_TOKEN` / `GITHUB_TOKEN` / `.secrets/github_token` / Colab Secrets |
+| `AISTV_DEVICE_LOGIN` | `1` | `0` = không tự đăng nhập GitHub bằng mã khi thiếu token |
+| `AISTV_DEVICE_TIMEOUT` | `600` | Số giây chờ bạn nhập mã ở `github.com/login/device` |
+| `AISTV_AUTO_PUSH` | `1` | `0` = không tự commit/push sau mỗi lượt agent sửa code (dùng `/push` thủ công) |
 | `AISTV_CONFIG_PATH` | `config.env` | Đường dẫn file cấu hình trong repo private |
 | `AISTV_CONFIG_SYNC` | `1` | `0` = không tự tải/đồng bộ config từ xa |
 | `AISTV_ENV_URL` | trống | URL tải thẳng `config.env` (không cần token) |

@@ -5,7 +5,7 @@
 Một chỗ duy nhất, dùng chung cho:
   • Windows cmd         (run.bat)
   • Windows PowerShell  (run.ps1)
-  • Linux / macOS / Colab / DataCamp (run.sh)
+  • Google Colab / Linux / macOS (run.sh)
   • Bot                 (aistv_bot.py gọi khi thiếu token)
 
 Thứ tự ưu tiên khi đọc:
@@ -20,7 +20,9 @@ Nguồn tải từ xa (khi có):
   1. AISTV_ENV_URL      - URL công khai trả về nội dung config.env
   2. AISTV_CONFIG_REPO  - repo private, mặc định Phucvncom55/AISTV-secrets
      Xác thực bằng (theo thứ tự): AISTV_CONFIG_TOKEN → GH_TOKEN / GITHUB_TOKEN
-     → `gh auth token` → Colab Secrets.
+     → .secrets/github_token → `gh auth token` → Colab Secrets.
+     Không có nguồn nào → tự chạy GitHub device login (github.com/login/device),
+     in mã, chờ bạn xác nhận rồi lưu token (AISTV_DEVICE_LOGIN=0 để tắt).
 
 Lệnh:
   python aistv_config.py sync [--quiet]   # nạp + đồng bộ, exit 0 nếu có token bot
@@ -31,11 +33,13 @@ Lệnh:
 """
 
 import argparse
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -52,6 +56,12 @@ DEFAULT_PATH = "config.env"
 CORE_KEYS = ("TELEGRAM_BOT_TOKEN",)
 HTTP_TIMEOUT = 20
 USER_AGENT = "aistv-config/1.0"
+
+# Device login (giống `gh auth login`): dùng client công khai của GitHub CLI.
+GH_CLIENT_ID = os.getenv("AISTV_GH_CLIENT_ID", "178c6fc778ccc68e1d6a")
+GH_SCOPES = os.getenv("AISTV_GH_SCOPES", "repo workflow read:user")
+DEVICE_TIMEOUT = int(os.getenv("AISTV_DEVICE_TIMEOUT", "600") or 600)
+_DEVICE_ATTEMPTED = False
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -257,6 +267,26 @@ def _pick(name: str, values: dict) -> str:
             or colab_secret(name))
 
 
+def stored_github_token() -> str:
+    """Token bot đã lưu sau /github login — dùng được cả khi máy không có gh."""
+    stv = (os.getenv("STV_HOME") or "").strip()
+    candidates = [Path("/content/stv_agent/.secrets/github_token"),
+                  Path.home() / "stv_agent" / ".secrets" / "github_token",
+                  Path.home() / ".secrets" / "github_token",
+                  repo_dir() / ".secrets" / "github_token"]
+    if stv:
+        candidates.insert(0, Path(stv).expanduser() / ".secrets" / "github_token")
+    for path in candidates:
+        try:
+            if path.is_file():
+                token = path.read_text("utf-8").strip()
+                if token:
+                    return token
+        except Exception:
+            continue
+    return ""
+
+
 def github_tokens(values: dict = None) -> list:
     """Các cặp (nguồn, token) có thể dùng để đọc repo private."""
     values = values or {}
@@ -270,6 +300,10 @@ def github_tokens(values: dict = None) -> list:
             if token and token not in seen:
                 seen.add(token)
                 out.append((source, token))
+    stored = stored_github_token()
+    if stored and stored not in seen:
+        seen.add(stored)
+        out.append(("file .secrets/github_token", stored))
     gh = shutil.which("gh")
     if gh:
         try:
@@ -289,6 +323,102 @@ def _http_get(url: str, headers: dict = None) -> str:
         return resp.read().decode("utf-8", "replace")
 
 
+def _post_form(url: str, data: dict) -> dict:
+    body = urllib.parse.urlencode(data).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers={
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": USER_AGENT,
+    })
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    return json.loads(raw) if raw.strip() else {}
+
+
+def _copy_to_clipboard(text: str) -> None:
+    if os.name != "nt":
+        return
+    try:
+        subprocess.run(["clip"], input=text, text=True, timeout=5,
+                       capture_output=True, check=False)
+    except Exception:
+        pass
+
+
+def github_device_login(timeout: int = None, log=None) -> str:
+    """Đăng nhập GitHub bằng mã (device flow) và trả về token.
+
+    Cùng luồng với `gh auth login --web`: in mã, chờ người dùng nhập trên
+    github.com/login/device, rồi tự đi tiếp. Không bao giờ in token.
+    """
+    global _DEVICE_ATTEMPTED
+    if _DEVICE_ATTEMPTED:
+        return ""
+    if os.getenv("AISTV_DEVICE_LOGIN", "1").strip().lower() in ("0", "off", "false", "no"):
+        return ""
+    _DEVICE_ATTEMPTED = True
+    say = log or (lambda message: print(message, flush=True))
+    try:
+        start = _post_form("https://github.com/login/device/code",
+                           {"client_id": GH_CLIENT_ID, "scope": GH_SCOPES})
+    except Exception as e:
+        say(f"[config] Không xin được mã đăng nhập GitHub: {type(e).__name__}.")
+        return ""
+    user_code = str(start.get("user_code") or "").strip()
+    url = str(start.get("verification_uri") or "https://github.com/login/device").strip()
+    if not user_code:
+        say("[config] GitHub không trả về mã đăng nhập.")
+        return ""
+    interval = max(5, int(start.get("interval") or 5))
+    expires = min(int(timeout or DEVICE_TIMEOUT), int(start.get("expires_in") or 900))
+    _copy_to_clipboard(user_code)
+    say("")
+    say("🔑 Cần đăng nhập GitHub để lấy token/API key từ repo private.")
+    say(f"   1. Mở: {url}")
+    say(f"   2. Nhập mã: {user_code}")
+    say("   3. Bấm Authorize — script tự chạy tiếp, không cần làm gì thêm.")
+    say(f"   (chờ tối đa {expires}s · AISTV_DEVICE_LOGIN=0 để bỏ qua)")
+    say("")
+    deadline = time.time() + expires
+    while time.time() < deadline:
+        time.sleep(interval)
+        try:
+            r = _post_form("https://github.com/login/oauth/access_token", {
+                "client_id": GH_CLIENT_ID,
+                "device_code": str(start.get("device_code") or ""),
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            })
+        except Exception:
+            continue
+        err = str(r.get("error") or "")
+        if err == "authorization_pending":
+            continue
+        if err == "slow_down":
+            interval += 5
+            continue
+        if err:
+            say(f"[config] Đăng nhập GitHub thất bại: {err}")
+            return ""
+        token = str(r.get("access_token") or "").strip()
+        if token:
+            say("[config] ✅ Đã đăng nhập GitHub — tiếp tục đồng bộ cấu hình.")
+            return token
+    say("[config] ⏱ Hết thời gian chờ đăng nhập GitHub — sẽ thử lại lần chạy sau.")
+    return ""
+
+
+def _remember_config_token(token: str, values: dict = None) -> None:
+    """Lưu token vừa đăng nhập để lần chạy sau không phải đăng nhập lại."""
+    values = values if values is not None else {}
+    os.environ.setdefault("AISTV_CONFIG_TOKEN", token)
+    values.setdefault("AISTV_CONFIG_TOKEN", token)
+    for path in (shared_config_path(), repo_dir() / ".env"):
+        write_env_var(path, "AISTV_CONFIG_TOKEN", token)
+        if not ((os.getenv("GITHUB_TOKEN") or "").strip()
+                or (values.get("GITHUB_TOKEN") or "").strip()):
+            write_env_var(path, "GITHUB_TOKEN", token)
+
+
 def normalize_repo(repo: str) -> str:
     repo = (repo or "").strip().rstrip("/")
     for prefix in ("https://github.com/", "http://github.com/", "git@github.com:"):
@@ -306,29 +436,41 @@ def fetch_url(url: str) -> str:
         return ""
 
 
-def fetch_github(repo: str, path: str, token: str = "") -> str:
+def fetch_github_status(repo: str, path: str, token: str = "") -> tuple:
+    """Tải file trong repo → (nội dung, mã HTTP). Mã 0 = lỗi mạng."""
     repo = normalize_repo(repo)
     path = (path or DEFAULT_PATH).lstrip("/")
     if not repo or ".." in path:
-        return ""
+        return "", 0
     quoted = urllib.parse.quote(path)
     headers = {"Accept": "application/vnd.github.raw"}
     if token:
         headers["Authorization"] = "Bearer " + token
+    status = 0
     try:
         text = _http_get(f"https://api.github.com/repos/{repo}/contents/{quoted}", headers)
         if "=" in text:
-            return text
+            return text, 200
+        return text, 204
     except urllib.error.HTTPError as e:
-        if e.code not in (401, 403, 404):
-            pass
+        status = e.code
     except Exception:
-        pass
-    # Dự phòng cho repo public / raw.githubusercontent.com
+        status = 0
+    if status in (401, 403):
+        return "", status            # token sai/thiếu quyền → raw cũng không đọc được
     try:
-        return _http_get(f"https://raw.githubusercontent.com/{repo}/HEAD/{quoted}")
+        text = _http_get(f"https://raw.githubusercontent.com/{repo}/HEAD/{quoted}")
+        if "=" in text:
+            return text, 200
+        return text, 204
+    except urllib.error.HTTPError as e:
+        return "", e.code
     except Exception:
-        return ""
+        return "", status
+
+
+def fetch_github(repo: str, path: str = DEFAULT_PATH, token: str = "") -> str:
+    return fetch_github_status(repo, path, token)[0]
 
 
 def fetch_remote(values: dict = None, log=None) -> tuple:
@@ -350,12 +492,17 @@ def fetch_remote(values: dict = None, log=None) -> tuple:
     if repo.lower() not in ("0", "off", "none", "false"):
         path = _pick("AISTV_CONFIG_PATH", values) or DEFAULT_PATH
         tokens = github_tokens(values)
-        # Repo mặc định + không có token → gần như chắc chắn private: bỏ qua cho nhanh.
+        # Chưa có nguồn token nào → đăng nhập GitHub bằng mã một lần rồi tiếp tục.
+        if not tokens:
+            token = github_device_login(log=log)
+            if token:
+                _remember_config_token(token, values)
+                tokens = [("GitHub device login", token)]
         explicit = bool((os.getenv("AISTV_CONFIG_REPO") or values.get("AISTV_CONFIG_REPO") or "").strip())
         if tokens or explicit:
             candidates = tokens or [("không xác thực", "")]
             for source, token in candidates:
-                text = fetch_github(repo, path, token)
+                text, status = fetch_github_status(repo, path, token)
                 data = parse_env_text(text)
                 if data:
                     for name, value in data.items():
@@ -363,8 +510,19 @@ def fetch_remote(values: dict = None, log=None) -> tuple:
                             merged[name] = value
                     labels.append(f"GitHub {repo}" + (f" ({source})" if source != "không xác thực" else ""))
                     break
+                if log:
+                    if status == 404:
+                        log(f"[config] Không đọc được {repo}/{path} bằng {source}: HTTP 404 "
+                            "— token thiếu quyền Contents:Read hoặc file không tồn tại.")
+                    elif status == 401 or status == 403:
+                        log(f"[config] Không đọc được {repo}/{path} bằng {source}: HTTP {status} "
+                            "— token hết hạn hoặc thiếu quyền.")
+                    elif status == 0:
+                        log(f"[config] Không kết nối được GitHub bằng {source} (lỗi mạng).")
+                    else:
+                        log(f"[config] Không đọc được {repo}/{path} bằng {source}: HTTP {status}.")
     if log and not labels:
-        log("Chưa có nguồn cấu hình từ xa (gh chưa đăng nhập / chưa có "
+        log("Chưa có nguồn cấu hình từ xa (chưa đăng nhập GitHub / chưa có "
             "AISTV_CONFIG_TOKEN / AISTV_ENV_URL) — dùng cấu hình sẵn có.")
     return merged, labels
 
@@ -474,7 +632,16 @@ def cmd_doctor(repo: Path = None) -> int:
     tokens = github_tokens(values)
     print("Token GitHub    : " + (", ".join(s for s, _ in tokens) if tokens else "không có"))
     print(f"AISTV_ENV_URL   : {'có' if _pick('AISTV_ENV_URL', values) else 'chưa đặt'}")
-    print(f"Repo cấu hình   : {_pick('AISTV_CONFIG_REPO', values) or DEFAULT_REPO}")
+    repo = _pick("AISTV_CONFIG_REPO", values) or DEFAULT_REPO
+    print(f"Repo cấu hình   : {repo}")
+    path = _pick("AISTV_CONFIG_PATH", values) or DEFAULT_PATH
+    if repo.lower() not in ("0", "off", "none", "false"):
+        for source, token in tokens or [("không xác thực", "")]:
+            text, status = fetch_github_status(repo, path, token)
+            count = len(parse_env_text(text))
+            state = f"OK ({count} biến)" if count else (
+                f"HTTP {status}" if status else "lỗi mạng")
+            print(f"  đọc bằng      : {source} → {state}")
     print("Biến đang có:")
     keys = sorted(set(values) | {"TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY"})
     for name in keys:
