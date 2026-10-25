@@ -563,6 +563,24 @@ header `name=value; ...`, `Cookie: ...`, JSON export, Netscape `cookies.txt` (c�
 `#HttpOnly_...`) hay cURL đều được tự chuẩn hoá, không cần sửa tay. Bản mã hoá cũ
 (`cookies.enc` + `passphrase`) được tự giải mã một lần sang `cookie.txt` nguyên văn.
 Trong chat: `/web2api` hoặc `/web2api import <chuỗi cookie>` (tin nhắn chứa cookie tự xoá).
+
+**Xem ảnh và tạo ảnh bằng Web2API.** Ngoài chat chữ, server được vá thêm hai khả năng
+(không cần API key trả phí):
+
+- **Xem ảnh:** gửi ảnh/URL ảnh cho bot, Gemini Web đọc chữ (OCR), vật thể, màu sắc…
+  Khi Gemini API hết hạn mức, `aistv_watch.py` tự chuyển sang Web2API.
+- **Tạo ảnh:** `aistv_image.py` ưu tiên Web2API (provider `web2api`), lỗi thì tự lùi về
+  Cloudflare/Gemini/Together/HF. Ảnh trả về được lưu như ảnh do các provider khác tạo.
+
+Patch nằm trong `patches/gemini-web2api-image.patch` và được tự áp khi chạy `setup`/`start`
+(lần đầu cần `curl_cffi`). Kiểm tra nhanh:
+
+```bash
+python aistv_web2api.py doctor
+python aistv_web2api.py test --image "một chú mèo phi hành gia"
+python aistv_image.py "một chú mèo phi hành gia" --provider web2api --json
+```
+
 Chi tiết: [docs/WEB2API.md](docs/WEB2API.md).
 
 ## 6. Cấu trúc
@@ -575,11 +593,12 @@ AISTV/
 ├── aistv_facebook.py đọc bài công khai, video/reel, tải video Facebook
 ├── aistv_tiktok.py   thông tin, tải video không watermark, tìm kiếm TikTok
 ├── aistv_watch.py    đọc ảnh + xem video bằng Gemini, transcript + frames
-├── aistv_image.py    tạo ảnh (Gemini/Cloudflare/Together/HF) + vẽ sơ đồ tư duy Pillow
+├── aistv_image.py    tạo ảnh (Web2API/Cloudflare/Gemini/Together/HF) + vẽ sơ đồ tư duy Pillow
 ├── aistv_skills.py   cài skill chuẩn Agent Skills từ GitHub/zip
 ├── aistv_github_docs.py  đọc README/docs, tìm trong tài liệu và mã GitHub
 ├── aistv_config.py   đồng bộ config/token dùng chung cho mọi runner (sync/check/get/set/doctor)
 ├── aistv_web2api.py  dự phòng Gemini Web2API + đồng bộ cookie nguyên văn (auto/import/push/pull)
+├── patches/          patch thêm xem ảnh + tạo ảnh cho server Web2API
 ├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
 ├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)
 ├── bootstrap.bat     như bootstrap.sh nhưng cho Windows (cmd thuần, khuyên dùng)

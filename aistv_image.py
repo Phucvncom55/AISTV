@@ -9,11 +9,12 @@ CLI
   python aistv_image.py --list-styles
 
 Provider (tự chọn theo key có sẵn, theo thứ tự):
-  1. Gemini  — AISTV_IMAGE_MODEL (mặc định gemini-3.1-flash-image)
-               LƯU Ý: API free tier hiện cấp 0 lượt tạo ảnh → cần bật billing.
+  1. Gemini Web2API — cookie Gemini Web nội bộ (không cần API key, xem aistv_web2api.py)
   2. Cloudflare Workers AI — CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (có free tier)
-  3. Together AI — TOGETHER_API_KEY (model FLUX.1-schnell-Free)
-  4. Hugging Face — HF_TOKEN / HUGGINGFACE_API_KEY
+  3. Gemini API — AISTV_IMAGE_MODEL (mặc định gemini-3.1-flash-image)
+                  LƯU Ý: API free tier hiện cấp 0 lượt tạo ảnh → cần bật billing.
+  4. Together AI — TOGETHER_API_KEY (model FLUX.1-schnell-Free)
+  5. Hugging Face — HF_TOKEN / HUGGINGFACE_API_KEY
 """
 import os, sys, re, json, time, base64, math, random, string, uuid, argparse, mimetypes, unicodedata
 import urllib.request, urllib.error, urllib.parse
@@ -26,6 +27,11 @@ OUT_DIR = HOME / "generated"
 FONT_DIR = REPO_DIR / "seed" / "fonts"
 SECRETS_DIR = REPO_DIR / ".secrets"
 GEMINI_BASE = "https://generativelanguage.googleapis.com"
+
+try:                                     # server Gemini Web nội bộ (dự phòng)
+    import aistv_web2api as web2api
+except Exception:
+    web2api = None
 
 # File bí mật dùng chung với aistv_cloudflare.py (không in ra chat).
 SECRET_FILES = {
@@ -317,6 +323,30 @@ def gemini_image(prompt: str, aspect: str = "1:1", ref: str = "", size: str = ""
     raise ImageError(last_err or "Gemini không trả ảnh")
 
 
+# ── Provider: Gemini Web2API (cookie, không cần API key) ──────────────
+def _web2api_ready() -> bool:
+    try:
+        return bool(web2api is not None and web2api.enabled())
+    except Exception:
+        return False
+
+
+def web2api_image(prompt: str, aspect: str = "1:1", ref: str = "", size: str = "", **_):
+    if web2api is None:
+        raise ImageError("thiếu aistv_web2api.py")
+    if not web2api.enabled():
+        raise ImageError("Web2API đang tắt (WEB2API_ENABLE=0)")
+    if ref:
+        raise ImageError("Web2API chưa nhận ảnh tham chiếu — dùng Gemini API")
+    full = prompt
+    if aspect and aspect != "1:1":
+        full = f"{prompt} Aspect ratio {aspect}."
+    raw, mime, err = web2api.generate_image(full, timeout=300)
+    if not raw:
+        raise ImageError(err or "Web2API không trả ảnh")
+    return raw, mime or "image/png", "web2api/" + web2api.default_model()
+
+
 # ── Provider: Cloudflare Workers AI ───────────────────────────────────
 CF_API = "https://api.cloudflare.com/client/v4"
 CF_MODELS = {
@@ -551,7 +581,8 @@ def pollinations_image(prompt: str, aspect: str = "1:1", **_):
 
 
 PROVIDERS = {
-    # Cloudflare đứng đầu: flux-2 cho ảnh đúng mô tả, có free tier.
+    # Web2API đứng đầu: dùng cookie Gemini Web, không tốn API key.
+    "web2api": (web2api_image, _web2api_ready),
     "cloudflare": (cloudflare_image,
                    lambda: bool(secret("CLOUDFLARE_ACCOUNT_ID") and secret("CLOUDFLARE_API_TOKEN"))),
     "gemini": (gemini_image, lambda: bool(gemini_key())),
@@ -573,6 +604,9 @@ def generate(prompt: str, style: str = "", aspect: str = "1:1", ref: str = "",
     wanted = (provider or secret("AISTV_IMAGE_PROVIDER") or "auto").strip().lower()
     if wanted in ("", "auto"):
         order = [name for name, (_, ready) in PROVIDERS.items() if ready()]
+        if model and _cf_model_key(model) and "web2api" in order:
+            # Người dùng chỉ định model Cloudflare (flux-2-dev, schnell…) → bỏ Web2API.
+            order.remove("web2api")
         if not order:
             raise ImageError(
                 "Chưa có nguồn tạo ảnh nào. Chọn 1 cách:\n"
@@ -1371,7 +1405,7 @@ def main():
     ap.add_argument("--ref", default="", help="ảnh tham chiếu (chỉ Gemini)")
     ap.add_argument("--size", default="", help="1K / 2K / 4K (Gemini 3)")
     ap.add_argument("--model", default="", help="flux-2-dev | flux-2-klein-9b | flux-1-schnell | ...")
-    ap.add_argument("--provider", default="", help="cloudflare | gemini | together | hf | auto")
+    ap.add_argument("--provider", default="", help="web2api | cloudflare | gemini | together | hf | auto")
     ap.add_argument("--out", default="", help="đường dẫn file kết quả")
     ap.add_argument("--json", action="store_true", help="in JSON")
     ap.add_argument("--list-styles", action="store_true", help="liệt kê phong cách")

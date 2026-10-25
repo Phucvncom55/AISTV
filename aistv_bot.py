@@ -3306,6 +3306,11 @@ def email_line() -> str:
 
 def image_provider_line() -> str:
     names = []
+    try:
+        if web2api is not None and web2api.enabled():
+            names.append("Gemini Web2API")
+    except Exception:
+        pass
     if get_secret("GEMINI_API_KEY") or get_secret("GOOGLE_API_KEY"):
         names.append("Gemini")
     if get_secret("CLOUDFLARE_ACCOUNT_ID") and get_secret("CLOUDFLARE_API_TOKEN"):
@@ -6394,6 +6399,7 @@ async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Cookie: {'✅ có' if info['cookie'] else '❌ chưa có'} · "
             f"XSRF: {'✅' if info['xsrf'] else '❌'} · "
             f"GitHub: {'✅ đã đồng bộ' if info['synced'] else '⏳ chưa đẩy'}",
+            f"• Xem/tạo ảnh: {'✅ sẵn sàng' if info.get('images_ready') else ('⚠️ thiếu curl_cffi' if info.get('images') and not info.get('curl_cffi') else ('⚠️ server chưa chạy' if info.get('images') else '❌ chưa vá — chạy /web2api restart'))}",
             f"• File dán cookie: <code>{esc(info['cookie_file'])}</code>",
             f"• Kho đồng bộ: <code>{esc(info['store'])}</code> (nguyên văn, repo private)",
             "",

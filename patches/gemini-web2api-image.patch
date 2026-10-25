@@ -1,0 +1,2278 @@
+diff --git a/gemini_web2api/config.py b/gemini_web2api/config.py
+index 5809f0b..7bfc3c9 100644
+--- a/gemini_web2api/config.py
++++ b/gemini_web2api/config.py
+@@ -17,6 +17,9 @@ DEFAULT_CONFIG = {
+     "proxy": None,
+     "api_keys": [],
+     "temporary_chats": False,
++    # Generated image output only; values above the hard safety caps are ignored.
++    "generated_image_max_bytes": 10 * 1024 * 1024,
++    "generated_image_max_redirects": 3,
+ }
+ 
+ CONFIG = dict(DEFAULT_CONFIG)
+diff --git a/gemini_web2api/gemini.py b/gemini_web2api/gemini.py
+index d69b08d..0ebc52d 100644
+--- a/gemini_web2api/gemini.py
++++ b/gemini_web2api/gemini.py
+@@ -1,13 +1,16 @@
+ """Gemini StreamGenerate protocol implementation with httpx streaming."""
++from __future__ import annotations
++
++import hashlib
+ import json
+-import time
+-import uuid
++import os
+ import re
+-import urllib.request
+-import urllib.parse
++import secrets
+ import ssl
+-import os
+-import hashlib
++import time
++import urllib.parse
++import urllib.request
++import uuid
+ 
+ try:
+     import httpx
+@@ -15,13 +18,31 @@ try:
+ except ImportError:
+     HAS_HTTPX = False
+ 
++try:
++    from curl_cffi import requests as curl_requests
++    HAS_CURL_CFFI = True
++except ImportError:
++    curl_requests = None
++    HAS_CURL_CFFI = False
++
+ from .config import CONFIG
++from .generated_image import GenerationResult, extract_generation_result
+ 
+ _ssl_ctx = None
+ _cookie_cache = {"str": "", "sapisid": None, "mtime": 0}
+ _httpx_client = None
+ 
+ 
++class GeminiUpstreamError(RuntimeError):
++    """A non-retryable rejection returned by Gemini's application protocol."""
++
++
++def _upstream_error(code: int) -> GeminiUpstreamError:
++    return GeminiUpstreamError(
++        f"Gemini upstream rejected request: BardErrorInfo [{code}]"
++    )
++
++
+ def log(msg: str):
+     if CONFIG["log_requests"]:
+         import sys
+@@ -85,7 +106,12 @@ def _account_prefix() -> str:
+     return f"/u/{auth_user}"
+ 
+ 
+-def _build_headers() -> dict:
++_IMAGE_MODEL_HEADER_KEY = "x-goog-ext-525001261-jspb"
++# Known image-capable route used only when the account page does not expose one.
++_IMAGE_MODEL_FALLBACK = ("8c46e95b1a07cecc", "2", 6)
++
++
++def _build_headers(request_uuid: str = None) -> dict:
+     account_prefix = _account_prefix()
+     headers = {
+         "Content-Type": "application/x-www-form-urlencoded",
+@@ -94,6 +120,8 @@ def _build_headers() -> dict:
+         "X-Same-Domain": "1",
+         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+     }
++    if request_uuid:
++        headers["x-goog-ext-525005358-jspb"] = f'["{request_uuid}",1]'
+     if account_prefix:
+         headers["X-Goog-AuthUser"] = str(CONFIG["auth_user"])
+     cookie_str, sapisid = load_cookie()
+@@ -104,6 +132,35 @@ def _build_headers() -> dict:
+     return headers
+ 
+ 
++def _build_model_headers(model_id: str, capacity_tail: str | int,
++                         model_category: int) -> dict:
++    """Build Gemini Web model-selection headers without session values."""
++    return {
++        _IMAGE_MODEL_HEADER_KEY: (
++            f'[1,null,null,null,"{model_id}",null,null,0,[4,5,6,8],null,null,'
++            f'{capacity_tail},null,null,{model_category}]'
++        ),
++        "x-goog-ext-73010989-jspb": "[0]",
++        "x-goog-ext-73010990-jspb": "[0,0,0]",
++    }
++
++
++def _image_model_headers(page_tokens: dict, session_uuid: str = None) -> dict:
++    """Use current page model routing when available, with a bounded public fallback."""
++    discovered = page_tokens.get("image_model")
++    if (isinstance(discovered, (tuple, list)) and len(discovered) == 3
++            and re.fullmatch(r"[a-f0-9]{16}", str(discovered[0]))
++            and str(discovered[1]).isdigit() and str(discovered[2]) == "6"):
++        model_id, capacity_tail, category = discovered
++    else:
++        model_id, capacity_tail, category = _IMAGE_MODEL_FALLBACK
++    headers = _build_model_headers(str(model_id), str(capacity_tail), int(category))
++    model_header = json.loads(headers[_IMAGE_MODEL_HEADER_KEY])
++    model_header.extend([1, session_uuid or str(uuid.uuid4()).upper()])
++    headers[_IMAGE_MODEL_HEADER_KEY] = json.dumps(model_header)
++    return headers
++
++
+ def _apply_chat_persistence_flags(inner: list) -> None:
+     """Apply Gemini Web persistence flags to an outgoing request payload."""
+     if CONFIG.get("temporary_chats", False):
+@@ -114,10 +171,26 @@ def _apply_chat_persistence_flags(inner: list) -> None:
+         inner[41] = [2]
+ 
+ 
+-def _build_payload(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None) -> str:
+-    inner = [None] * 102
++def _normalise_file_ref(file_ref) -> list:
++    """Convert legacy refs and ``(ref, filename)`` pairs to Gemini's file shape."""
++    if isinstance(file_ref, (tuple, list)) and len(file_ref) == 2:
++        ref, filename = file_ref
++    else:
++        ref, filename = file_ref, "image.png"
++    if not isinstance(ref, str) or not ref:
++        raise ValueError("invalid uploaded file reference")
++    return [[ref], filename or "image.png"]
++
++
++def _build_payload(prompt: str, model_id: int, think_mode: int, file_refs: list = None,
++                   extra_fields: dict = None, xsrf_token: str = None,
++                   request_uuid: str = None) -> str:
++    # File-bearing requests use the current 81-slot Gemini Web protocol and
++    # require slot 80. Preserve the established text-only payload unchanged.
++    # Callers may still pass old plain string refs.
++    inner = [None] * (81 if file_refs else 102)
+     if file_refs:
+-        refs = [[None, None, ref] for ref in file_refs]
++        refs = [_normalise_file_ref(ref) for ref in file_refs]
+         inner[0] = [prompt, 0, None, refs, None, None, 0]
+     else:
+         inner[0] = [prompt, 0, None, None, None, None, 0]
+@@ -133,27 +206,75 @@ def _build_payload(prompt: str, model_id: int, think_mode: int, file_refs: list
+     inner[30] = [4]
+     _apply_chat_persistence_flags(inner)
+     inner[53] = 0
+-    inner[59] = str(uuid.uuid4())
++    inner[59] = request_uuid or str(uuid.uuid4())
+     inner[61] = []
+     inner[68] = 1
+     inner[79] = model_id
++    if file_refs:
++        inner[80] = 1
+     if extra_fields:
+         for k, v in extra_fields.items():
+             inner[k] = v
+     outer = [None, json.dumps(inner)]
+     params = {"f.req": json.dumps(outer)}
+-    if CONFIG.get("xsrf_token"):
+-        params["at"] = CONFIG["xsrf_token"]
++    if xsrf_token or CONFIG.get("xsrf_token"):
++        params["at"] = xsrf_token or CONFIG["xsrf_token"]
++    return urllib.parse.urlencode(params)
++
++
++def _build_image_payload(prompt: str, request_uuid: str, xsrf_token: str = None) -> str:
++    """Build the capture-derived 97-slot image StreamGenerate body.
++
++    Slots 3 and 4 deliberately contain fresh browser-style opaque/request IDs;
++    no captured values are retained.  This mode is separate from text and
++    attachment payloads because Gemini's image route rejects their shape.
++    """
++    inner = [None] * 97
++    inner[0] = [prompt, 0, None, None, None, None, 0]
++    inner[1] = ["en"]
++    inner[2] = ["", "", "", None, None, None, None, None, None, ""]
++    # 1 + 2538 URL-safe Base64 characters = the 2539-character GUI slot.
++    inner[3] = "!" + secrets.token_urlsafe(1903)
++    inner[4] = uuid.uuid4().hex
++    inner[6] = [0]
++    inner[7] = 1
++    inner[10] = 1
++    inner[11] = 0
++    inner[17] = [[0]]
++    inner[18] = 0
++    inner[27] = 1
++    inner[30] = [4]
++    inner[41] = [1]
++    inner[53] = 0
++    inner[59] = request_uuid
++    inner[61] = []
++    inner[67] = 0
++    inner[68] = 1
++    inner[79] = 6
++    inner[80] = 1
++    inner[91] = 0
++    inner[96] = 0
++    params = {"f.req": json.dumps([None, json.dumps(inner)])}
++    if xsrf_token or CONFIG.get("xsrf_token"):
++        params["at"] = xsrf_token or CONFIG["xsrf_token"]
+     return urllib.parse.urlencode(params)
+ 
+ 
+-def _get_url() -> str:
++def _get_url(session_id: str = None) -> str:
+     reqid = int(time.time()) % 1000000
+     account_prefix = _account_prefix()
++    params = {
++        "bl": CONFIG["gemini_bl"],
++        "hl": "en",
++        "_reqid": reqid,
++        "rt": "c",
++    }
++    if session_id:
++        params["f.sid"] = session_id
+     return (
+         f"https://gemini.google.com{account_prefix}/_/BardChatUi/data/"
+-        "assistant.lamda.BardFrontendService/StreamGenerate"
+-        f"?bl={CONFIG['gemini_bl']}&hl=en&_reqid={reqid}&rt=c"
++        "assistant.lamda.BardFrontendService/StreamGenerate?"
++        f"{urllib.parse.urlencode(params)}"
+     )
+ 
+ 
+@@ -189,11 +310,51 @@ def _extract_texts_from_line(line: str) -> list:
+         return []
+ 
+ 
++def _bard_error_code(raw: str) -> int | None:
++    """Return a BardErrorInfo code from legacy text or structured wrb.fr frames."""
++    legacy = re.search(r'BardErrorInfo\s*\[(\d+)\]', raw)
++    if legacy:
++        return int(legacy.group(1))
++
++    def find(value):
++        if isinstance(value, list):
++            for index, item in enumerate(value):
++                if (isinstance(item, str) and item.endswith(".BardErrorInfo")
++                        and index + 1 < len(value)):
++                    details = value[index + 1]
++                    if (isinstance(details, list) and details
++                            and isinstance(details[0], int)):
++                        return details[0]
++                code = find(item)
++                if code is not None:
++                    return code
++        elif isinstance(value, dict):
++            for item in value.values():
++                code = find(item)
++                if code is not None:
++                    return code
++        elif isinstance(value, str) and value[:1] in ("[", "{"):
++            try:
++                return find(json.loads(value))
++            except json.JSONDecodeError:
++                pass
++        return None
++
++    for line in raw.splitlines():
++        try:
++            code = find(json.loads(line))
++        except json.JSONDecodeError:
++            continue
++        if code is not None:
++            return code
++    return None
++
++
+ def extract_response_text(raw: str) -> str:
+     """Parse full response to get final text."""
+-    bard_err = re.search(r'BardErrorInfo\s*\[(\d+)\]', raw)
+-    if bard_err:
+-        raise RuntimeError(f"Gemini upstream rejected request: BardErrorInfo [{bard_err.group(1)}]")
++    bard_error_code = _bard_error_code(raw)
++    if bard_error_code is not None:
++        raise _upstream_error(bard_error_code)
+     last_text = ""
+     for line in raw.split("\n"):
+         for t in _extract_texts_from_line(line):
+@@ -202,14 +363,204 @@ def extract_response_text(raw: str) -> str:
+     return clean_text(last_text)
+ 
+ 
+-def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None) -> str:
+-    """Non-streaming generation with retry."""
+-    body = _build_payload(prompt, model_id, think_mode, file_refs, extra_fields).encode()
++def _curl_post_with_retry(url: str, request_args: dict, operation: str) -> str:
++    """POST with the configured retry policy and always release the response."""
++    last_error = None
++    attempts = max(1, int(CONFIG["retry_attempts"]))
++    for attempt in range(attempts):
++        response = None
++        try:
++            response = curl_requests.post(url, **request_args)
++            response.raise_for_status()
++            return response.text
++        except GeminiUpstreamError:
++            raise
++        except Exception as exc:
++            last_error = exc
++            if attempt < attempts - 1:
++                log(
++                    f"{operation} retry {attempt + 1}/{attempts}: "
++                    f"{exc}"
++                )
++                time.sleep(CONFIG["retry_delay_sec"])
++        finally:
++            if response is not None:
++                close = getattr(response, "close", None)
++                if close:
++                    close()
++    raise last_error
++
++
++def _generate_file_raw_with_curl(prompt: str, model_id: int, think_mode: int, file_refs: list,
++                                 extra_fields: dict = None) -> str:
++    """Send a file request with Chrome TLS/browser impersonation and return raw frames.
++
++    Gemini currently rejects otherwise valid uploaded-file requests from the
++    stdlib TLS stack. curl_cffi supplies the Chrome fingerprint used by Gemini
++    Web while retaining this project's cookie, proxy, and timeout settings.
++    """
++    if not HAS_CURL_CFFI:
++        raise RuntimeError("curl_cffi is required for Gemini image input")
++
++    # Import lazily because multimodal imports cookie helpers from this module.
++    from .multimodal import _cached_page_tokens
++    page_tokens = _cached_page_tokens(max_age=0)
++    request_uuid = str(uuid.uuid4()).upper()
++    body = _build_payload(
++        prompt, model_id, think_mode, file_refs, extra_fields,
++        xsrf_token=page_tokens.get("at"), request_uuid=request_uuid,
++    )
++    url = _get_url(page_tokens.get("f_sid"))
++    headers = _build_headers(request_uuid)
++    request_args = {
++        "data": body,
++        "headers": headers,
++        "timeout": CONFIG["request_timeout_sec"],
++        "impersonate": "chrome",
++    }
++    if CONFIG.get("proxy"):
++        request_args["proxy"] = CONFIG["proxy"]
++
++    return _curl_post_with_retry(url, request_args, "File generation")
++
++
++def _generate_image_raw_with_curl(prompt: str) -> str:
++    """Send the dedicated GUI-equivalent image-generation request via Chrome TLS."""
++    if not HAS_CURL_CFFI:
++        raise RuntimeError("curl_cffi is required for Gemini image generation")
++
++    from .multimodal import _cached_page_tokens
++    page_tokens = _cached_page_tokens(max_age=0)
++    request_uuid = str(uuid.uuid4()).upper()
++    body = _build_image_payload(
++        prompt, request_uuid, xsrf_token=page_tokens.get("at")
++    )
++    headers = _build_headers(request_uuid)
++    headers.update(_image_model_headers(page_tokens, str(uuid.uuid4()).upper()))
++    request_args = {
++        "data": body,
++        "headers": headers,
++        "timeout": CONFIG["request_timeout_sec"],
++        "impersonate": "chrome",
++    }
++    if CONFIG.get("proxy"):
++        request_args["proxy"] = CONFIG["proxy"]
++
++    return _curl_post_with_retry(
++        _get_url(page_tokens.get("f_sid")), request_args, "Image generation"
++    )
++
++
++def generate_image_structured(prompt: str) -> GenerationResult:
++    """Generate an image with the GUI-specific payload and return rich metadata."""
++    raw = _generate_image_raw_with_curl(prompt)
++    bard_error_code = _bard_error_code(raw)
++    if bard_error_code is not None:
++        raise _upstream_error(bard_error_code)
++    return extract_generation_result(raw, clean_text)
++
++
++def _batch_response_url(raw: str) -> str:
++    """Extract the first full-size image URL from batchexecute's framed RPC body."""
++    decoder = json.JSONDecoder()
++    position = raw.find("\n") + 1 if raw.startswith(")]}'") else 0
++    while position < len(raw):
++        while position < len(raw) and raw[position].isspace():
++            position += 1
++        length = re.match(r"\d+\n", raw[position:])
++        if not length:
++            break
++        position += length.end()
++        try:
++            envelope, position = decoder.raw_decode(raw, position)
++        except json.JSONDecodeError:
++            break
++        pending = [envelope]
++        while pending:
++            record = pending.pop()
++            if not isinstance(record, list):
++                continue
++            if (len(record) >= 3 and record[0] == "wrb.fr" and record[1] == "c8o8Fe"
++                    and isinstance(record[2], str)):
++                try:
++                    payload = json.loads(record[2])
++                    candidate = payload[0] if isinstance(payload, list) and payload else None
++                except (json.JSONDecodeError, TypeError):
++                    continue
++                if isinstance(candidate, str):
++                    return candidate
++            pending.extend(item for item in record if isinstance(item, list))
++    raise ValueError("full-size image RPC returned no URL")
++
++
++def get_full_size_image(image) -> str | None:
++    """Ask Gemini's c8o8Fe RPC for a full-size generated-image URL.
++
++    Missing image metadata or a rejected/changed RPC is non-fatal: callers can
++    continue with the preview resolution path.
++    """
++    if not HAS_CURL_CFFI or not all(isinstance(x, str) and x for x in
++                                    (image.cid, image.rid, image.rcid, image.image_id)):
++        return None
++    try:
++        from .multimodal import _cached_page_tokens
++        page_tokens = _cached_page_tokens(max_age=0)
++        payload = [
++            [[None, None, None, [None, None, None, None, None, ""]], [image.image_id, 0],
++             None, [19, ""], None, None, None, None, None, ""],
++            [image.rid, image.rcid, image.cid, None, ""], 1, 0, 1,
++        ]
++        rpc = ["c8o8Fe", json.dumps(payload), None, "generic"]
++        params = {
++            "rpcids": "c8o8Fe", "hl": "en", "_reqid": int(time.time()) % 1000000,
++            "rt": "c", "source-path": f"{_account_prefix()}/app/{image.cid}",
++            "bl": CONFIG["gemini_bl"],
++        }
++        if page_tokens.get("f_sid"):
++            params["f.sid"] = page_tokens["f_sid"]
++        body = urllib.parse.urlencode({
++            "f.req": json.dumps([[rpc]]), "at": page_tokens.get("at") or CONFIG.get("xsrf_token") or "",
++        })
++        request_uuid = str(uuid.uuid4()).upper()
++        headers = _build_headers(request_uuid)
++        headers.update(_image_model_headers(page_tokens))
++        args = {"data": body, "headers": headers, "timeout": CONFIG["request_timeout_sec"],
++                "impersonate": "chrome"}
++        if CONFIG.get("proxy"):
++            args["proxy"] = CONFIG["proxy"]
++        url = f"https://gemini.google.com{_account_prefix()}/_/BardChatUi/data/batchexecute?{urllib.parse.urlencode(params)}"
++        response = curl_requests.post(url, **args)
++        try:
++            response.raise_for_status()
++            return _batch_response_url(response.text)
++        finally:
++            close = getattr(response, "close", None)
++            if close:
++                close()
++    except Exception as exc:
++        log(f"Full-size image RPC unavailable: {exc}")
++        return None
++
++
++def _generate_file_with_curl(prompt: str, model_id: int, think_mode: int, file_refs: list,
++                             extra_fields: dict = None) -> str:
++    """Legacy text-only wrapper for Chrome-impersonated file generation."""
++    return extract_response_text(_generate_file_raw_with_curl(
++        prompt, model_id, think_mode, file_refs, extra_fields
++    ))
++
++
++def _generate_raw(prompt: str, model_id: int, think_mode: int, file_refs: list = None,
++                  extra_fields: dict = None) -> str:
++    """Generate once and retain the raw frames for structured rich-content parsing."""
++    if file_refs:
++        return _generate_file_raw_with_curl(prompt, model_id, think_mode, file_refs, extra_fields)
++
++    body = _build_payload(prompt, model_id, think_mode, extra_fields=extra_fields).encode()
+     url = _get_url()
+     headers = _build_headers()
+     ctx = _get_ssl_ctx()
+     proxy = CONFIG.get("proxy")
+-
+     last_err = None
+     for attempt in range(CONFIG["retry_attempts"]):
+         try:
+@@ -222,8 +573,7 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
+                 resp = opener.open(req, timeout=CONFIG["request_timeout_sec"])
+             else:
+                 resp = urllib.request.urlopen(req, context=ctx, timeout=CONFIG["request_timeout_sec"])
+-            raw = resp.read().decode("utf-8", errors="replace")
+-            return extract_response_text(raw)
++            return resp.read().decode("utf-8", errors="replace")
+         except Exception as e:
+             last_err = e
+             if attempt < CONFIG["retry_attempts"] - 1:
+@@ -232,8 +582,23 @@ def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None
+     raise last_err
+ 
+ 
++def generate(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None) -> str:
++    """Non-streaming generation with retry."""
++    return extract_response_text(_generate_raw(prompt, model_id, think_mode, file_refs, extra_fields))
++
++
+ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list = None, extra_fields: dict = None):
+-    """Streaming generation via httpx with retry on connection failure."""
++    """Streaming generation via httpx with retry on connection failure.
++
++    File requests intentionally yield one non-stream result because Gemini
++    requires Chrome impersonation for those requests.
++    """
++    if file_refs:
++        text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
++        if text:
++            yield text
++        return
++
+     if not HAS_HTTPX:
+         text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
+         if text:
+@@ -254,14 +619,11 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
+                 buf = ""
+                 for chunk in resp.iter_text():
+                     buf += chunk
+-                    if "BardErrorInfo" in buf:
+-                        bard_err = re.search(r'BardErrorInfo\s*\[(\d+)\]', buf)
+-                        if bard_err:
+-                            raise RuntimeError(
+-                                f"Gemini upstream rejected request: BardErrorInfo [{bard_err.group(1)}]"
+-                            )
+                     while "\n" in buf:
+                         line, buf = buf.split("\n", 1)
++                        bard_error_code = _bard_error_code(line)
++                        if bard_error_code is not None:
++                            raise _upstream_error(bard_error_code)
+                         for t in _extract_texts_from_line(line):
+                             if t == emitted_raw_text or emitted_raw_text.startswith(t):
+                                 continue
+@@ -272,6 +634,8 @@ def generate_stream(prompt: str, model_id: int, think_mode: int, file_refs: list
+                             if delta:
+                                 yield delta
+             return
++        except GeminiUpstreamError:
++            raise
+         except Exception as e:
+             last_err = e
+             if attempt < CONFIG["retry_attempts"] - 1:
+diff --git a/gemini_web2api/generated_image.py b/gemini_web2api/generated_image.py
+new file mode 100644
+index 0000000..0bac40f
+--- /dev/null
++++ b/gemini_web2api/generated_image.py
+@@ -0,0 +1,371 @@
++"""Parsing and bounded download helpers for Gemini-generated images."""
++from __future__ import annotations
++
++import ipaddress
++import json
++from dataclasses import dataclass, field
++from typing import Any
++from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
++
++try:
++    from curl_cffi import requests as curl_requests
++    HAS_CURL_CFFI = True
++except ImportError:  # pragma: no cover - exercised where optional dependency is absent
++    curl_requests = None
++    HAS_CURL_CFFI = False
++
++from .config import CONFIG
++
++MAX_GENERATED_IMAGE_BYTES = 10 * 1024 * 1024
++MAX_GENERATED_IMAGE_REDIRECTS = 3
++MAX_GENERATED_IMAGE_MEDIATORS = 2
++MAX_GENERATED_IMAGE_URL_TEXT_BYTES = 8192
++_ALLOWED_GENERATED_IMAGE_HOST = "googleusercontent.com"
++_MEDIATOR_GENERATED_IMAGE_HOSTS = {
++    "work.fife.usercontent.google.com",
++    "lh3.google.com",
++}
++_REDIRECT_STATUS = {301, 302, 303, 307, 308}
++_MAGIC_MIMES = (
++    (b"\x89PNG\r\n\x1a\n", "image/png"),
++    (b"\xff\xd8\xff", "image/jpeg"),
++)
++
++
++@dataclass(frozen=True)
++class GeneratedImage:
++    """Image metadata carried by a Gemini candidate rich-content block."""
++
++    url: str
++    alt: str = ""
++    image_id: str = ""
++    cid: str = ""
++    rid: str = ""
++    rcid: str = ""
++
++
++@dataclass
++class GenerationResult:
++    """Structured Gemini result without changing the legacy ``generate`` API."""
++
++    text: str = ""
++    images: list[GeneratedImage] = field(default_factory=list)
++    raw: str = ""
++
++
++def _nested(value: Any, indexes: list[int], default: Any = None) -> Any:
++    for index in indexes:
++        if not isinstance(value, list) or index >= len(value):
++            return default
++        value = value[index]
++    return default if value is None else value
++
++
++def _jspb_field(container: Any, index: int, default: Any = None) -> Any:
++    """Read a JSPB positional field or its trailing sparse-field representation."""
++    if not isinstance(container, list):
++        return default
++    value = container[index] if index < len(container) else None
++    if value in (None, [], {}) or isinstance(value, dict):
++        sparse = container[-1] if container and isinstance(container[-1], dict) else None
++        value = sparse.get(str(index + 1)) if sparse else None
++    return default if value in (None, [], {}) else value
++
++
++def _wrb_payloads(raw: str):
++    for line in raw.splitlines():
++        if '"wrb.fr"' not in line:
++            continue
++        try:
++            envelope = json.loads(line)
++            payload = _nested(envelope, [0, 2])
++            if isinstance(payload, str):
++                yield json.loads(payload)
++        except (json.JSONDecodeError, TypeError, IndexError):
++            continue
++
++
++def extract_generation_result(raw: str, clean_text) -> GenerationResult:
++    """Parse text and generated-image metadata from StreamGenerate response frames.
++
++    Gemini places candidates at frame field ``[4]``.  A candidate's rich content
++    is field ``[12]``; generated images are rich-content field 7 (or sparse key
++    ``"8"``), whose entries live at ``[0]``.  Preview URL, alt text, and image
++    ID are respectively ``[0][3][3]``, ``[0][3][2]``, and ``[1][0]``.
++    """
++    text = ""
++    images: list[GeneratedImage] = []
++    seen = set()
++    cid = rid = ""
++    for frame in _wrb_payloads(raw):
++        metadata = _nested(frame, [1], [])
++        if isinstance(metadata, list):
++            cid = _nested(metadata, [0], cid) or cid
++            rid = _nested(metadata, [1], rid) or rid
++        candidates = _nested(frame, [4], [])
++        if not isinstance(candidates, list):
++            continue
++        for candidate in candidates:
++            if not isinstance(candidate, list):
++                continue
++            candidate_text = _nested(candidate, [1, 0], "")
++            if isinstance(candidate_text, str) and len(candidate_text) > len(text):
++                text = candidate_text
++            rcid = _nested(candidate, [0], "")
++            rich = _nested(candidate, [12], [])
++            generated_block = _jspb_field(rich, 7, [])
++            entries = _nested(generated_block, [0], [])
++            if not isinstance(entries, list):
++                continue
++            for entry in entries:
++                url = _nested(entry, [0, 3, 3], "")
++                if not isinstance(url, str) or not url:
++                    continue
++                image_id = _nested(entry, [1, 0], "")
++                key = (url, image_id)
++                if key in seen:
++                    continue
++                seen.add(key)
++                alt = _nested(entry, [0, 3, 2], "")
++                images.append(GeneratedImage(
++                    url=url, alt=alt if isinstance(alt, str) else "",
++                    image_id=image_id if isinstance(image_id, str) else "",
++                    cid=cid if isinstance(cid, str) else "",
++                    rid=rid if isinstance(rid, str) else "",
++                    rcid=rcid if isinstance(rcid, str) else "",
++                ))
++    return GenerationResult(text=clean_text(text), images=images, raw=raw)
++
++
++def _validated_https_url(url: str, allowed_hosts: set[str]) -> str:
++    if not isinstance(url, str) or not url or len(url) > MAX_GENERATED_IMAGE_URL_TEXT_BYTES:
++        raise ValueError("invalid generated image URL")
++    if any(ch.isspace() for ch in url):
++        raise ValueError("invalid generated image URL")
++    try:
++        parsed = urlsplit(url)
++        port = parsed.port
++    except ValueError as exc:
++        raise ValueError("invalid generated image URL") from exc
++    host = (parsed.hostname or "").lower()
++    if (parsed.scheme != "https" or not host or parsed.username is not None
++            or parsed.password is not None or port not in (None, 443)):
++        raise ValueError("generated image URL is not allowed")
++    try:
++        ipaddress.ip_address(host)
++    except ValueError:
++        pass
++    else:
++        raise ValueError("generated image URL is not allowed")
++    if host not in allowed_hosts:
++        raise ValueError("generated image URL is not allowed")
++    return url
++
++
++def validate_generated_image_url(url: str) -> str:
++    """Permit only HTTPS googleusercontent image URLs, never private targets."""
++    try:
++        host = (urlsplit(url).hostname or "").lower()
++    except (TypeError, ValueError) as exc:
++        raise ValueError("invalid generated image URL") from exc
++    if host != _ALLOWED_GENERATED_IMAGE_HOST and not host.endswith("." + _ALLOWED_GENERATED_IMAGE_HOST):
++        raise ValueError("generated image URL is not allowed")
++    return _validated_https_url(url, {host})
++
++
++def _validate_mediator_url(url: str) -> str:
++    return _validated_https_url(url, _MEDIATOR_GENERATED_IMAGE_HOSTS)
++
++
++def _image_mime(data: bytes) -> str:
++    for magic, mime in _MAGIC_MIMES:
++        if data.startswith(magic):
++            return mime
++    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
++        return "image/webp"
++    raise ValueError("generated image has unsupported or invalid bytes")
++
++
++def _limits() -> tuple[int, int]:
++    configured_bytes = CONFIG.get("generated_image_max_bytes", MAX_GENERATED_IMAGE_BYTES)
++    configured_redirects = CONFIG.get("generated_image_max_redirects", MAX_GENERATED_IMAGE_REDIRECTS)
++    max_bytes = (max(1, min(configured_bytes, MAX_GENERATED_IMAGE_BYTES))
++                 if isinstance(configured_bytes, int) and not isinstance(configured_bytes, bool)
++                 else MAX_GENERATED_IMAGE_BYTES)
++    max_redirects = (max(0, min(configured_redirects, MAX_GENERATED_IMAGE_REDIRECTS))
++                     if isinstance(configured_redirects, int) and not isinstance(configured_redirects, bool)
++                     else MAX_GENERATED_IMAGE_REDIRECTS)
++    return max_bytes, max_redirects
++
++
++def _request_args(stream: bool) -> dict:
++    headers = {"Referer": "https://gemini.google.com/"}
++    # Lazy import avoids the generated-image/result import cycle in gemini.py.
++    from .gemini import load_cookie
++    cookie_str, _ = load_cookie()
++    if cookie_str:
++        headers["Cookie"] = cookie_str
++    args = {
++        "headers": headers,
++        "timeout": CONFIG["request_timeout_sec"],
++        "impersonate": "chrome",
++        "allow_redirects": False,
++        "stream": stream,
++    }
++    if CONFIG.get("proxy"):
++        args["proxy"] = CONFIG["proxy"]
++    return args
++
++
++def _content_length(headers) -> int | None:
++    value = headers.get("Content-Length")
++    if value is None:
++        return None
++    try:
++        length = int(value)
++    except (TypeError, ValueError) as exc:
++        raise ValueError("invalid generated image content length") from exc
++    if length < 0:
++        raise ValueError("invalid generated image content length")
++    return length
++
++
++def _read_mediator_url(response) -> str:
++    content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
++    if content_type != "text/plain":
++        raise ValueError("generated image mediator did not return text/plain")
++    content_length = _content_length(response.headers)
++    if (content_length is not None
++            and content_length > MAX_GENERATED_IMAGE_URL_TEXT_BYTES):
++        raise ValueError("generated image mediator response is too large")
++    body = bytearray()
++    for chunk in response.iter_content(chunk_size=1024):
++        if not chunk:
++            continue
++        body.extend(chunk)
++        if len(body) > MAX_GENERATED_IMAGE_URL_TEXT_BYTES:
++            raise ValueError("generated image mediator response is too large")
++    try:
++        url = bytes(body).decode("utf-8").strip()
++    except UnicodeDecodeError as exc:
++        raise ValueError("generated image mediator did not return a URL") from exc
++    if not url or any(ch.isspace() for ch in url):
++        raise ValueError("generated image mediator did not return one URL")
++    return url
++
++
++def _with_gemini_preview_params(url: str) -> str:
++    """Apply the preview transform used by Gemini Web before resolving gg-dl."""
++    parsed = urlsplit(validate_generated_image_url(url))
++    path = parsed.path
++    if path.startswith("/gg-dl/") and "=" not in path.rsplit("/", 1)[-1]:
++        path += "=s1024-rj"
++    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
++    auth_user = CONFIG.get("auth_user")
++    if auth_user is not None and auth_user != "":
++        query.setdefault("authuser", str(auth_user))
++    query.setdefault("alr", "yes")
++    return urlunsplit((parsed.scheme, parsed.netloc, path, urlencode(query), ""))
++
++
++def resolve_generated_image_url(url: str) -> str:
++    """Resolve Gemini's bounded text mediators to a final image URL.
++
++    The only non-googleusercontent hop is the exact ``work.fife`` host, which
++    is accepted solely when it returns one small text/plain HTTPS URL.  This is
++    used by ``response_format=url`` without downloading the final image bytes.
++    """
++    if not HAS_CURL_CFFI:
++        raise RuntimeError("curl_cffi is required for generated image download")
++    current = _with_gemini_preview_params(url)
++    _, max_redirects = _limits()
++    redirects = mediators = 0
++    source_is_mediator = False
++
++    while True:
++        response = curl_requests.get(current, **_request_args(stream=True))
++        try:
++            if response.status_code in _REDIRECT_STATUS:
++                if redirects >= max_redirects:
++                    raise ValueError("generated image exceeded redirect limit")
++                location = response.headers.get("Location")
++                if not location:
++                    raise ValueError("generated image redirect has no location")
++                next_url = urljoin(current, location)
++                # A work.fife URL is permitted only as the first text mediator;
++                # redirect responses may otherwise remain on Google hosts.
++                try:
++                    current = validate_generated_image_url(next_url)
++                    source_is_mediator = False
++                except ValueError:
++                    if source_is_mediator:
++                        raise
++                    current = _validate_mediator_url(next_url)
++                    source_is_mediator = True
++                redirects += 1
++                continue
++            if response.status_code != 200:
++                raise RuntimeError(
++                    f"generated image download failed: HTTP {response.status_code}"
++                )
++            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
++            if content_type.startswith("image/"):
++                if source_is_mediator:
++                    raise ValueError("generated image mediator returned image bytes")
++                return current
++            next_url = _read_mediator_url(response)
++            mediators += 1
++            if mediators > MAX_GENERATED_IMAGE_MEDIATORS:
++                raise ValueError("generated image exceeded mediator limit")
++            if source_is_mediator:
++                # The second stage must lead back to an allowlisted final image host.
++                return validate_generated_image_url(next_url)
++            current = _validate_mediator_url(next_url)
++            source_is_mediator = True
++        finally:
++            close = getattr(response, "close", None)
++            if close:
++                close()
++
++
++def download_generated_image(url: str) -> tuple[bytes, str]:
++    """Download a resolved generated image with verified image bytes."""
++    final_url = resolve_generated_image_url(url)
++    max_bytes, max_redirects = _limits()
++    current = final_url
++    for _ in range(max_redirects + 1):
++        response = curl_requests.get(current, **_request_args(stream=True))
++        try:
++            if response.status_code in _REDIRECT_STATUS:
++                location = response.headers.get("Location")
++                if not location:
++                    raise ValueError("generated image redirect has no location")
++                current = validate_generated_image_url(urljoin(current, location))
++                continue
++            if response.status_code != 200:
++                raise RuntimeError(
++                    f"generated image download failed: HTTP {response.status_code}"
++                )
++            content_length = _content_length(response.headers)
++            if content_length is not None and content_length > max_bytes:
++                raise ValueError("generated image exceeds configured size limit")
++            chunks = []
++            total = 0
++            for chunk in response.iter_content(chunk_size=65536):
++                if not chunk:
++                    continue
++                total += len(chunk)
++                if total > max_bytes:
++                    raise ValueError("generated image exceeds configured size limit")
++                chunks.append(chunk)
++            data = b"".join(chunks)
++            mime = _image_mime(data)
++            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
++            if content_type != mime:
++                raise ValueError("generated image content type does not match bytes")
++            return data, mime
++        finally:
++            close = getattr(response, "close", None)
++            if close:
++                close()
++    raise ValueError("generated image exceeded redirect limit")
+diff --git a/gemini_web2api/multimodal.py b/gemini_web2api/multimodal.py
+index 362f276..1da72e5 100644
+--- a/gemini_web2api/multimodal.py
++++ b/gemini_web2api/multimodal.py
+@@ -1,29 +1,52 @@
+ """Multimodal: Scotty resumable upload for Gemini image input."""
+-import json
+-import base64
+-import urllib.request
+-import urllib.parse
+-import time
+-import ssl
++import ipaddress
+ import re
++import socket
++import time
++import urllib.parse
++import urllib.request
+ from urllib.parse import urlparse
+ 
++try:
++    from curl_cffi import CurlOpt
++except ImportError:  # pragma: no cover - exercised when image support is absent
++    CurlOpt = None
++
+ from .config import CONFIG
+-from .gemini import load_cookie, make_sapisidhash, _get_ssl_ctx, log
++from .gemini import (
++    HAS_CURL_CFFI,
++    _account_prefix,
++    _get_ssl_ctx,
++    curl_requests,
++    load_cookie,
++    log,
++    make_sapisidhash,
++)
++
++_MAX_REMOTE_IMAGE_BYTES = 10 * 1024 * 1024
++_MAX_REMOTE_IMAGE_REDIRECTS = 3
++_REDIRECT_STATUS = {301, 302, 303, 307, 308}
+ 
+ 
+ def _get_page_tokens() -> dict:
+-    """Fetch WIZ_global_data tokens from Gemini page (Push-ID, X-Client-Pctx)."""
++    """Fetch WIZ_global_data tokens from the configured Gemini account page."""
++    auth_user = CONFIG.get("auth_user")
++    account_prefix = _account_prefix()
+     headers = {
+         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
++        "Referer": f"https://gemini.google.com{account_prefix}/app",
+     }
++    if account_prefix:
++        headers["X-Goog-AuthUser"] = str(auth_user)
+     cookie_str, sapisid = load_cookie()
+     if cookie_str:
+         headers["Cookie"] = cookie_str
+     if sapisid:
+         headers["Authorization"] = make_sapisidhash(sapisid)
+     try:
+-        req = urllib.request.Request("https://gemini.google.com/app", headers=headers)
++        req = urllib.request.Request(
++            f"https://gemini.google.com{account_prefix}/app", headers=headers
++        )
+         proxy = CONFIG.get("proxy")
+         if proxy:
+             opener = urllib.request.build_opener(
+@@ -35,14 +58,30 @@ def _get_page_tokens() -> dict:
+             resp = urllib.request.urlopen(req, context=_get_ssl_ctx(), timeout=30)
+         html = resp.read().decode()
+         tokens = {}
+-        for key, pattern in [
+-            ("push_id", r'"qKIAYe":"([^"]+)"'),
+-            ("pctx", r'"Ylro7b":"([^"]+)"'),
+-            ("at", r'"thykhd":"([^"]+)"'),
+-        ]:
+-            m = re.search(pattern, html)
+-            if m:
+-                tokens[key] = m.group(1)
++        patterns = {
++            "push_id": (r'"qKIAYe":"([^"]+)"',),
++            "pctx": (r'"Ylro7b":"([^"]+)"',),
++            # These values bind file-bearing StreamGenerate requests to the
++            # currently loaded Gemini Web session. Keep the previous XSRF key
++            # as a fallback because page rollouts are not always simultaneous.
++            "f_sid": (r'"FdrFJe":\s*"([^"]+)"',),
++            "at": (
++                r'"SNlM0e":\s*"([^"]+)"',
++                r'"thykhd":\s*"([^"]+)"',
++            ),
++            # The account page carries the available image model as an
++            # internal ID, capacity tail, and model category.
++            "image_model": (r'\["(cf[a-f0-9]{14})",\s*(\d+),\s*(6)\]',),
++        }
++        for key, candidates in patterns.items():
++            match = None
++            for pattern in candidates:
++                match = re.search(pattern, html)
++                if match:
++                    break
++            if match:
++                tokens[key] = (match.groups() if key == "image_model"
++                               else match.group(1))
+         return tokens
+     except Exception as e:
+         log(f"Page token fetch failed: {e}")
+@@ -52,9 +91,15 @@ def _get_page_tokens() -> dict:
+ _page_tokens_cache = {"tokens": {}, "ts": 0}
+ 
+ 
+-def _cached_page_tokens() -> dict:
++def _cached_page_tokens(max_age: int = 600) -> dict:
++    """Return Gemini page tokens, refreshing when they are older than max_age.
++
++    File generation asks for a fresh page state because ``f.sid`` is a
++    short-lived frontend routing value; uploads can safely reuse the normal
++    cache.
++    """
+     now = time.time()
+-    if now - _page_tokens_cache["ts"] > 600:
++    if now - _page_tokens_cache["ts"] > max_age:
+         _page_tokens_cache["tokens"] = _get_page_tokens()
+         _page_tokens_cache["ts"] = now
+     return _page_tokens_cache["tokens"]
+@@ -152,24 +197,108 @@ def upload_image(image_bytes: bytes, filename: str = "image.png", mime_type: str
+     return file_ref
+ 
+ 
++def _validate_remote_image_url(url: str):
++    """Return the URL, host, and one validated public address for a request hop."""
++    if not isinstance(url, str) or not url or len(url) > 8192:
++        raise ValueError("invalid remote image URL")
++    try:
++        parsed = urlparse(url)
++        port = parsed.port
++    except ValueError as exc:
++        raise ValueError("invalid remote image URL") from exc
++    host = parsed.hostname
++    if (parsed.scheme != "https" or not host or parsed.username is not None
++            or parsed.password is not None or port not in (None, 443)):
++        raise ValueError("remote image URL is not allowed")
++
++    try:
++        addresses = [ipaddress.ip_address(host)]
++    except ValueError:
++        try:
++            addresses = {
++                ipaddress.ip_address(item[4][0])
++                for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
++            }
++        except (OSError, ValueError) as exc:
++            raise ValueError("remote image host could not be resolved") from exc
++    if not addresses or any(not address.is_global for address in addresses):
++        raise ValueError("remote image host is not public")
++    address = sorted(addresses, key=lambda item: (item.version, str(item)))[0]
++    return url, host, address
++
++
+ def fetch_image_bytes(url: str) -> bytes:
+-    """Fetch image from URL."""
+-    parsed = urlparse(url)
+-    if parsed.scheme not in ("http", "https"):
+-        log(f"Image fetch skipped for unsupported URL scheme: {parsed.scheme or 'none'}")
++    """Fetch one bounded public HTTPS raster image without implicit redirects."""
++    if not HAS_CURL_CFFI or CurlOpt is None:
++        log("Image fetch failed: curl_cffi is required for remote image input")
+         return b""
++    current = url
+     try:
+-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+-        proxy = CONFIG.get("proxy")
+-        if proxy:
+-            opener = urllib.request.build_opener(
+-                urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
+-                urllib.request.HTTPSHandler(context=_get_ssl_ctx()),
++        for redirect_count in range(_MAX_REMOTE_IMAGE_REDIRECTS + 1):
++            current, host, address = _validate_remote_image_url(current)
++            address_text = str(address)
++            if address.version == 6:
++                address_text = f"[{address_text}]"
++            resolve_entry = f"{host}:443:{address_text}"
++            # Use a direct, pinned connection. A configured or environment
++            # proxy could resolve the hostname again and bypass this check.
++            session = curl_requests.Session(
++                curl_options={CurlOpt.RESOLVE: [resolve_entry]},
++                trust_env=False,
+             )
+-            resp = opener.open(req, timeout=30)
+-        else:
+-            resp = urllib.request.urlopen(req, context=_get_ssl_ctx(), timeout=30)
+-        return resp.read()
+-    except Exception as e:
+-        log(f"Image fetch failed: {e}")
+-        return b""
++            response = None
++            try:
++                response = session.get(
++                    current,
++                    headers={"User-Agent": "Mozilla/5.0"},
++                    timeout=CONFIG["request_timeout_sec"],
++                    impersonate="chrome",
++                    allow_redirects=False,
++                    stream=True,
++                )
++                if response.status_code in _REDIRECT_STATUS:
++                    if redirect_count >= _MAX_REMOTE_IMAGE_REDIRECTS:
++                        raise ValueError("remote image exceeded redirect limit")
++                    location = response.headers.get("Location")
++                    if not location:
++                        raise ValueError("remote image redirect has no location")
++                    current = urllib.parse.urljoin(current, location)
++                    continue
++                if response.status_code != 200:
++                    raise RuntimeError(
++                        f"remote image fetch failed: HTTP {response.status_code}"
++                    )
++                content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
++                if not content_type.startswith("image/"):
++                    raise ValueError("remote image response is not an image")
++                content_length = response.headers.get("Content-Length")
++                if content_length is not None:
++                    try:
++                        length = int(content_length)
++                    except (TypeError, ValueError) as exc:
++                        raise ValueError("invalid remote image content length") from exc
++                    if length < 0 or length > _MAX_REMOTE_IMAGE_BYTES:
++                        raise ValueError("remote image exceeds size limit")
++
++                body = bytearray()
++                for chunk in response.iter_content(chunk_size=65536):
++                    if not chunk:
++                        continue
++                    body.extend(chunk)
++                    if len(body) > _MAX_REMOTE_IMAGE_BYTES:
++                        raise ValueError("remote image exceeds size limit")
++                data = bytes(body)
++                detected_type = detect_image_mime(data, "")
++                declared_type = "image/jpeg" if content_type == "image/jpg" else content_type
++                if not detected_type or declared_type != detected_type:
++                    raise ValueError("remote image content type does not match bytes")
++                return data
++            finally:
++                if response is not None:
++                    close = getattr(response, "close", None)
++                    if close:
++                        close()
++                session.close()
++    except Exception as exc:
++        log(f"Image fetch failed: {exc}")
++    return b""
+diff --git a/gemini_web2api/server.py b/gemini_web2api/server.py
+index 3fc35b6..bbfefe1 100644
+--- a/gemini_web2api/server.py
++++ b/gemini_web2api/server.py
+@@ -1,17 +1,72 @@
+ """HTTP server: OpenAI-compatible API endpoints."""
++from __future__ import annotations
++
++import base64
++import itertools
+ import json
++import re
+ import time
+ import uuid
+-import re
+-from http.server import HTTPServer, BaseHTTPRequestHandler
++from http.server import BaseHTTPRequestHandler, HTTPServer
+ from socketserver import ThreadingMixIn
+ 
++from . import __version__
+ from .config import CONFIG
++from .gemini import (
++    generate,
++    generate_image_structured,
++    generate_stream,
++    get_full_size_image,
++    log,
++)
++from .generated_image import download_generated_image, resolve_generated_image_url
+ from .models import MODELS, resolve_model
+-from .gemini import generate, generate_stream, log
+-from .tools import messages_to_prompt, parse_tool_calls, google_contents_to_prompt, parse_google_function_calls
+ from .multimodal import detect_image_mime, fetch_image_bytes, upload_image
+-from . import __version__
++from .tools import (
++    google_contents_to_prompt,
++    messages_to_prompt,
++    parse_google_function_calls,
++    parse_tool_calls,
++)
++
++_CHAT_IMAGE_REQUEST = re.compile(
++    r"\b(?:generate|create|make|draw|render|paint)\s+"
++    r"(?:(?:me|us)\s+)?(?:(?:an?|the)\s+)?"
++    r"(?:image|picture|photo|illustration|artwork|icon|logo|portrait)\b",
++    re.IGNORECASE,
++)
++
++
++def _latest_user_text(messages) -> str:
++    """Extract only the latest user turn for intent-sensitive routing."""
++    if not isinstance(messages, list):
++        return ""
++    for message in reversed(messages):
++        if not isinstance(message, dict) or message.get("role") != "user":
++            continue
++        content = message.get("content", "")
++        if isinstance(content, str):
++            return content
++        if isinstance(content, list):
++            return " ".join(
++                part.get("text", "")
++                for part in content
++                if isinstance(part, dict)
++                and part.get("type") in ("text", "input_text")
++                and isinstance(part.get("text"), str)
++            )
++        return ""
++    return ""
++
++
++def _chat_image_prompt(request: dict) -> str | None:
++    """Return an explicit image-generation prompt from the latest user turn."""
++    text = _latest_user_text(request.get("messages"))
++    modalities = request.get("modalities")
++    explicitly_requested = isinstance(modalities, list) and "image" in modalities
++    if explicitly_requested or _CHAT_IMAGE_REQUEST.search(text):
++        return text.strip() or None
++    return None
+ 
+ 
+ def _usage(prompt: str, text: str) -> dict:
+@@ -20,6 +75,20 @@ def _usage(prompt: str, text: str) -> dict:
+     return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
+ 
+ 
++def _generated_image_output(prompt: str, response_format: str):
++    """Generate one image and return its optional text plus OpenAI output data."""
++    result = generate_image_structured(prompt)
++    if not result.images:
++        raise RuntimeError("Gemini returned no generated image metadata")
++    source_url = get_full_size_image(result.images[0]) or result.images[0].url
++    if response_format == "url":
++        data = {"url": resolve_generated_image_url(source_url)}
++    else:
++        image_bytes, _mime = download_generated_image(source_url)
++        data = {"b64_json": base64.b64encode(image_bytes).decode("ascii")}
++    return result.text, data
++
++
+ def _upload_images(images: list) -> list:
+     """Upload images and return list of file references. Returns None if no images."""
+     if not images:
+@@ -35,9 +104,12 @@ def _upload_images(images: list) -> list:
+         if not data:
+             raise RuntimeError("image fetch failed")
+         mime = detect_image_mime(data, mime or "image/png")
++        filename = "image.png"
+         try:
+-            ref = upload_image(data, "image.png", mime or "image/png")
+-            file_refs.append(ref)
++            ref = upload_image(data, filename, mime or "image/png")
++            # Gemini's current attachment format requires both the uploaded
++            # reference and its filename; retain both through generation.
++            file_refs.append((ref, filename))
+         except Exception as e:
+             raise RuntimeError(f"image upload failed: {e}") from e
+     return file_refs if file_refs else None
+@@ -154,6 +226,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
+             body = self._read_request_body()
+             if self.path == "/v1/chat/completions":
+                 self._handle_chat(body)
++            elif self.path == "/v1/images/generations":
++                self._handle_image_generation(body)
+             elif self.path == "/v1/responses":
+                 self._handle_responses(body)
+             elif ":streamGenerateContent" in self.path:
+@@ -171,6 +245,37 @@ class GeminiHandler(BaseHTTPRequestHandler):
+             except:
+                 pass
+ 
++    # ─── /v1/images/generations ───────────────────────────────────────────────
++
++    def _handle_image_generation(self, body: bytes):
++        req = self._parse_body(body)
++        if not isinstance(req, dict):
++            self.send_json({"error": {"message": "invalid JSON"}}, 400)
++            return
++        unsupported = [name for name in ("stream", "size", "quality", "style") if name in req]
++        prompt = req.get("prompt")
++        if unsupported or not isinstance(prompt, str) or not prompt.strip():
++            self.send_json({"error": {"message": "invalid image generation request"}}, 400)
++            return
++        if "n" in req and (not isinstance(req["n"], int) or isinstance(req["n"], bool) or req["n"] != 1):
++            self.send_json({"error": {"message": "only n=1 is supported"}}, 400)
++            return
++        response_format = req.get("response_format", "b64_json")
++        if response_format not in ("b64_json", "url"):
++            self.send_json({"error": {"message": "response_format must be b64_json or url"}}, 400)
++            return
++        model_value = req.get("model")
++        if model_value is not None and not isinstance(model_value, str):
++            self.send_json({"error": {"message": "invalid model"}}, 400)
++            return
++        try:
++            # Gemini Web selects its image route independently of text models.
++            _text, data = _generated_image_output(prompt, response_format)
++        except Exception as e:
++            self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
++            return
++        self.send_json({"created": int(time.time()), "data": [data]})
++
+     # ─── /v1/chat/completions ─────────────────────────────────────────────────
+ 
+     def _handle_chat(self, body: bytes):
+@@ -186,6 +291,7 @@ class GeminiHandler(BaseHTTPRequestHandler):
+ 
+         tools = req.get("tools")
+         tool_choice = req.get("tool_choice", "auto")
++        image_prompt = _chat_image_prompt(req)
+         prompt, images = messages_to_prompt(req.get("messages", []), tools, tool_choice)
+         if not prompt.strip():
+             self.send_json({"error": {"message": "empty prompt"}}, 400)
+@@ -193,6 +299,21 @@ class GeminiHandler(BaseHTTPRequestHandler):
+ 
+         stream = req.get("stream", False)
+         cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
++        precomputed_text = None
++        if image_prompt:
++            try:
++                generated_text, image_data = _generated_image_output(image_prompt, "url")
++                image_markdown = f"![Generated image]({image_data['url']})"
++                precomputed_text = "\n\n".join(
++                    part for part in (generated_text, image_markdown) if part
++                )
++                # Image generation is a native route, not a function call.
++                tools = None
++                tool_choice = "none"
++                images = []
++            except Exception as e:
++                self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
++                return
+         try:
+             file_refs = _upload_images(images)
+         except RuntimeError as e:
+@@ -200,6 +321,23 @@ class GeminiHandler(BaseHTTPRequestHandler):
+             return
+ 
+         if stream and (not tools or tool_choice == "none"):
++            # Prime the iterator before committing HTTP 200/SSE headers so an
++            # immediate upstream rejection remains a normal JSON 502.
++            try:
++                if precomputed_text is not None:
++                    deltas = iter([precomputed_text])
++                elif file_refs:
++                    deltas = iter([
++                        generate(prompt, model_id, think_mode, file_refs, extra_fields)
++                    ])
++                else:
++                    deltas = iter(
++                        generate_stream(prompt, model_id, think_mode, None, extra_fields)
++                    )
++                first_delta = next(deltas, None)
++            except Exception as e:
++                self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
++                return
+             try:
+                 self._start_sse()
+                 first_chunk = {
+@@ -215,7 +353,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
+                 }
+                 self.wfile.write(f"data: {json.dumps(first_chunk)}\n\n".encode())
+                 self.wfile.flush()
+-                for delta in generate_stream(prompt, model_id, think_mode, file_refs, extra_fields):
++                for delta in itertools.chain(
++                    [first_delta] if first_delta else [], deltas
++                ):
++                    if not delta:
++                        continue
+                     chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
+                              "model": model_name, "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}]}
+                     self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
+@@ -229,10 +371,19 @@ class GeminiHandler(BaseHTTPRequestHandler):
+                 pass
+             except Exception as e:
+                 log(f"Stream error: {e}")
++                error = {"error": {"message": f"upstream error: {e}",
++                                   "type": "upstream_error"}}
++                try:
++                    self.wfile.write(f"data: {json.dumps(error)}\n\n".encode())
++                    self.wfile.write(b"data: [DONE]\n\n")
++                    self.wfile.flush()
++                except (BrokenPipeError, ConnectionResetError):
++                    pass
+             return
+ 
+         try:
+-            text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
++            text = (precomputed_text if precomputed_text is not None else
++                    generate(prompt, model_id, think_mode, file_refs, extra_fields))
+         except Exception as e:
+             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
+             return
+@@ -275,7 +426,15 @@ class GeminiHandler(BaseHTTPRequestHandler):
+             return
+ 
+         input_items = req.get("input", [])
+-        tools = req.get("tools")
++        raw_tools = req.get("tools")
++        image_generation_requested = isinstance(raw_tools, list) and any(
++            isinstance(tool, dict) and tool.get("type") == "image_generation"
++            for tool in raw_tools
++        )
++        # Image generation is a native request signal, not an emulated function.
++        tools = ([tool for tool in raw_tools
++                  if isinstance(tool, dict) and tool.get("type") != "image_generation"]
++                 if isinstance(raw_tools, list) else raw_tools)
+         messages = []
+         if req.get("instructions"):
+             messages.append({"role": "system", "content": req["instructions"]})
+@@ -323,9 +482,25 @@ class GeminiHandler(BaseHTTPRequestHandler):
+             self.send_json({"error": {"message": "empty input"}}, 400)
+             return
+ 
++        if image_generation_requested and images:
++            self.send_json({
++                "error": {"message": "image generation with input images is not supported"}
++            }, 400)
++            return
++
++        generated_image_call = None
+         try:
+             file_refs = _upload_images(images)
+-            text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
++            if image_generation_requested:
++                text, image_data = _generated_image_output(prompt, "b64_json")
++                generated_image_call = {
++                    "type": "image_generation_call",
++                    "id": f"imggen_{uuid.uuid4().hex[:12]}",
++                    "status": "completed",
++                    "result": image_data["b64_json"],
++                }
++            else:
++                text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
+         except Exception as e:
+             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
+             return
+@@ -341,9 +516,11 @@ class GeminiHandler(BaseHTTPRequestHandler):
+             for tc in tool_calls:
+                 output.append({"type": "function_call", "id": tc["id"], "call_id": tc["id"],
+                                "name": tc["function"]["name"], "arguments": tc["function"]["arguments"], "status": "completed"})
+-        if text or not tool_calls:
++        if text or (not tool_calls and not generated_image_call):
+             output.append({"type": "message", "id": mid, "role": "assistant", "status": "completed",
+                            "content": [{"type": "output_text", "text": text or "", "annotations": []}]})
++        if generated_image_call:
++            output.append(generated_image_call)
+ 
+         if req.get("stream"):
+             self._start_sse()
+@@ -422,6 +599,18 @@ class GeminiHandler(BaseHTTPRequestHandler):
+                         output_index=output_index,
+                         item=item,
+                     )
++                elif item["type"] == "image_generation_call":
++                    # The image is already downloaded and validated before SSE headers.
++                    emit(
++                        "response.output_item.added",
++                        output_index=output_index,
++                        item={"type": "image_generation_call", "id": item["id"], "status": "in_progress"},
++                    )
++                    emit(
++                        "response.output_item.done",
++                        output_index=output_index,
++                        item=item,
++                    )
+                 elif item["type"] == "message":
+                     pending_item = {
+                         "type": "message",
+@@ -515,10 +704,22 @@ class GeminiHandler(BaseHTTPRequestHandler):
+         log(f"Google API: model={model_name} stream={stream} tools={has_tools} prompt_len={len(prompt)}")
+ 
+         if stream and not has_tools:
++            try:
++                deltas = iter(
++                    [generate(prompt, model_id, think_mode, file_refs, extra_fields)]
++                    if file_refs else
++                    generate_stream(prompt, model_id, think_mode, None, extra_fields)
++                )
++                first_delta = next(deltas, None)
++            except Exception as e:
++                self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
++                return
+             try:
+                 self._start_sse()
+                 full_text = ""
+-                for delta in generate_stream(prompt, model_id, think_mode, file_refs, extra_fields):
++                for delta in itertools.chain(
++                    [first_delta] if first_delta else [], deltas
++                ):
+                     if not delta:
+                         continue
+                     full_text += delta
+@@ -543,6 +744,13 @@ class GeminiHandler(BaseHTTPRequestHandler):
+                 pass
+             except Exception as e:
+                 log(f"Google stream error: {e}")
++                error = {"error": {"code": 502, "message": f"upstream error: {e}",
++                                   "status": "UNAVAILABLE"}}
++                try:
++                    self.wfile.write(f"data: {json.dumps(error)}\n\n".encode())
++                    self.wfile.flush()
++                except (BrokenPipeError, ConnectionResetError):
++                    pass
+             return
+ 
+         try:
+diff --git a/requirements.txt b/requirements.txt
+index 67ddffb..08b71de 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1 +1,2 @@
+ httpx>=0.25
++curl_cffi>=0.7
+diff --git a/tests/test_modular_sync.py b/tests/test_modular_sync.py
+index 7479e92..fa5e740 100644
+--- a/tests/test_modular_sync.py
++++ b/tests/test_modular_sync.py
+@@ -1,5 +1,5 @@
+-import http.client
+ import base64
++import http.client
+ import json
+ import threading
+ import unittest
+@@ -7,8 +7,25 @@ from unittest import mock
+ from urllib.parse import parse_qs
+ 
+ from gemini_web2api.config import CONFIG, DEFAULT_CONFIG
+-from gemini_web2api.gemini import _build_payload
+-from gemini_web2api.server import GeminiHandler, ThreadedServer
++from gemini_web2api.gemini import (
++    GeminiUpstreamError,
++    _batch_response_url,
++    _build_image_payload,
++    _build_model_headers,
++    _build_payload,
++    _generate_file_with_curl,
++    extract_response_text,
++    generate_image_structured,
++    generate_stream,
++)
++from gemini_web2api.generated_image import (
++    download_generated_image,
++    extract_generation_result,
++    resolve_generated_image_url,
++    validate_generated_image_url,
++)
++from gemini_web2api.multimodal import _get_page_tokens, fetch_image_bytes
++from gemini_web2api.server import GeminiHandler, ThreadedServer, _chat_image_prompt
+ from gemini_web2api.tools import google_contents_to_prompt, messages_to_prompt
+ 
+ 
+@@ -62,13 +79,367 @@ class PayloadPersistenceTests(unittest.TestCase):
+         self.assertEqual(inner[45], 1)
+ 
+     def test_payload_includes_uploaded_image_refs(self):
+-        inner = _decode_payload(_build_payload("describe", 1, 4, ["/uploaded/image-ref"]))
++        inner = _decode_payload(_build_payload("describe", 1, 4, [("/uploaded/image-ref", "cat.png")]))
+ 
++        self.assertEqual(len(inner), 81)
+         self.assertEqual(inner[0][0], "describe")
+-        self.assertEqual(inner[0][3], [[None, None, "/uploaded/image-ref"]])
++        self.assertEqual(inner[0][3], [[["/uploaded/image-ref"], "cat.png"]])
++        self.assertEqual(inner[80], 1)
++
++    def test_payload_accepts_legacy_plain_file_refs(self):
++        inner = _decode_payload(_build_payload("describe", 1, 4, ["/uploaded/image-ref"]))
++
++        self.assertEqual(inner[0][3], [[["/uploaded/image-ref"], "image.png"]])
++
++    def test_text_payload_shape_is_unchanged(self):
++        inner = _decode_payload(_build_payload("hello", 1, 4))
++
++        self.assertEqual(len(inner), 102)
++        self.assertIsNone(inner[80])
++
++    def test_image_payload_has_capture_derived_shape_and_fresh_values(self):
++        first = _decode_payload(_build_image_payload("make a fox", "REQUEST-UUID"))
++        second = _decode_payload(_build_image_payload("make a fox", "REQUEST-UUID"))
++
++        self.assertEqual(len(first), 97)
++        self.assertEqual(first[0][0], "make a fox")
++        self.assertTrue(first[3].startswith("!"))
++        self.assertEqual(len(first[3]), 2539)
++        self.assertNotEqual(first[3], second[3])
++        self.assertRegex(first[4], r"^[a-f0-9]{32}$")
++        self.assertNotEqual(first[4], second[4])
++        self.assertEqual(first[17], [[0]])
++        self.assertEqual(first[41], [1])
++        self.assertEqual(first[59], "REQUEST-UUID")
++        self.assertEqual({i: first[i] for i in (6, 7, 10, 11, 18, 27, 30, 53, 61, 67, 68, 79, 80, 91, 96)}, {
++            6: [0], 7: 1, 10: 1, 11: 0, 18: 0, 27: 1, 30: [4], 53: 0,
++            61: [], 67: 0, 68: 1, 79: 6, 80: 1, 91: 0, 96: 0,
++        })
++
++    def test_model_headers_include_discovered_routing_values(self):
++        headers = _build_model_headers("cf41b0e0dd7d53e5", 1, 6)
++        self.assertIn('"cf41b0e0dd7d53e5"', headers["x-goog-ext-525001261-jspb"])
++        self.assertEqual(headers["x-goog-ext-73010989-jspb"], "[0]")
++        self.assertEqual(headers["x-goog-ext-73010990-jspb"], "[0,0,0]")
++
++
++class UpstreamErrorTests(unittest.TestCase):
++    @staticmethod
++    def _structured_error():
++        return [[
++            "wrb.fr", None, None, None, None,
++            [13, None, [[
++                "type.googleapis.com/assistant.boq.bard.application.BardErrorInfo",
++                [1100],
++            ]]],
++        ]]
++
++    def test_extract_response_text_rejects_structured_bard_error(self):
++        with self.assertRaisesRegex(RuntimeError, r"BardErrorInfo \[1100\]"):
++            extract_response_text(json.dumps(self._structured_error()))
++
++    def test_extract_response_text_still_rejects_legacy_bard_error(self):
++        with self.assertRaisesRegex(RuntimeError, r"BardErrorInfo \[10\]"):
++            extract_response_text("BardErrorInfo [10]")
++
++    @mock.patch("gemini_web2api.gemini._generate_image_raw_with_curl")
++    def test_image_generation_rejects_structured_bard_error(self, generate_raw):
++        generate_raw.return_value = json.dumps(self._structured_error())
++
++        with self.assertRaisesRegex(RuntimeError, r"BardErrorInfo \[1100\]"):
++            generate_image_structured("cat")
++
++    @mock.patch("gemini_web2api.gemini._get_httpx_client")
++    @mock.patch("gemini_web2api.gemini.HAS_HTTPX", True)
++    def test_stream_rejects_structured_bard_error_without_retry(self, get_client):
++        response = mock.MagicMock()
++        response.iter_text.return_value = [json.dumps(self._structured_error()) + "\n"]
++        get_client.return_value.stream.return_value.__enter__.return_value = response
++
++        with self.assertRaisesRegex(GeminiUpstreamError, r"BardErrorInfo \[1100\]"):
++            list(generate_stream("hello", 1, 4))
++
++        get_client.return_value.stream.assert_called_once()
++
++
++class GeneratedImageTests(unittest.TestCase):
++    def _raw_frame(self, candidate, cid="chat-id", rid="reply-id"):
++        frame = [None, [cid, rid], None, None, [candidate]]
++        return json.dumps([["wrb.fr", None, json.dumps(frame)]])
++
++    def test_extracts_generated_image_metadata_from_rich_content_field_seven(self):
++        image_entry = [
++            [None, None, None, [None, None, "cat alt", "https://lh3.googleusercontent.com/a"]],
++            ["image-id"],
++        ]
++        rich_content = [None] * 7 + [[[image_entry]]]
++        candidate = ["candidate-id", ["A cat"]] + [None] * 10 + [rich_content]
++        result = extract_generation_result(self._raw_frame(candidate), lambda text: text)
++
++        self.assertEqual(result.text, "A cat")
++        self.assertEqual(len(result.images), 1)
++        self.assertEqual(result.images[0].url, "https://lh3.googleusercontent.com/a")
++        self.assertEqual(result.images[0].alt, "cat alt")
++        self.assertEqual(result.images[0].image_id, "image-id")
++        self.assertEqual(result.images[0].rcid, "candidate-id")
++        self.assertEqual(result.images[0].cid, "chat-id")
++        self.assertEqual(result.images[0].rid, "reply-id")
++
++    def test_extracts_generated_image_metadata_from_sparse_field_eight(self):
++        image_entry = [
++            [None, None, None, [None, None, "fox alt", "https://lh3.googleusercontent.com/fox"]],
++            ["fox-image-id"],
++        ]
++        rich_content = [{"8": [[image_entry]]}]
++        candidate = ["candidate-id", ["A fox"]] + [None] * 10 + [rich_content]
++
++        result = extract_generation_result(self._raw_frame(candidate), lambda text: text)
++
++        self.assertEqual(result.text, "A fox")
++        self.assertEqual(len(result.images), 1)
++        self.assertEqual(result.images[0].url, "https://lh3.googleusercontent.com/fox")
++        self.assertEqual(result.images[0].image_id, "fox-image-id")
++
++    def test_generated_url_validation_rejects_non_google_and_ssrf_shapes(self):
++        self.assertEqual(
++            validate_generated_image_url("https://lh3.googleusercontent.com/a"),
++            "https://lh3.googleusercontent.com/a",
++        )
++        for url in (
++            "http://lh3.googleusercontent.com/a", "https://evilgoogleusercontent.com/a",
++            "https://googleusercontent.com@evil.example/a", "https://127.0.0.1/a",
++            "https://lh3.googleusercontent.com:444/a",
++        ):
++            with self.assertRaises(ValueError):
++                validate_generated_image_url(url)
++
++    @mock.patch("gemini_web2api.generated_image.curl_requests")
++    @mock.patch("gemini_web2api.generated_image.HAS_CURL_CFFI", True)
++    def test_generated_download_checks_redirect_host_size_magic_and_type(self, requests):
++        response = requests.get.return_value
++        response.status_code = 200
++        response.headers = {"Content-Type": "image/png", "Content-Length": "8"}
++        response.iter_content.return_value = [b"\x89PNG\r\n\x1a\n"]
++        response.close = mock.Mock()
++
++        data, mime = download_generated_image("https://lh3.googleusercontent.com/a")
++
++        self.assertEqual(data, b"\x89PNG\r\n\x1a\n")
++        self.assertEqual(mime, "image/png")
++        self.assertFalse(requests.get.call_args.kwargs["allow_redirects"])
++        self.assertEqual(requests.get.call_args.kwargs["impersonate"], "chrome")
++
++    @mock.patch("gemini_web2api.generated_image.curl_requests")
++    @mock.patch("gemini_web2api.generated_image.HAS_CURL_CFFI", True)
++    def test_generated_url_resolves_exact_two_stage_text_mediators(self, requests):
++        first, second = mock.Mock(), mock.Mock()
++        first.status_code, first.headers = 200, {"Content-Type": "text/plain"}
++        first.iter_content.return_value = [b"https://work.fife.usercontent.google.com/a"]
++        second.status_code, second.headers = 200, {"Content-Type": "text/plain"}
++        second.iter_content.return_value = [b"https://lh3.googleusercontent.com/rd-gg-dl/a"]
++        first.close, second.close = mock.Mock(), mock.Mock()
++        requests.get.side_effect = [first, second]
++
++        self.assertEqual(resolve_generated_image_url("https://lh3.googleusercontent.com/gg-dl/a"),
++                         "https://lh3.googleusercontent.com/rd-gg-dl/a")
++        self.assertEqual(requests.get.call_count, 2)
++
++    @mock.patch("gemini_web2api.generated_image.curl_requests")
++    @mock.patch("gemini_web2api.generated_image.HAS_CURL_CFFI", True)
++    def test_generated_download_rejects_unsafe_redirect_and_type_mismatch(self, requests):
++        response = requests.get.return_value
++        response.status_code = 302
++        response.headers = {"Location": "https://example.com/not-an-image"}
++        response.close = mock.Mock()
++        with self.assertRaises(ValueError):
++            download_generated_image("https://lh3.googleusercontent.com/a")
++
++        response.status_code = 200
++        response.headers = {"Content-Type": "image/jpeg"}
++        response.iter_content.return_value = [b"\x89PNG\r\n\x1a\n"]
++        with self.assertRaises(ValueError):
++            download_generated_image("https://lh3.googleusercontent.com/a")
++
++
++class FullSizeImageTests(unittest.TestCase):
++    def test_batch_response_extracts_full_size_url(self):
++        payload = json.dumps([["wrb.fr", "c8o8Fe", json.dumps(["https://lh3.googleusercontent.com/gg-dl/final"])]])
++        raw = ")]}'" + chr(10) + str(len(payload)) + chr(10) + payload
++        self.assertEqual(_batch_response_url(raw), "https://lh3.googleusercontent.com/gg-dl/final")
++
++
++class FileGenerationTests(unittest.TestCase):
++    @mock.patch("gemini_web2api.gemini.extract_response_text", return_value="cat")
++    @mock.patch("gemini_web2api.gemini.curl_requests")
++    @mock.patch("gemini_web2api.multimodal._cached_page_tokens", return_value={"f_sid": "session", "at": "token"})
++    @mock.patch("gemini_web2api.gemini.HAS_CURL_CFFI", True)
++    def test_file_generation_uses_chrome_impersonation_and_page_session(
++        self, page_tokens, curl_requests, extract_response_text
++    ):
++        response = curl_requests.post.return_value
++        response.text = "upstream body"
++
++        self.assertEqual(
++            _generate_file_with_curl("describe", 1, 4, [("/uploaded/ref", "cat.png")]),
++            "cat",
++        )
++
++        page_tokens.assert_called_once_with(max_age=0)
++        url, = curl_requests.post.call_args.args
++        kwargs = curl_requests.post.call_args.kwargs
++        self.assertIn("f.sid=session", url)
++        self.assertEqual(kwargs["impersonate"], "chrome")
++        sent_inner = _decode_payload(kwargs["data"])
++        self.assertEqual(sent_inner[0][3], [[["/uploaded/ref"], "cat.png"]])
++        self.assertEqual(sent_inner[80], 1)
++        self.assertEqual(parse_qs(kwargs["data"])["at"], ["token"])
++        request_uuid = kwargs["headers"]["x-goog-ext-525005358-jspb"]
++        self.assertEqual(request_uuid, f'["{sent_inner[59]}",1]')
++        response.raise_for_status.assert_called_once()
++        response.close.assert_called_once()
++        extract_response_text.assert_called_once_with("upstream body")
++
++    @mock.patch("gemini_web2api.gemini.generate", return_value="one result")
++    def test_file_streaming_falls_back_to_one_non_stream_result(self, generate):
++        self.assertEqual(
++            list(generate_stream("describe", 1, 4, [("/uploaded/ref", "cat.png")])),
++            ["one result"],
++        )
++        generate.assert_called_once_with("describe", 1, 4, [("/uploaded/ref", "cat.png")], None)
++
++
++class PageTokenTests(unittest.TestCase):
++    @mock.patch("gemini_web2api.multimodal.urllib.request.urlopen")
++    @mock.patch("gemini_web2api.multimodal.load_cookie", return_value=("", None))
++    def test_page_tokens_follow_configured_auth_user(self, _load_cookie, urlopen):
++        response = urlopen.return_value
++        response.read.return_value = b'{"FdrFJe":"sid","SNlM0e":"token"}'
++        previous = CONFIG.get("auth_user")
++        CONFIG["auth_user"] = "2"
++        try:
++            self.assertEqual(_get_page_tokens()["f_sid"], "sid")
++        finally:
++            CONFIG["auth_user"] = previous
++
++        request = urlopen.call_args.args[0]
++        self.assertEqual(request.full_url, "https://gemini.google.com/u/2/app")
++        self.assertEqual(request.get_header("X-goog-authuser"), "2")
++        self.assertEqual(request.get_header("Referer"), "https://gemini.google.com/u/2/app")
++
++    @mock.patch("gemini_web2api.multimodal.urllib.request.urlopen")
++    @mock.patch("gemini_web2api.multimodal.load_cookie", return_value=("", None))
++    def test_page_tokens_accept_previous_xsrf_key(self, _load_cookie, urlopen):
++        urlopen.return_value.read.return_value = b'{"thykhd":"legacy-token"}'
++
++        self.assertEqual(_get_page_tokens()["at"], "legacy-token")
++
++
++class RemoteImageFetchTests(unittest.TestCase):
++    @mock.patch("gemini_web2api.multimodal.CurlOpt")
++    @mock.patch("gemini_web2api.multimodal.curl_requests")
++    @mock.patch("gemini_web2api.multimodal.HAS_CURL_CFFI", True)
++    def test_rejects_non_public_literal_addresses(self, requests, _curl_opt):
++        for url in (
++            "https://127.0.0.1/image.png",
++            "https://10.0.0.1/image.png",
++            "https://169.254.169.254/latest/meta-data",
++            "https://[::1]/image.png",
++        ):
++            with self.subTest(url=url):
++                self.assertEqual(fetch_image_bytes(url), b"")
++        requests.Session.assert_not_called()
++
++    @mock.patch("gemini_web2api.multimodal.CurlOpt")
++    @mock.patch("gemini_web2api.multimodal.socket.getaddrinfo")
++    @mock.patch("gemini_web2api.multimodal.curl_requests")
++    @mock.patch("gemini_web2api.multimodal.HAS_CURL_CFFI", True)
++    def test_rejects_redirect_to_private_address(self, requests, getaddrinfo, _curl_opt):
++        getaddrinfo.return_value = [
++            (2, 1, 6, "", ("93.184.216.34", 443)),
++        ]
++        session = requests.Session.return_value
++        response = session.get.return_value
++        response.status_code = 302
++        response.headers = {"Location": "https://127.0.0.1/private.png"}
++
++        self.assertEqual(fetch_image_bytes("https://example.com/image.png"), b"")
++        session.get.assert_called_once()
++        response.close.assert_called_once()
++        session.close.assert_called_once()
++
++    @mock.patch("gemini_web2api.multimodal.CurlOpt")
++    @mock.patch("gemini_web2api.multimodal.socket.getaddrinfo")
++    @mock.patch("gemini_web2api.multimodal.curl_requests")
++    @mock.patch("gemini_web2api.multimodal.HAS_CURL_CFFI", True)
++    def test_enforces_size_and_image_type(self, requests, getaddrinfo, _curl_opt):
++        getaddrinfo.return_value = [
++            (2, 1, 6, "", ("93.184.216.34", 443)),
++        ]
++        response = requests.Session.return_value.get.return_value
++        response.status_code = 200
++        response.headers = {
++            "Content-Type": "image/png",
++            "Content-Length": str(10 * 1024 * 1024 + 1),
++        }
++
++        self.assertEqual(fetch_image_bytes("https://example.com/image.png"), b"")
++
++        response.headers = {"Content-Type": "image/jpeg"}
++        response.iter_content.return_value = [b"\x89PNG\r\n\x1a\n"]
++        self.assertEqual(fetch_image_bytes("https://example.com/image.png"), b"")
++
++    @mock.patch("gemini_web2api.multimodal.CurlOpt")
++    @mock.patch("gemini_web2api.multimodal.socket.getaddrinfo")
++    @mock.patch("gemini_web2api.multimodal.curl_requests")
++    @mock.patch("gemini_web2api.multimodal.HAS_CURL_CFFI", True)
++    def test_fetches_bounded_public_image(self, requests, getaddrinfo, curl_opt):
++        getaddrinfo.return_value = [
++            (2, 1, 6, "", ("93.184.216.34", 443)),
++        ]
++        session = requests.Session.return_value
++        response = session.get.return_value
++        response.status_code = 200
++        response.headers = {"Content-Type": "image/png", "Content-Length": "8"}
++        response.iter_content.return_value = [b"\x89PNG\r\n\x1a\n"]
++
++        self.assertEqual(
++            fetch_image_bytes("https://example.com/image.png"),
++            b"\x89PNG\r\n\x1a\n",
++        )
++        self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
++        session_options = requests.Session.call_args.kwargs
++        self.assertFalse(session_options["trust_env"])
++        self.assertEqual(
++            session_options["curl_options"][curl_opt.RESOLVE],
++            ["example.com:443:93.184.216.34"],
++        )
++        response.close.assert_called_once()
++        session.close.assert_called_once()
+ 
+ 
+ class MessageParsingTests(unittest.TestCase):
++    def test_chat_image_prompt_uses_only_explicit_latest_user_intent(self):
++        request = {
++            "messages": [
++                {"role": "user", "content": "generate an image of an old prompt"},
++                {"role": "assistant", "content": "done"},
++                {"role": "user", "content": "Can you generate an image of a pink cat?"},
++            ],
++        }
++        self.assertEqual(
++            _chat_image_prompt(request),
++            "Can you generate an image of a pink cat?",
++        )
++        self.assertIsNone(_chat_image_prompt({
++            "messages": [{"role": "user", "content": "Generate a description of this image"}],
++        }))
++        self.assertIsNone(_chat_image_prompt({
++            "messages": [
++                {"role": "user", "content": "generate an image of a cat"},
++                {"role": "user", "content": "What did I ask for?"},
++            ],
++        }))
++
+     def test_messages_to_prompt_extracts_openai_image_url_data_url(self):
+         image_data = base64.b64encode(b"fake png").decode()
+ 
+@@ -215,6 +586,121 @@ class StreamingEndpointTests(unittest.TestCase):
+         self.assertEqual(chunks[2]["choices"][0]["delta"], {"content": "lo"})
+         self.assertTrue(body.endswith("data: [DONE]\n\n"))
+ 
++    @mock.patch("gemini_web2api.server._upload_images")
++    @mock.patch("gemini_web2api.server.generate_stream")
++    @mock.patch("gemini_web2api.server.generate")
++    @mock.patch("gemini_web2api.server._generated_image_output")
++    def test_chat_image_request_streams_renderable_markdown(
++        self, generated_image, generate, generate_stream, upload_images
++    ):
++        generated_image.return_value = (
++            "",
++            {"url": "https://lh3.googleusercontent.com/generated-cat"},
++        )
++        image_data = base64.b64encode(b"old image").decode()
++        status, headers, body = self.post_json(
++            "/v1/chat/completions",
++            {
++                "model": "gemini-3.6-flash",
++                "stream": True,
++                "messages": [
++                    {
++                        "role": "user",
++                        "content": [{
++                            "type": "image_url",
++                            "image_url": {"url": f"data:image/png;base64,{image_data}"},
++                        }, {"type": "text", "text": "What is this?"}],
++                    },
++                    {"role": "assistant", "content": "An earlier image."},
++                    {"role": "user", "content": "Generate an image of a pink cat"},
++                ],
++                "tools": [{
++                    "type": "function",
++                    "function": {
++                        "name": "clock",
++                        "description": "Get time",
++                        "parameters": {"type": "object", "properties": {}},
++                    },
++                }],
++            },
++        )
++
++        self.assertEqual(status, 200)
++        self.assertEqual(headers["Content-Type"], "text/event-stream")
++        self.assertIn(
++            "![Generated image](https://lh3.googleusercontent.com/generated-cat)",
++            body,
++        )
++        self.assertTrue(body.endswith("data: [DONE]\n\n"))
++        generated_image.assert_called_once_with(
++            "Generate an image of a pink cat", "url"
++        )
++        upload_images.assert_called_once_with([])
++        generate.assert_not_called()
++        generate_stream.assert_not_called()
++
++    @mock.patch(
++        "gemini_web2api.server._generated_image_output",
++        side_effect=RuntimeError("image generation failed"),
++    )
++    def test_chat_image_request_fails_before_sse(self, _generated_image):
++        status, headers, body = self.post_json(
++            "/v1/chat/completions",
++            {
++                "model": "gemini-3.6-flash",
++                "stream": True,
++                "messages": [{
++                    "role": "user",
++                    "content": "Generate an image of a pink cat",
++                }],
++            },
++        )
++
++        self.assertEqual(status, 502)
++        self.assertEqual(headers["Content-Type"], "application/json")
++        self.assertIn("image generation failed", json.loads(body)["error"]["message"])
++
++    @mock.patch("gemini_web2api.server.generate_stream")
++    def test_chat_stream_returns_json_error_before_sse(self, generate_stream):
++        def rejected():
++            raise GeminiUpstreamError("Gemini rejected request")
++            yield  # pragma: no cover
++
++        generate_stream.return_value = rejected()
++        status, headers, body = self.post_json(
++            "/v1/chat/completions",
++            {
++                "model": "gemini-3.6-flash",
++                "messages": [{"role": "user", "content": "hello"}],
++                "stream": True,
++            },
++        )
++
++        self.assertEqual(status, 502)
++        self.assertEqual(headers["Content-Type"], "application/json")
++        self.assertIn("Gemini rejected request", json.loads(body)["error"]["message"])
++
++    @mock.patch("gemini_web2api.server.generate_stream")
++    def test_chat_stream_emits_error_after_sse_starts(self, generate_stream):
++        def rejected_after_delta():
++            yield "partial"
++            raise GeminiUpstreamError("late rejection")
++
++        generate_stream.return_value = rejected_after_delta()
++        status, headers, body = self.post_json(
++            "/v1/chat/completions",
++            {
++                "model": "gemini-3.6-flash",
++                "messages": [{"role": "user", "content": "hello"}],
++                "stream": True,
++            },
++        )
++
++        self.assertEqual(status, 200)
++        self.assertEqual(headers["Content-Type"], "text/event-stream")
++        self.assertIn('"type": "upstream_error"', body)
++        self.assertTrue(body.endswith("data: [DONE]\n\n"))
++
+     @mock.patch("gemini_web2api.server.generate", return_value="chunked ok")
+     def test_chat_accepts_chunked_body(self, _generate):
+         status, _, body = self.post_chunked_json(
+@@ -254,10 +740,33 @@ class StreamingEndpointTests(unittest.TestCase):
+ 
+         self.assertEqual(status, 200)
+         upload_image.assert_called_once_with(b"fake png", "image.png", "image/png")
+-        self.assertEqual(generate.call_args.args[3], ["/uploaded/image-ref"])
++        self.assertEqual(generate.call_args.args[3], [("/uploaded/image-ref", "image.png")])
+         self.assertIn("[Image attached]", generate.call_args.args[0])
+         self.assertEqual(json.loads(body)["choices"][0]["message"]["content"], "looks good")
+ 
++    @mock.patch("gemini_web2api.server.upload_image", return_value="/uploaded/image-ref")
++    @mock.patch("gemini_web2api.server.generate", side_effect=RuntimeError("file rejected"))
++    def test_chat_image_stream_reports_failure_before_sse(self, _generate, _upload_image):
++        image_data = base64.b64encode(b"fake png").decode()
++        status, headers, body = self.post_json(
++            "/v1/chat/completions",
++            {
++                "model": "gemini-3.6-flash",
++                "stream": True,
++                "messages": [{
++                    "role": "user",
++                    "content": [
++                        {"type": "text", "text": "Describe"},
++                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_data}"}},
++                    ],
++                }],
++            },
++        )
++
++        self.assertEqual(status, 502)
++        self.assertEqual(headers["Content-Type"], "application/json")
++        self.assertIn("file rejected", json.loads(body)["error"]["message"])
++
+     @mock.patch("gemini_web2api.server.fetch_image_bytes", return_value=b"\xff\xd8\xffremote jpeg")
+     @mock.patch("gemini_web2api.server.upload_image", return_value="/uploaded/remote-ref")
+     @mock.patch("gemini_web2api.server.generate", return_value="remote ok")
+@@ -282,7 +791,7 @@ class StreamingEndpointTests(unittest.TestCase):
+         self.assertEqual(status, 200)
+         fetch_image_bytes.assert_called_once_with("https://example.com/image.jpg")
+         upload_image.assert_called_once_with(b"\xff\xd8\xffremote jpeg", "image.png", "image/jpeg")
+-        self.assertEqual(generate.call_args.args[3], ["/uploaded/remote-ref"])
++        self.assertEqual(generate.call_args.args[3], [("/uploaded/remote-ref", "image.png")])
+         self.assertIn("[Image attached]", generate.call_args.args[0])
+ 
+     @mock.patch("gemini_web2api.server.upload_image", return_value="/uploaded/image-ref")
+@@ -306,7 +815,7 @@ class StreamingEndpointTests(unittest.TestCase):
+ 
+         self.assertEqual(status, 200)
+         upload_image.assert_called_once_with(b"fake png", "image.png", "image/png")
+-        self.assertEqual(generate.call_args.args[3], ["/uploaded/image-ref"])
++        self.assertEqual(generate.call_args.args[3], [("/uploaded/image-ref", "image.png")])
+         self.assertIn("What is shown?", generate.call_args.args[0])
+         self.assertIn("[Image attached]", generate.call_args.args[0])
+ 
+@@ -348,6 +857,123 @@ class StreamingEndpointTests(unittest.TestCase):
+         self.assertEqual(headers["Content-Type"], "text/event-stream")
+         self.assertIn('"text": "streamed"', body)
+ 
++    @mock.patch("gemini_web2api.server.generate_stream")
++    def test_google_stream_returns_json_error_before_sse(self, generate_stream):
++        def rejected():
++            raise GeminiUpstreamError("Gemini rejected request")
++            yield  # pragma: no cover
++
++        generate_stream.return_value = rejected()
++        status, headers, body = self.post_json(
++            "/v1beta/models/gemini-3.6-flash:streamGenerateContent",
++            {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
++        )
++
++        self.assertEqual(status, 502)
++        self.assertEqual(headers["Content-Type"], "application/json")
++        self.assertIn("Gemini rejected request", json.loads(body)["error"]["message"])
++
++    @mock.patch("gemini_web2api.server.generate_stream")
++    def test_google_stream_emits_error_after_sse_starts(self, generate_stream):
++        def rejected_after_delta():
++            yield "partial"
++            raise GeminiUpstreamError("late rejection")
++
++        generate_stream.return_value = rejected_after_delta()
++        status, headers, body = self.post_json(
++            "/v1beta/models/gemini-3.6-flash:streamGenerateContent",
++            {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
++        )
++
++        self.assertEqual(status, 200)
++        self.assertEqual(headers["Content-Type"], "text/event-stream")
++        self.assertIn('"status": "UNAVAILABLE"', body)
++
++    @mock.patch("gemini_web2api.server.resolve_generated_image_url", return_value="https://lh3.googleusercontent.com/rd-gg-dl/a")
++    @mock.patch("gemini_web2api.server.get_full_size_image", return_value=None)
++    @mock.patch("gemini_web2api.server.generate_image_structured")
++    @mock.patch("gemini_web2api.server.download_generated_image", return_value=(b"\x89PNG\r\n\x1a\n", "image/png"))
++    def test_image_generation_endpoint_returns_full_size_preferred_b64_or_resolved_url(self, download, generate_image_structured, full_size, resolve_url):
++        from gemini_web2api.generated_image import GeneratedImage, GenerationResult
++        image = GeneratedImage("https://lh3.googleusercontent.com/a")
++        generate_image_structured.return_value = GenerationResult(images=[image])
++
++        status, _, body = self.post_json(
++            "/v1/images/generations",
++            {"prompt": "a cat", "model": "gpt-image-1", "user": "client-id"},
++        )
++        self.assertEqual(status, 200)
++        self.assertEqual(json.loads(body)["data"][0]["b64_json"], "iVBORw0KGgo=")
++        download.assert_called_once_with(image.url)
++
++        status, _, body = self.post_json("/v1/images/generations", {"prompt": "a cat", "response_format": "url"})
++        self.assertEqual(status, 200)
++        self.assertEqual(json.loads(body)["data"][0]["url"], "https://lh3.googleusercontent.com/rd-gg-dl/a")
++        resolve_url.assert_called_once_with(image.url)
++
++    def test_image_generation_endpoint_rejects_unsupported_options(self):
++        status, _, _ = self.post_json("/v1/images/generations", {"prompt": "a cat", "n": 2})
++        self.assertEqual(status, 400)
++        status, _, _ = self.post_json("/v1/images/generations", {"prompt": "a cat", "size": "1024x1024"})
++        self.assertEqual(status, 400)
++
++    @mock.patch("gemini_web2api.server.get_full_size_image", return_value=None)
++    @mock.patch("gemini_web2api.server.generate_image_structured")
++    @mock.patch("gemini_web2api.server.download_generated_image", return_value=(b"\x89PNG\r\n\x1a\n", "image/png"))
++    def test_responses_image_generation_is_native_and_streams_atomic_item(self, _download, generate_image_structured, _full_size):
++        from gemini_web2api.generated_image import GeneratedImage, GenerationResult
++        generate_image_structured.return_value = GenerationResult(text="caption", images=[GeneratedImage("https://lh3.googleusercontent.com/a")])
++        status, headers, body = self.post_json("/v1/responses", {
++            "input": "make a cat", "tools": [{"type": "image_generation"}], "stream": True,
++        })
++        self.assertEqual(status, 200)
++        self.assertEqual(headers["Content-Type"], "text/event-stream")
++        events = _decode_sse(body)
++        image_events = [(name, event) for name, event in events if event.get("item", {}).get("type") == "image_generation_call"]
++        self.assertEqual([name for name, _ in image_events], ["response.output_item.added", "response.output_item.done"])
++        self.assertEqual(image_events[-1][1]["item"]["result"], "iVBORw0KGgo=")
++        self.assertEqual(events[-1][0], "response.completed")
++
++    def test_responses_image_generation_rejects_image_input(self):
++        image_data = base64.b64encode(b"fake png").decode()
++        status, _, body = self.post_json("/v1/responses", {
++            "input": [{
++                "role": "user",
++                "content": [{
++                    "type": "input_image",
++                    "image_url": f"data:image/png;base64,{image_data}",
++                }],
++            }],
++            "tools": [{"type": "image_generation"}],
++        })
++
++        self.assertEqual(status, 400)
++        self.assertIn("not supported", json.loads(body)["error"]["message"])
++
++    @mock.patch("gemini_web2api.server.get_full_size_image", return_value=None)
++    @mock.patch("gemini_web2api.server.generate_image_structured")
++    @mock.patch("gemini_web2api.server.download_generated_image", return_value=(b"\x89PNG\r\n\x1a\n", "image/png"))
++    def test_responses_image_generation_non_stream_returns_completed_item(self, _download, generate_image_structured, _full_size):
++        from gemini_web2api.generated_image import GeneratedImage, GenerationResult
++        generate_image_structured.return_value = GenerationResult(
++            images=[GeneratedImage("https://lh3.googleusercontent.com/a")]
++        )
++
++        status, headers, body = self.post_json("/v1/responses", {
++            "input": "make a cat", "tools": [{"type": "image_generation"}],
++        })
++
++        response = json.loads(body)
++        self.assertEqual(status, 200)
++        self.assertEqual(headers["Content-Type"], "application/json")
++        self.assertEqual(response["object"], "response")
++        self.assertEqual(response["status"], "completed")
++        self.assertEqual([item["type"] for item in response["output"]], ["image_generation_call"])
++        image_item = response["output"][0]
++        self.assertTrue(image_item["id"].startswith("imggen_"))
++        self.assertEqual(image_item["status"], "completed")
++        self.assertEqual(image_item["result"], "iVBORw0KGgo=")
++
+     @mock.patch("gemini_web2api.server.generate", return_value="hello")
+     def test_responses_text_stream_has_complete_event_sequence(self, _generate):
+         status, headers, body = self.post_json(

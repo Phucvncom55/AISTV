@@ -67,6 +67,9 @@ SECRETS_REPO = "Phucvncom55/AISTV-secrets"
 SECRETS_PATH = "web2api/cookie.txt"          # cookie nguyên văn, sửa được trên GitHub
 DEFAULT_MODEL = "gemini-3.6-flash"
 DEFAULT_KEY = "sk-gemini"
+IMAGE_PATCH = "gemini-web2api-image.patch"      # vá thêm xem ảnh + tạo ảnh
+IMAGE_ENDPOINT = "/v1/images/generations"
+MAX_IMAGE_BYTES = 15 * 1024 * 1024
 SAPI_SID_NAMES = ("SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID")
 COOKIE_PRIORITY = (
     "__Secure-1PSID", "__Secure-3PSID", "SAPISID", "SSID", "HSID", "SID",
@@ -113,6 +116,84 @@ def app_dir() -> Path:
 
 def app_script() -> Path:
     return app_dir() / "gemini_web2api.py"
+
+
+def package_dir() -> Path:
+    return app_dir() / "gemini_web2api"
+
+
+def image_patch_path() -> Path:
+    """Patch đóng gói trong repo AISTV (không phụ thuộc bản upstream mới nhất)."""
+    return Path(__file__).resolve().parent / "patches" / IMAGE_PATCH
+
+
+def image_files_zip() -> Path:
+    """Bản package đã vá, dùng khi máy không có git/patch."""
+    return image_patch_path().with_name(Path(IMAGE_PATCH).stem + "-files.zip")
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def image_patch_ready() -> bool:
+    """Đã vá đủ phần xem ảnh + tạo ảnh của upstream chưa."""
+    server = _read_text(package_dir() / "server.py")
+    generated = _read_text(package_dir() / "generated_image.py")
+    return ("generate_image_structured" in server
+            and "_MEDIATOR_GENERATED_IMAGE_HOSTS" in generated)
+
+
+def apply_image_patch(quiet: bool = True) -> tuple:
+    """Áp patch ảnh lên bản clone upstream; chạy lại nhiều lần vẫn an toàn."""
+    if image_patch_ready():
+        return True, "đã có"
+    patch = image_patch_path()
+    if not patch.is_file():
+        return False, f"thiếu {patch.name}"
+    if not package_dir().is_dir():
+        return False, "chưa tải server upstream"
+    detail = ""
+    git = shutil.which("git")
+    if git and (app_dir() / ".git").exists():
+        result = subprocess.run([git, "apply", str(patch)], cwd=str(app_dir()),
+                                capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and image_patch_ready():
+            return True, "git apply"
+        detail = (result.stderr or result.stdout or "").strip()[-300:]
+    tool = shutil.which("patch")
+    if tool:
+        result = subprocess.run([tool, "-p1", "-i", str(patch)], cwd=str(app_dir()),
+                                capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and image_patch_ready():
+            return True, "patch"
+        detail = (result.stderr or result.stdout or "").strip()[-300:] or detail
+    else:
+        detail = detail or "không có git/patch"
+    archive = image_files_zip()
+    if archive.is_file():
+        try:
+            with zipfile.ZipFile(archive) as zf:
+                for name in zf.namelist():
+                    if name.startswith("gemini_web2api/") and name.endswith(".py"):
+                        zf.extract(name, app_dir())
+            if image_patch_ready():
+                return True, "zip"
+        except Exception as exc:
+            detail = f"zip: {exc}"
+    if not quiet:
+        print(f"⚠️ Chưa vá được tính năng ảnh: {detail}")
+    return False, detail or "không áp được patch"
+
+
+def app_command() -> list:
+    """Chạy package đã vá khi có (hỗ trợ ảnh), không thì file đơn cũ."""
+    if image_patch_ready() and (package_dir() / "__main__.py").is_file():
+        return [_python(), "-m", "gemini_web2api", "--config", str(config_path())]
+    return [_python(), str(app_script()), "--config", str(config_path())]
 
 
 def cookie_path() -> Path:
@@ -951,11 +1032,34 @@ def ensure_deps() -> tuple:
     return ok, "đã cài httpx" if ok else (result.stderr or "pip lỗi")[-300:]
 
 
+def has_curl_cffi() -> bool:
+    try:
+        import curl_cffi  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def ensure_image_deps(quiet: bool = True) -> tuple:
+    """curl_cffi cần cho xem ảnh + tạo ảnh qua Gemini Web (TLS kiểu Chrome)."""
+    if has_curl_cffi():
+        return True, "có curl_cffi"
+    result = subprocess.run([_python(), "-m", "pip", "install", "-q", "curl_cffi"],
+                            capture_output=True, text=True, timeout=300)
+    ok = result.returncode == 0
+    if not ok and not quiet:
+        print("⚠️ Chưa cài được curl_cffi — tính năng ảnh sẽ tạm tắt.")
+    return ok, ("đã cài curl_cffi" if ok else (result.stderr or "pip lỗi")[-300:])
+
+
 def setup(force: bool = False) -> tuple:
     runtime_dir().mkdir(parents=True, exist_ok=True)
     ok, how = _download_app()
     if not ok:
         return False, f"không tải được server: {how}"
+    patch_ok, _patch_msg = apply_image_patch(quiet=True)
+    if patch_ok:
+        ensure_image_deps(quiet=True)
     write_config(force=force)
     dep_ok, dep_msg = ensure_deps()
     if not dep_ok:
@@ -1023,6 +1127,9 @@ def start(wait: float = 25.0, quiet: bool = False) -> tuple:
         ok, msg = setup()
         if not ok:
             return False, msg
+    apply_image_patch(quiet=True)
+    if image_patch_ready():
+        ensure_image_deps(quiet=True)
     write_config()
     if not _read_json(config_path(), {}).get("xsrf_token"):
         refresh_xsrf(quiet=True)
@@ -1035,7 +1142,7 @@ def start(wait: float = 25.0, quiet: bool = False) -> tuple:
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(
-        [_python(), str(app_script()), "--config", str(config_path())],
+        app_command(),
         cwd=str(app_dir()), stdin=subprocess.DEVNULL, stdout=log, stderr=log,
         **kwargs)
     _state_update(pid=proc.pid, started=time.time(), url=base_url())
@@ -1145,15 +1252,27 @@ def _http_json(url: str, payload: dict, timeout: float = 180,
         return None, f"{type(exc).__name__}: {exc}"
 
 
+_CITE_RE = re.compile(r"\s*\[cite:\s*\d+(?:\s*,\s*\d+)*\]", re.I)
+
+
+def _clean_reply(text: str) -> str:
+    """Bỏ chú thích [cite: N] mà Gemini Web chèn vào câu trả lời."""
+    return _CITE_RE.sub("", text or "").strip()
+
+
 def chat(messages: list, model: str = "", timeout: float = 180, **extra) -> tuple:
     payload = {"model": model or default_model(), "messages": messages, **extra}
     data, err = _http_json(base_url() + "/v1/chat/completions", payload, timeout)
     if err:
         return None, err
     try:
-        return data["choices"][0]["message"]["content"], None
+        content = data["choices"][0]["message"].get("content")
     except Exception:
         return None, "phản hồi không đúng định dạng"
+    content = _clean_reply(content)
+    if not content:
+        return None, "phản hồi rỗng (ảnh có thể chưa được nhận)"
+    return content, None
 
 
 def _normalise_parts(parts: list) -> list:
@@ -1209,10 +1328,69 @@ def generate(parts: list, model: str = "", timeout: float = 240,
         text = "\n".join(str(p.get("text") or "") for p in chunks).strip()
     except Exception:
         text = ""
+    text = _clean_reply(text)
     if text:
         return text, None
     feedback = (data.get("promptFeedback") or {}).get("blockReason")
     return None, f"Web2API không trả lời{(' (' + feedback + ')') if feedback else ''}"
+
+
+def _image_mime(raw: bytes) -> str:
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
+def generate_image(prompt: str, model: str = "", timeout: float = 240,
+                   response_format: str = "b64_json") -> tuple:
+    """Tạo ảnh qua /v1/images/generations của server đã vá.
+
+    Trả (bytes, mime, lỗi). Server cũ chưa vá sẽ trả 404/501 → báo rõ.
+    """
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return None, "", "thiếu mô tả ảnh"
+    if not ensure_server():
+        return None, "", "Web2API chưa sẵn sàng"
+    payload = {"prompt": prompt, "n": 1, "response_format": response_format}
+    if model:
+        payload["model"] = model
+    data, err = _http_json(base_url() + IMAGE_ENDPOINT, payload, timeout)
+    if err:
+        low = err.lower()
+        if "404" in low or "501" in low or "not found" in low:
+            return None, "", ("server Web2API chưa có tính năng tạo ảnh — "
+                              "chạy `python aistv_web2api.py setup` để vá")
+        return None, "", err
+    try:
+        item = (data.get("data") or [{}])[0]
+    except Exception:
+        return None, "", "phản hồi tạo ảnh không đúng định dạng"
+    raw = b""
+    if item.get("b64_json"):
+        try:
+            raw = base64.b64decode(item["b64_json"])
+        except Exception:
+            return None, "", "ảnh base64 không hợp lệ"
+    elif item.get("url"):
+        url = str(item["url"])
+        if not url.startswith(("http://", "https://")):
+            return None, "", "URL ảnh không hợp lệ"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=min(timeout, 120)) as resp:
+                raw = resp.read(MAX_IMAGE_BYTES + 1)
+        except Exception as exc:
+            return None, "", f"không tải được ảnh: {exc}"
+        if len(raw) > MAX_IMAGE_BYTES:
+            return None, "", "ảnh vượt quá 15 MB"
+    if not raw:
+        return None, "", "server không trả dữ liệu ảnh"
+    return raw, _image_mime(raw), None
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1236,11 +1414,16 @@ def status_report() -> dict:
     """Thông tin ngắn cho bot (không in bí mật)."""
     cfg = _read_json(config_path(), {})
     state = _read_json(state_path(), {}) or {}
+    running = health(1.5)
+    images = image_patch_ready()
     return {
         "enabled": enabled(),
         "url": base_url(),
         "local": is_local(),
-        "running": health(1.5),
+        "running": running,
+        "images": images,
+        "curl_cffi": has_curl_cffi(),
+        "images_ready": bool(images and running and has_curl_cffi()),
         "cookie": bool(cookie_header()),
         "xsrf": bool(cfg.get("xsrf_token")),
         "model": default_model(),
@@ -1262,6 +1445,8 @@ def cmd_doctor() -> int:
     print(f"Cookie       : {'có' if header else 'chưa có'} ({len(header)} ký tự)")
     print(f"XSRF token   : {'có' if cfg.get('xsrf_token') else 'chưa có'}")
     print(f"Model mặc định: {default_model()}")
+    print(f"Xem/tạo ảnh  : {'✅ đã vá' if image_patch_ready() else '❌ chưa vá (chạy setup)'}"
+          f" · curl_cffi: {'✅' if has_curl_cffi() else '❌ (pip install curl_cffi)'}")
     print(f"Đồng bộ      : {'✅' if header and state.get('cookie_sig') and state.get('cookie_sig') == state.get('synced_sig') else '⏳ chưa đẩy'}"
           f" ({'nguyên văn, không mã hoá' if header else 'chưa có cookie'})")
     repo, path = _remote_repo()
@@ -1274,10 +1459,21 @@ def cmd_doctor() -> int:
     return 0
 
 
-def cmd_test(prompt: str) -> int:
+def cmd_test(prompt: str, image: bool = False, out: str = "") -> int:
     if not ensure_server(quiet=False):
         print("Server chưa sẵn sàng.")
         return 2
+    if image:
+        raw, mime, err = generate_image(prompt, timeout=300)
+        if not raw:
+            print(f"Lỗi tạo ảnh: {err}")
+            return 1
+        ext = ".png" if mime == "image/png" else (".jpg" if mime == "image/jpeg" else ".webp")
+        path = Path(out).expanduser() if out else Path.cwd() / f"web2api_image_{time.strftime('%Y%m%d_%H%M%S')}{ext}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        print(str(path))
+        return 0
     text, err = chat([{"role": "user", "content": prompt}], timeout=180)
     print(text if text else f"Lỗi: {err}")
     return 0 if text else 1
@@ -1333,6 +1529,8 @@ def main(argv=None) -> int:
     sub.add_parser("doctor", help="kiểm tra tổng thể")
     p_test = sub.add_parser("test", help="gọi thử một request")
     p_test.add_argument("prompt", nargs="?", default="Trả lời đúng một chữ: OK")
+    p_test.add_argument("--image", action="store_true", help="thử tạo ảnh thay vì chat")
+    p_test.add_argument("--out", default="", help="file ảnh đầu ra khi dùng --image")
 
     args = parser.parse_args(argv)
     cmd = args.cmd or "status"
@@ -1393,7 +1591,7 @@ def main(argv=None) -> int:
         if cmd == "doctor":
             return cmd_doctor()
         if cmd == "test":
-            return cmd_test(args.prompt)
+            return cmd_test(args.prompt, image=args.image, out=args.out)
         # status
         cfg = _read_json(config_path(), {})
         state = _read_json(state_path(), {}) or {}

@@ -148,6 +148,28 @@ WEB2API_MODEL=gemini-3.5-flash-thinking
 OPENCODE_FALLBACK_MODELS=web2api/gemini-3.5-flash-thinking
 ```
 
+## 5.1. Xem ảnh và tạo ảnh
+
+Server upstream chỉ làm chat chữ; AISTV vá thêm hai khả năng bằng
+`patches/gemini-web2api-image.patch` (tự áp khi `setup`/`start`, cần `curl_cffi`).
+
+**Xem ảnh (vision).** Gửi ảnh/URL ảnh cho bot như bình thường. `aistv_watch.py` gọi
+Gemini API trước; hết hạn mức thì tự chuyển Web2API với `inline_data`/`image_url`.
+Gemini Web đọc được chữ (OCR), vật thể, màu sắc, biểu đồ. Chú thích `[cite: N]` do
+Gemini Web chèn được tự bỏ trước khi trả lời.
+
+**Tạo ảnh.** `aistv_image.py` thêm provider `web2api`, đứng đầu chuỗi tự chọn:
+
+```bash
+python aistv_image.py "một chú mèo phi hành gia" --provider web2api --json
+python aistv_web2api.py test --image "một chú mèo phi hành gia" --out meo.png
+```
+
+Ảnh Web2API trả về dạng PNG/JPEG/WebP, được lưu vào `generated/` như mọi provider khác.
+Nếu Web2API lỗi (cookie hết hạn, Gemini từ chối, thiếu `curl_cffi`), chuỗi tự lùi về
+Cloudflare → Gemini API → Together → Hugging Face. Ảnh tham chiếu (`--ref`) chưa hỗ trợ
+qua Web2API nên tự chuyển provider khác.
+
 ## 6. Biến môi trường
 
 | Biến | Mặc định | Ý nghĩa |
@@ -176,4 +198,7 @@ OPENCODE_FALLBACK_MODELS=web2api/gemini-3.5-flash-thinking
 | `502` / rỗng khi dùng Docker | dùng `--network host` (xem README repo gốc) |
 | Không vào được gemini.google.com | đặt `WEB2API_PROXY` (Clash/V2Ray) |
 | Không thấy model `web2api/...` | chạy `/restart` để ghi lại `workspace/opencode.json` |
+| `/web2api` báo “chưa vá” tính năng ảnh | chạy `/web2api restart` (tự áp patch) hoặc `python aistv_web2api.py setup` |
+| Tạo ảnh báo `curl_cffi is required` | `pip install curl_cffi` rồi `/web2api restart` |
+| Xem ảnh trả lời rỗng | kiểm tra cookie còn sống, thử `python aistv_web2api.py doctor`; ảnh quá lớn/định dạng lạ thì đổi sang PNG/JPEG |
 | Máy mới chưa có cookie | đặt `AISTV_CONFIG_TOKEN` hoặc `gh auth login` rồi chạy bot / `auto` |
