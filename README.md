@@ -664,8 +664,23 @@ headroom mcp serve                     # MCP: headroom_compress / headroom_retri
 ```
 
 Đã kiểm chứng 25/10/2026 trên v0.41.0: JSON tool output 9.262 → 3.940 token (−57,5%), nén dưới 1 ms;
-log thuần và văn dày đặc nén gần 0. MCP server `headroom` đã ghi trong `opencode.json` (env
-`HEADROOM_OFFLINE=1`). Không dùng `headroom wrap` tự động — nó đổi upstream của agent về OpenAI mặc định.
+log thuần và văn dày đặc nén gần 0. Bot dùng thẳng thư viện `headroom` nên **không cần** MCP server;
+muốn bật cho agent tự nén tool output thì thêm bằng `python3 aistv_mcp.py add …` (mặc định tắt).
+Không dùng `headroom wrap` tự động — nó đổi upstream của agent về OpenAI mặc định.
+
+**Trong bot:** trước khi gửi prompt, bot nén phần ngữ cảnh (SOUL/AGENTS/MEMORY/kỹ năng/lịch sử hội thoại)
+bằng Headroom, giữ nguyên yêu cầu mới của người dùng. Chỉ dùng bản nén khi giảm ≥3% và chỉ bật các
+transform cấu trúc (JSON/bảng → dạng gọn, không viết lại văn xuôi): `kompress_model="disabled"`.
+Prompt dạng hội thoại thường không giảm được gì nên footer ghi `headroom 0%`.
+Tắt bằng `AISTV_HEADROOM=0`.
+
+Footer mỗi câu trả lời có dạng:
+
+```
+⏱ 14.0s · deepseek-v4.1-flash-free · 🧠 12,4k tok gốc → 7,1k qua headroom (−43%) · ra 412
+```
+
+`tok gốc` = ngữ cảnh model đọc nếu không nén, `qua headroom` = số thật đã gửi, `ra` = token trả về.
 
 Dữ liệu chạy nằm ngoài repo tại `STV_HOME` (mặc định `~/stv_agent`), nên cập nhật code không mất trí nhớ.
 

@@ -738,6 +738,7 @@ ASK_LOCK = threading.Lock()
 THINKING: dict = {}                # chat_id -> [các đoạn reasoning model đã trả về]
 LIVE: dict = {}                    # chat_id -> dòng thời gian sự kiện (think/tool) để cuộn như terminal
 THINK_TOKENS: dict = {}            # chat_id -> số token reasoning
+TOKEN_USAGE: dict = {}             # chat_id -> token thật của lượt chạy (vào/ra/cache/giá)
 THINKING_LAST: dict = {}           # chat_id -> thời điểm nhận reasoning gần nhất
 NO_THINK: dict = {}                # model (bỏ #variant) -> True nếu lượt chạy không trả reasoning
 GH_TOKEN_CACHE = ""                # token GitHub đang dùng (để che trong log/output)
@@ -2362,6 +2363,136 @@ def _rel(path) -> str:
         return str(path or "")
 
 
+def _int(x) -> int:
+    try:
+        return int(x or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fmt_tok(n: int) -> str:
+    """1234 -> '1,2k' cho footer gọn trên điện thoại."""
+    if n < 1000:
+        return str(n)
+    return f"{n / 1000:.1f}".rstrip("0").rstrip(".").replace(".", ",") + "k"
+
+
+def _note_usage(chat_id: int, tokens: dict, cost=None) -> None:
+    """Cộng dồn token thật OpenCode báo ở mỗi bước (sự kiện step_finish).
+
+    `input`/cache của mỗi bước là toàn bộ ngữ cảnh gửi cho model nên lấy mức lớn
+    nhất (ngữ cảnh đỉnh); `output`/`reasoning`/`cost` thì cộng dồn qua các bước.
+    """
+    tokens = tokens or {}
+    cache = tokens.get("cache") or {}
+    u = TOKEN_USAGE.setdefault(chat_id, {"input": 0, "cache_read": 0, "cache_write": 0,
+                                         "output": 0, "reasoning": 0, "cost": 0.0})
+    u["input"] = max(u["input"], _int(tokens.get("input")))
+    u["cache_read"] = max(u["cache_read"], _int(cache.get("read")))
+    u["cache_write"] = max(u["cache_write"], _int(cache.get("write")))
+    u["output"] += _int(tokens.get("output"))
+    u["reasoning"] += _int(tokens.get("reasoning"))
+    try:
+        u["cost"] += float(cost or 0)
+    except (TypeError, ValueError):
+        pass
+
+
+_HEADROOM_ON = os.getenv("AISTV_HEADROOM", "1") != "0"
+_headroom_compress = None            # hàm compress của Headroom (nạp lười)
+_headroom_tried = False
+_headroom_lock = threading.Lock()    # Headroom không an toàn khi nén song song
+HEADROOM_KEEP = 0.97                # phải giảm ≥3% mới đáng dùng
+
+
+def _headroom_fn():
+    """Nạp Headroom một lần; máy chưa cài thì trả None (bot vẫn chạy bình thường)."""
+    global _headroom_compress, _headroom_tried
+    if not _headroom_tried:
+        _headroom_tried = True
+        try:
+            os.environ.setdefault("HEADROOM_OFFLINE", "1")   # không tải model, không gửi telemetry
+            from headroom import compress as fn
+            _headroom_compress = fn
+        except Exception as e:                      # thiếu thư viện / lỗi cài đặt
+            log.info("Headroom không dùng được: %s", e)
+    return _headroom_compress
+
+
+def _headroom_warm() -> None:
+    """Gọi thử một lần cho Headroom nạp sẵn pipeline (lần đầu mất vài giây)."""
+    fn = _headroom_fn()
+    if not fn or not _HEADROOM_ON:
+        return
+    try:
+        sample = ", ".join(f'{{"id":{i},"status":"ok","value":{i * 3}}}' for i in range(60))
+        with _headroom_lock:
+            fn([{"role": "user", "content": "Kết quả tool:\n" + sample}],
+               compress_user_messages=True, kompress_model="disabled")
+        log.info("Headroom sẵn sàng")
+    except Exception as e:
+        log.info("Headroom warm-up lỗi: %s", e)
+
+
+def _headroom_shrink(text: str) -> tuple:
+    """Nén phần ngữ cảnh của prompt (giữ nguyên yêu cầu mới của người dùng).
+
+    Trả (prompt_mới, token_trước, token_sau). Không nén được thì trả lại bản gốc.
+    """
+    fn = _headroom_fn()
+    if not _HEADROOM_ON or fn is None or len(text) < 4000:
+        return text, 0, 0
+    mark = "## YÊU CẦU MỚI\n[Người dùng]: "
+    i = text.rfind(mark)
+    if i <= 0:
+        return text, 0, 0
+    head, tail = text[:i].rstrip(), text[i:]
+    try:
+        with _headroom_lock:
+            r = fn([{"role": "user", "content": head}], compress_user_messages=True,
+                   kompress_model="disabled")
+        out = (r.messages or [{}])[0].get("content") or ""
+    except Exception as e:
+        log.warning("Headroom nén prompt lỗi: %s", e)
+        return text, 0, 0
+    before, after = _int(getattr(r, "tokens_before", 0)), _int(getattr(r, "tokens_after", 0))
+    if (not out or before <= 0 or after <= 0 or after > before * HEADROOM_KEEP
+            or len(out) >= len(head)):
+        return text, 0, 0
+    return out.rstrip() + "\n\n" + tail, before, after
+
+
+async def _headroom_prompt(prompt: str) -> tuple:
+    """Chạy nén ở luồng riêng, tối đa 2,5 giây — quá giờ thì dùng prompt gốc."""
+    if not _HEADROOM_ON:
+        return prompt, 0, 0
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_headroom_shrink, prompt), 2.5)
+    except Exception:
+        return prompt, 0, 0
+
+
+def _token_footer(chat_id: int, saved: int = 0) -> str:
+    """Cụm token cuối tin nhắn: token gốc và phần còn lại sau khi qua Headroom."""
+    u = TOKEN_USAGE.get(chat_id) or {}
+    think = _int(THINK_TOKENS.get(chat_id, 0))
+    used = _int(u.get("input")) or (_int(u.get("cache_read")) + _int(u.get("cache_write")))
+    out = _int(u.get("output"))
+    if not used:
+        # Model không báo token vào (web2api dự phòng…) → giữ cách hiện cũ.
+        return f"🧠 {_fmt_tok(think)} tok" if think else ""
+    goc = used + max(0, saved)
+    seg = f"🧠 {_fmt_tok(goc)} tok gốc"
+    if saved > 0:
+        pct = round(saved * 100 / goc)
+        seg += f" → {_fmt_tok(used)} qua headroom (−{pct}%)"
+    else:
+        seg += " · headroom không giảm"
+    if out:
+        seg += f" · ra {_fmt_tok(out)}"
+    return seg
+
+
 _TOOL_INFO = {
     "bash": ("⚙️", "Chạy lệnh"),
     "write": ("📝", "Tạo file"),
@@ -2686,12 +2817,11 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> s
                     THINKING_LAST[chat_id] = time.monotonic()
                     _push_live(chat_id, "think", txt)
             elif etype == "step_finish":
-                try:
-                    rt = int(((part.get("tokens") or {}).get("reasoning")) or 0)
-                except Exception:
-                    rt = 0
+                tk = part.get("tokens") or {}
+                rt = _int(tk.get("reasoning"))
                 if rt:
                     THINK_TOKENS[chat_id] = THINK_TOKENS.get(chat_id, 0) + rt
+                _note_usage(chat_id, tk, part.get("cost"))
             elif etype == "tool_use":
                 entry = _tool_entry(part)
                 if entry:
@@ -2987,6 +3117,7 @@ async def _run_opencode_once(chat_id: int, prompt: str, env: dict, model: str) -
     THINKING[chat_id] = []
     LIVE[chat_id] = []
     THINK_TOKENS[chat_id] = 0
+    TOKEN_USAGE.pop(chat_id, None)
     proc = await asyncio.create_subprocess_exec(
         *cmd, cwd=str(WORKSPACE), env=env, limit=2 ** 20,
         stdin=asyncio.subprocess.PIPE,
@@ -3411,6 +3542,11 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
             status = await message.reply_text("🧠 <i>Đang làm việc…</i>", parse_mode=HTML)
             started = time.monotonic()
             prompt = build_prompt(chat_id, text, skill, quote)
+            prompt, hr_before, hr_after = await _headroom_prompt(prompt)
+            hr_saved = max(0, hr_before - hr_after)
+            if hr_saved:
+                log.info("Headroom nén ngữ cảnh: %s → %s token (−%d%%)", hr_before, hr_after,
+                         round(hr_saved * 100 / hr_before))
             before = snapshot()
             stop = asyncio.Event()
             ticker = asyncio.create_task(_ticker(context.bot, chat_id, status, started, stop))
@@ -3426,16 +3562,17 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
                 append_history(chat_id, "assistant", answer[:6000])
                 log_daily(stored, answer)
                 maybe_schedule_summary(chat_id)
-            think_tok = THINK_TOKENS.get(chat_id, 0)
             foot = f"⏱ {time.monotonic() - started:.1f}s · {esc(STATE['model'].split('/')[-1])}"
-            if think_tok:
-                foot += f" · 🧠 {think_tok} tok"
+            tok_line = _token_footer(chat_id, saved=hr_saved)
+            if tok_line:
+                foot += f" · {tok_line}"
             footer = f"<i>{foot}</i>"
             await send_rich(message, answer, footer if ok else "", ANSWER_KB if ok else None)
             if ok:
                 await send_new_files(message, before)
             THINKING.pop(chat_id, None)
             THINK_TOKENS.pop(chat_id, None)
+            TOKEN_USAGE.pop(chat_id, None)
             LIVE.pop(chat_id, None)
             return ok
 
@@ -6895,6 +7032,8 @@ def main() -> None:
                "(hoặc đặt OPENCODE_BIN trỏ tới binary v2) rồi chạy lại bot.")
         print(msg)
         log.warning(msg)
+
+    threading.Thread(target=_headroom_warm, name="headroom-warm", daemon=True).start()
 
     app = (ApplicationBuilder().token(BOT_TOKEN).post_init(post_init)
            .concurrent_updates(True)          # để /stop hoạt động khi đang xử lý
