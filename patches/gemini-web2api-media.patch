@@ -1,0 +1,176 @@
+diff --git a/gemini_web2api/multimodal.py b/gemini_web2api/multimodal.py
+index 1da72e5..a3cf465 100644
+--- a/gemini_web2api/multimodal.py
++++ b/gemini_web2api/multimodal.py
+@@ -130,8 +130,65 @@ def detect_image_mime(image_bytes: bytes, fallback: str = "image/png") -> str:
+     return fallback
+ 
+ 
++_MEDIA_FILENAMES = {
++    "audio/ogg": "voice.ogg",
++    "audio/opus": "voice.ogg",
++    "audio/mpeg": "voice.mp3",
++    "audio/mp3": "voice.mp3",
++    "audio/wav": "voice.wav",
++    "audio/x-wav": "voice.wav",
++    "audio/webm": "voice.webm",
++    "audio/mp4": "voice.m4a",
++    "audio/x-m4a": "voice.m4a",
++    "audio/aac": "voice.aac",
++    "audio/flac": "voice.flac",
++    "audio/x-flac": "voice.flac",
++    "video/mp4": "video.mp4",
++    "video/quicktime": "video.mov",
++    "video/webm": "video.webm",
++    "video/x-matroska": "video.mkv",
++    "video/mpeg": "video.mpeg",
++}
++
++
++def detect_media_mime(media_bytes: bytes, fallback: str = "") -> str:
++    """Infer image/audio/video MIME from signature; keep the declared type if unknown."""
++    fallback = (fallback or "").split(";", 1)[0].strip().lower()
++    image = detect_image_mime(media_bytes, "")
++    if image:
++        return image
++    if not isinstance(media_bytes, bytes):
++        return fallback
++    if media_bytes.startswith(b"OggS"):
++        return "audio/ogg"
++    if media_bytes.startswith(b"fLaC"):
++        return "audio/flac"
++    if media_bytes.startswith(b"RIFF") and media_bytes[8:12] == b"WAVE":
++        return "audio/wav"
++    if media_bytes.startswith(b"ID3") or media_bytes[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
++        return "audio/mpeg"
++    if len(media_bytes) >= 12 and media_bytes[4:8] == b"ftyp":
++        brand = media_bytes[8:12]
++        if brand in (b"M4A ", b"M4B ", b"M4P "):
++            return "audio/mp4"
++        if brand == b"qt  ":
++            return "video/quicktime"
++        return "video/mp4"
++    if media_bytes.startswith(b"\x1a\x45\xdf\xa3"):
++        return fallback if fallback.startswith("audio/") else "video/webm"
++    return fallback
++
++
++def media_filename(mime: str) -> str:
++    """Give Gemini's attachment slot a filename that matches the media type."""
++    mime = (mime or "").split(";", 1)[0].strip().lower()
++    if mime.startswith("image/"):
++        return "image.png"
++    return _MEDIA_FILENAMES.get(mime, "file.bin")
++
++
+ def upload_image(image_bytes: bytes, filename: str = "image.png", mime_type: str = "image/png") -> str:
+-    """Upload image via Scotty resumable upload. Returns file reference path."""
++    """Upload a file (image, audio or video) via Scotty resumable upload."""
+     tokens = _cached_page_tokens()
+     push_id = tokens.get("push_id", "feeds/mcudyrk2a4khkz")
+     pctx = tokens.get("pctx", "CgcSBWjK7pYx")
+@@ -193,7 +250,7 @@ def upload_image(image_bytes: bytes, filename: str = "image.png", mime_type: str
+     if not file_ref or not file_ref.startswith("/"):
+         raise RuntimeError(f"Invalid file reference: {file_ref[:100]}")
+ 
+-    log(f"Image uploaded: {filename} -> {file_ref[:50]}...")
++    log(f"File uploaded: {filename} ({mime_type}) -> {file_ref[:50]}...")
+     return file_ref
+ 
+ 
+diff --git a/gemini_web2api/server.py b/gemini_web2api/server.py
+index bbfefe1..77259d9 100644
+--- a/gemini_web2api/server.py
++++ b/gemini_web2api/server.py
+@@ -21,7 +21,12 @@ from .gemini import (
+ )
+ from .generated_image import download_generated_image, resolve_generated_image_url
+ from .models import MODELS, resolve_model
+-from .multimodal import detect_image_mime, fetch_image_bytes, upload_image
++from .multimodal import (
++    detect_media_mime,
++    fetch_image_bytes,
++    media_filename,
++    upload_image,
++)
+ from .tools import (
+     google_contents_to_prompt,
+     messages_to_prompt,
+@@ -90,7 +95,7 @@ def _generated_image_output(prompt: str, response_format: str):
+ 
+ 
+ def _upload_images(images: list) -> list:
+-    """Upload images and return list of file references. Returns None if no images."""
++    """Upload attachments (image, audio or video) and return file references."""
+     if not images:
+         return None
+     file_refs = []
+@@ -102,16 +107,16 @@ def _upload_images(images: list) -> list:
+             data = fetch_image_bytes(data)
+             mime = mime or "image/png"
+         if not data:
+-            raise RuntimeError("image fetch failed")
+-        mime = detect_image_mime(data, mime or "image/png")
+-        filename = "image.png"
++            raise RuntimeError("attachment fetch failed")
++        mime = detect_media_mime(data, mime or "")
++        filename = media_filename(mime)
+         try:
+-            ref = upload_image(data, filename, mime or "image/png")
++            ref = upload_image(data, filename, mime or "application/octet-stream")
+             # Gemini's current attachment format requires both the uploaded
+             # reference and its filename; retain both through generation.
+             file_refs.append((ref, filename))
+         except Exception as e:
+-            raise RuntimeError(f"image upload failed: {e}") from e
++            raise RuntimeError(f"attachment upload failed: {e}") from e
+     return file_refs if file_refs else None
+ 
+ 
+diff --git a/gemini_web2api/tools.py b/gemini_web2api/tools.py
+index 7b1aed9..2891d59 100644
+--- a/gemini_web2api/tools.py
++++ b/gemini_web2api/tools.py
+@@ -101,6 +101,18 @@ def _image_from_part(part: dict):
+     return None
+ 
+ 
++def attachment_label(mime: str) -> str:
++    """Tell the model which kind of file was attached, not always 'image'."""
++    mime = (mime or "").lower()
++    if mime.startswith("audio/"):
++        return "[Audio attached]"
++    if mime.startswith("video/"):
++        return "[Video attached]"
++    if mime.startswith("image/"):
++        return "[Image attached]"
++    return "[File attached]"
++
++
+ def messages_to_prompt(messages: list, tools: list = None, tool_choice=None) -> tuple:
+     """Convert OpenAI messages to (prompt_str, images_list).
+ 
+@@ -142,7 +154,7 @@ def messages_to_prompt(messages: list, tools: list = None, tool_choice=None) ->
+                     image = _image_from_part(c)
+                     if image:
+                         images.append(image)
+-                        text_parts.append("[Image attached]")
++                        text_parts.append(attachment_label(image[1]))
+             content = " ".join(text_parts)
+ 
+         if role == "system":
+@@ -278,11 +290,12 @@ def google_contents_to_prompt(req: dict) -> tuple:
+             elif p.get("inlineData"):
+                 data = p["inlineData"]
+                 try:
++                    mime = data.get("mimeType", "image/png")
+                     images.append((
+                         base64.b64decode(data["data"], validate=True),
+-                        data.get("mimeType", "image/png"),
++                        mime,
+                     ))
+-                    msg_parts.append("[Image attached]")
++                    msg_parts.append(attachment_label(mime))
+                 except (KeyError, ValueError, TypeError, binascii.Error):
+                     pass
+             elif p.get("functionCall"):

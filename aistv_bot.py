@@ -261,6 +261,11 @@ try:
 except Exception:                       # thiếu module → chỉ tắt dự phòng, bot vẫn chạy
     web2api = None
 
+try:
+    import aistv_planner as planner    # kế hoạch dài, checkpoint/undo, verify
+except Exception:                       # thiếu module → tắt /plan, bot vẫn chạy
+    planner = None
+
 CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "0") != "0"   # 1 = xoá & cài lại OpenCode; 0 = giữ bản đã cài
 USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google Drive (sống sót khi Colab reset)
 FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
@@ -793,7 +798,12 @@ ASK_REQUESTS: dict = {}            # ask_id -> yêu cầu đang chờ người d
 ASK_BY_CHAT: dict = {}             # chat_id -> ask_id
 ASK_LOCK = threading.Lock()
 GH_LOGIN_TASKS: dict = {}          # id -> phiên device login (tool github_login)
-AUTO_PUSH = os.getenv("AISTV_AUTO_PUSH", "1").strip().lower() not in ("0", "off", "false", "no")
+AUTO_PUSH = os.getenv("AISTV_AUTO_PUSH", "0").strip().lower() not in ("0", "off", "false", "no")
+                                # 0 (mặc định) = KHÔNG tự push; agent sửa repo xong bot hiện diff
+                                # kèm nút duyệt (⬆️ Push / ↩️ Hoàn tác). 1 = tự push như bản cũ.
+PLAN_BUSY: set = set()          # chat_id đang chạy /plan (để không hiện diff giữa chừng)
+PLAN_CANCEL: set = set()        # chat_id yêu cầu huỷ plan
+LAST_CHECKPOINT: dict = {}      # chat_id -> checkpoint id của lượt sửa gần nhất
 
 THINKING: dict = {}                # chat_id -> [các đoạn reasoning model đã trả về]
 LIVE: dict = {}                    # chat_id -> dòng thời gian sự kiện (think/tool) để cuộn như terminal
@@ -891,6 +901,18 @@ if not os.getenv("GOOGLE_GENERATIVE_AI_API_KEY"):
     if _gkey:
         os.environ["GOOGLE_GENERATIVE_AI_API_KEY"] = _gkey
 GEMINI_READY = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+
+
+def vision_ready() -> bool:
+    """Có nguồn đọc ảnh/video/audio: Gemini API hoặc Web2API đã vá media."""
+    if GEMINI_READY:
+        return True
+    if web2api is None:
+        return False
+    try:
+        return bool(web2api.enabled() and web2api.media_patch_ready())
+    except Exception:
+        return False
 
 
 def owner_id() -> Optional[int]:
@@ -996,6 +1018,30 @@ Bạn là **AI STV**, trợ lý AI dạng agent chạy trên Telegram, phục v�
 - Mặc định ≤ 25 dòng trừ khi người dùng yêu cầu chi tiết. Tránh bảng rộng (màn hình điện thoại hẹp).
 """
 
+AGENTS_RULES_25_32 = """25. Repo chính (code bot) là thư mục chứa `aistv_bot.py` — env `$AISTV_DIR`, ví dụ `/root/AISTV`;
+    workspace của bạn là `$HOME/workspace`. Sửa code bot trong repo chính, file cho người dùng để trong
+    workspace. Không sửa `seed/` thay cho bản đang chạy (seed chỉ là bản mẫu cho máy mới).
+26. Trước khi sửa code trong repo: đọc `docs/CODEMAP.md` (bản đồ module → hàm/class kèm số dòng) để chọn
+    đúng file, rồi `grep -n "def tên_hàm" <file>` và CHỈ đọc 60–150 dòng quanh symbol. Không đọc cả
+    `aistv_bot.py` (hơn 7.000 dòng) và không đoán số dòng. Thêm/bớt hàm cấp module thì chạy lại
+    `python scripts/code_map.py`.
+27. Sửa code xong BẮT BUỘC chạy `python scripts/verify.py` trong repo và chỉ báo "xong" khi PASS.
+    FAIL thì đọc đúng lỗi, sửa nguyên nhân, chạy lại — tối đa 2 lần; vẫn FAIL thì báo rõ lỗi và phần
+    đã thử, không được nói đã xong.
+28. Yêu cầu từ 3 bước trở lên hoặc sửa nhiều file: lập danh sách bước ngắn (2–8 bước, mỗi bước kiểm
+    chứng được) rồi làm lần lượt. Việc dài nên dùng `/plan`: bot tự checkpoint, tự chạy từng bước và tự
+    kiểm chứng trước khi báo cáo.
+29. KHÔNG commit/push thay người dùng. Sau khi agent sửa repo, bot hiện diff kèm nút duyệt
+    (⬆️ Push / ↩️ Hoàn tác); chỉ push khi người dùng bấm nút hoặc gõ `/push`. Không tự đẩy khi chưa duyệt.
+30. Trước mỗi lượt sửa code, bot tự tạo checkpoint; `/undo` hoặc nút ↩️ đưa repo về đúng trạng thái trước
+    đó. Không xoá checkpoint hay file trong `.git` bằng tay.
+31. Bị kẹt (lỗi lặp lại, thiếu quyền, thiếu thông tin) thì dừng đúng lúc: nêu lỗi, đã thử gì, cần gì để
+    đi tiếp — hoặc gọi `ask_user`. Không che giấu lỗi, không báo hoàn thành giả.
+32. Nén context tiết kiệm token bằng Headroom: CLI `headroom`, thư viện `from headroom import compress`,
+    MCP `headroom mcp serve` (tool `headroom_compress`/`headroom_retrieve`/`headroom_stats`) — headroom-ai
+    `0.41.0`, chạy offline (`HEADROOM_OFFLINE=1`, không beacon). Dùng khi tool output/log/JSON/RAG quá lớn;
+    KHÔNG tự `wrap`/`unwrap` hay đổi config opencode — muốn bật hỏi người dùng trước. Skill `headroom`.
+"""
 AGENTS_MD = """# AGENTS — Quy tắc làm việc
 1. Thư mục hiện tại là workspace của bạn. File bạn tạo phải nằm ở đây, tên rõ ràng, có đuôi file.
 2. Tạo file thì nêu tên file ở cuối câu trả lời; bot sẽ tự gửi file cho người dùng.
@@ -1043,9 +1089,7 @@ AGENTS_MD = """# AGENTS — Quy tắc làm việc
 24. Người dùng muốn đăng nhập/kết nối GitHub, hoặc cần GitHub mà chưa có token → gọi tool `github_login`
     (bot tự gửi mã vào chat, bạn chờ tới khi người dùng Authorize rồi mới làm tiếp). Không bảo người dùng
     dán token/PAT vào chat.
-25. Sau khi sửa code trong repo chính, bot tự đẩy lên GitHub (nếu bật) để Windows CMD chạy `run.bat`
-    nhận đúng bản mới; nếu người dùng muốn đẩy ngay, dùng lệnh `/push`.
-"""
+""" + AGENTS_RULES_25_32
 
 MEMORY_HEADER = "# MEMORY — Trí nhớ dài hạn\n"
 
@@ -1426,9 +1470,13 @@ def bootstrap_workspace() -> None:
                     "\n24. Người dùng muốn đăng nhập/kết nối GitHub, hoặc cần GitHub mà chưa có token → "
                     "gọi tool `github_login` (bot tự gửi mã vào chat; bạn chờ tới khi người dùng Authorize "
                     "rồi làm tiếp). Không bảo người dùng dán token/PAT vào chat.\n"
-                    "25. Sau khi sửa code trong repo chính, bot tự đẩy lên GitHub (nếu bật) để Windows CMD "
-                    "chạy `run.bat` nhận bản mới; muốn đẩy ngay thì dùng `/push`.\n"
                 )
+                changed = True
+            # Quy tắc 25–31 (đường dẫn repo, CODEMAP, verify, plan, cổng review, checkpoint).
+            # Workspace cũ có thể còn quy tắc 25 kiểu "bot tự đẩy" → thay cả cụm.
+            if "CODEMAP" not in old:
+                old = re.sub(r"(?ms)^25\..*?(?=^2[6-9]\.|^3\d\.|\Z)", "", old)
+                old = old.rstrip() + "\n" + AGENTS_RULES_25_32
                 changed = True
             if changed:
                 agents.write_text(old, "utf-8")
@@ -2632,7 +2680,17 @@ def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple] = None,
                 "trong phần THÔNG TIN SKILL ở trên.]"
             )
         head.append(f"## SKILL ĐANG KÍCH HOẠT: {skill[0]}\n" + body)
-    head.append(f"## BỐI CẢNH\n- Bây giờ: {now():%d/%m/%Y %H:%M} ({TIMEZONE})\n- Thư mục làm việc: {WORKSPACE}")
+    head.append(f"## BỐI CẢNH\n- Bây giờ: {now():%d/%m/%Y %H:%M} ({TIMEZONE})\n"
+                f"- Thư mục làm việc (workspace): {WORKSPACE}")
+    _rd = repo_dir()
+    if _rd:
+        head.append(
+            f"## REPO CHÍNH (code bot)\n"
+            f"- Đường dẫn: {_rd}\n"
+            f"- Bản đồ code: {_rd / 'docs' / 'CODEMAP.md'} (đọc trước khi sửa; "
+            "grep symbol rồi chỉ đọc 60–150 dòng quanh nó)\n"
+            f"- Kiểm chứng: cd \"{_rd}\" && python scripts/verify.py (chỉ báo xong khi PASS)\n"
+            "- Sửa code bot ở đây; file cho người dùng tạo trong workspace, không lẫn hai nơi.")
     if mail:
         try:
             ecfg = mail.load()
@@ -3629,33 +3687,83 @@ async def _run_web2api_direct(prompt: str, model: str) -> tuple:
     return False, "Web2API: " + (err or "không trả lời")
 
 
-async def _autopush_after_agent(chat_id: int) -> None:
-    """Đẩy code agent vừa sửa lên GitHub để Windows CMD pull được bản mới."""
-    if not AUTO_PUSH or not github_token():
-        return
+def make_checkpoint(chat_id: int, label: str = "") -> str:
+    """Chụp repo trước khi agent sửa. Trả checkpoint id ('' nếu không làm được)."""
+    LAST_CHECKPOINT.pop(chat_id, None)
+    if planner is None:
+        return ""
     rd = repo_dir()
     if not rd:
-        return
+        return ""
     try:
-        rc, dirty = await asyncio.to_thread(_git, ["status", "--porcelain"], rd)
-        if rc != 0 or not dirty.strip():
-            return
-        slug = current_repo_slug() or repo_remote_slug()
-        if not slug or not await asyncio.to_thread(repo_can_push, slug, github_token()):
-            return
-        await asyncio.to_thread(gh_push_code, slug)
-    except Exception as e:
-        log.warning("Tự đẩy code lên GitHub thất bại: %s", oneline(str(e), 200))
+        meta, err = planner.create_checkpoint(HOME, rd, label)
+    except Exception as e:  # noqa
+        log.warning("Tạo checkpoint lỗi: %s", oneline(str(e), 200))
+        return ""
+    if not meta:
+        log.warning("Không tạo được checkpoint: %s", err)
+        return ""
+    LAST_CHECKPOINT[chat_id] = meta["id"]
+    return meta["id"]
+
+
+def review_markup(chat_id: int) -> InlineKeyboardMarkup:
+    cp = LAST_CHECKPOINT.get(chat_id) or ""
+    row = [InlineKeyboardButton("⬆️ Push", callback_data="up:push")]
+    if cp:
+        row.append(InlineKeyboardButton("↩️ Hoàn tác", callback_data=f"up:undo:{cp}"))
+    rows = [row, [InlineKeyboardButton("📄 Xem thay đổi", callback_data="up:diff")]]
+    return InlineKeyboardMarkup(rows)
+
+
+async def _autopush_after_agent(chat_id: int) -> None:
+    """Sau lượt agent: tự push (nếu bật) hoặc hiện diff + nút duyệt."""
+    if planner is None:
         return
-    if BOT_OBJ is not None:
+    rd = repo_dir()
+    if not rd or chat_id in PLAN_BUSY:
+        return                       # plan có báo cáo riêng ở cuối
+    try:
+        stat = await asyncio.to_thread(planner.diff_stat, rd)
+    except Exception:
+        return
+    if not stat.get("files") and not stat.get("untracked"):
+        return
+    cp_id = LAST_CHECKPOINT.get(chat_id) or ""
+    if cp_id:
+        meta = planner.load_checkpoint(HOME, cp_id)
+        if meta and (meta.get("stat") or "") == (stat.get("text") or ""):
+            return                       # repo đã dở từ trước, lượt này không đổi gì thêm
+    if AUTO_PUSH and github_token():
         try:
-            await BOT_OBJ.send_message(
-                chat_id,
-                "⬆️ Đã đẩy code lên GitHub.\n"
-                "Windows chạy <code>run.bat</code> (hoặc <code>/update</code>) sẽ nhận bản này.",
-                parse_mode=HTML)
-        except Exception:
-            pass
+            slug = current_repo_slug() or repo_remote_slug()
+            if slug and await asyncio.to_thread(repo_can_push, slug, github_token()):
+                await asyncio.to_thread(gh_push_code, slug)
+            else:
+                return
+        except Exception as e:
+            log.warning("Tự đẩy code lên GitHub thất bại: %s", oneline(str(e), 200))
+            return
+        if BOT_OBJ is not None:
+            try:
+                await BOT_OBJ.send_message(
+                    chat_id,
+                    "⬆️ Đã đẩy code lên GitHub.\n"
+                    "Windows chạy <code>run.bat</code> (hoặc <code>/update</code>) sẽ nhận bản này.",
+                    parse_mode=HTML)
+            except Exception:
+                pass
+        return
+    if BOT_OBJ is None:
+        return
+    text = ("📝 <b>Repo có thay đổi</b> — chưa push.\n"
+            f"• {esc(stat['text'])}\n"
+            "Duyệt bằng nút bên dưới; ↩️ đưa repo về trước lượt sửa này.")
+    try:
+        await BOT_OBJ.send_message(chat_id, text, parse_mode=HTML,
+                                   reply_markup=review_markup(chat_id))
+    except Exception as e:
+        log.warning("Không gửi được thông báo diff: %s", oneline(str(e), 200))
 
 
 async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
@@ -3667,6 +3775,9 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
     env.pop("TELEGRAM_BOT_TOKEN", None)          # không để agent nhìn thấy token
     env.update(NO_COLOR="1", TERM="dumb", PWD=str(WORKSPACE), AISTV_CHAT_ID=str(chat_id),
                AISTV_DIR=str(Path(__file__).resolve().parent))
+    _repo = repo_dir()
+    if _repo:
+        env["AISTV_REPO"] = str(_repo)
     if web2api is not None:
         try:
             env.setdefault("WEB2API_API_KEY", web2api.api_key())
@@ -4009,6 +4120,10 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
                 log.info("Headroom nén ngữ cảnh: %s → %s token (−%d%%)", hr_before, hr_after,
                          round(hr_saved * 100 / hr_before))
             before = snapshot()
+            # Chụp repo trước khi agent sửa để ↩️ hoàn tác được (chỉ tốn khi repo đang dở).
+            if planner is not None and repo_dir():
+                await asyncio.to_thread(
+                    make_checkpoint, chat_id, f"trước khi agent sửa: {oneline(text, 80)}")
             stop = asyncio.Event()
             ticker = asyncio.create_task(_ticker(context.bot, chat_id, status, started, stop))
             try:
@@ -4036,6 +4151,466 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
             TOKEN_USAGE.pop(chat_id, None)
             LIVE.pop(chat_id, None)
             return ok
+
+
+# ════════════════════════════════════════════════════════════════════
+# 7b. KẾ HOẠCH TỰ TRỊ · CỔNG DUYỆT · HOÀN TÁC
+# ════════════════════════════════════════════════════════════════════
+def plan_keyboard(plan: dict) -> InlineKeyboardMarkup:
+    pid = plan.get("id") or ""
+    st = plan.get("status") or "draft"
+    rows = []
+    if st in ("draft", "failed", "cancelled"):
+        rows.append([InlineKeyboardButton("▶️ Thực thi", callback_data=f"plan:run:{pid}"),
+                     InlineKeyboardButton("✏️ Lập lại", callback_data=f"plan:edit:{pid}")])
+    if st == "running":
+        rows.append([InlineKeyboardButton("⛔ Dừng", callback_data="stop")])
+    if st in ("done", "failed") and plan.get("diff") and plan["diff"] != "không có thay đổi":
+        rows.append([InlineKeyboardButton("⬆️ Push", callback_data=f"plan:push:{pid}"),
+                     InlineKeyboardButton("↩️ Hoàn tác", callback_data=f"plan:undo:{pid}")])
+    elif plan.get("checkpoint") and st in ("done", "failed", "cancelled"):
+        rows.append([InlineKeyboardButton("↩️ Hoàn tác", callback_data=f"plan:undo:{pid}")])
+    rows.append([InlineKeyboardButton("🔄 Xem", callback_data=f"plan:view:{pid}"),
+                 InlineKeyboardButton("🗂 Danh sách", callback_data="plan:list")])
+    return InlineKeyboardMarkup(rows)
+
+
+def plans_list_text() -> tuple:
+    items = planner.list_plans(HOME, 8) if planner else []
+    if not items:
+        return ("🗂 Chưa có kế hoạch nào.\nDùng <code>/plan &lt;yêu cầu&gt;</code> để bot "
+                "chia việc thành bước rồi tự chạy."), None
+    lines = ["🗂 <b>KẾ HOẠCH GẦN ĐÂY</b>"]
+    rows = []
+    for p in items:
+        done, total = planner.progress(p)
+        st = planner.PLAN_STATUS.get(p.get("status") or "", p.get("status") or "")
+        lines.append(f"• {esc(oneline(p.get('title') or '?', 60))} — {done}/{total} "
+                     f"bước · {esc(st)}")
+        rows.append([InlineKeyboardButton(
+            oneline(p.get("title") or p["id"], 30), callback_data=f"plan:view:{p['id']}")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def _plan_edit(msg, plan: dict, note: str = "") -> None:
+    text = planner.render_plan(plan)
+    if note:
+        text += f"\n\n<i>{esc(note)}</i>"
+    try:
+        await msg.edit_text(text[:4000], parse_mode=HTML, reply_markup=STOP_KB)
+    except Exception:
+        pass
+
+
+async def create_plan(chat_id: int, request: str, msg) -> None:
+    if planner is None:
+        await msg.reply_text("❌ Thiếu <code>aistv_planner.py</code> — chạy /update.",
+                             parse_mode=HTML)
+        return
+    status = await msg.reply_text("🧭 <i>Đang chia việc thành các bước…</i>",
+                                  parse_mode=HTML)
+    rd = repo_dir()
+    prompt = planner.plan_prompt(request, repo=str(rd or ""), workspace=str(WORKSPACE))
+    ok, answer = await run_agent(chat_id, prompt)
+    if not ok:
+        await status.edit_text("❌ Không lập được kế hoạch:\n" + esc(oneline(answer, 700)),
+                               parse_mode=HTML)
+        return
+    obj, err = planner.parse_plan(answer)
+    if err:
+        await status.edit_text(
+            "❌ " + esc(err) + "\n\n<pre>" + esc(oneline(answer, 1500)) + "</pre>\n"
+            "Thử lại với yêu cầu cụ thể hơn.", parse_mode=HTML)
+        return
+    plan = planner.new_plan(HOME, chat_id, obj.get("title") or oneline(request, 80),
+                            request, obj["steps"])
+    text = planner.render_plan(plan) + (
+        "\n\n▶️ Bấm <b>Thực thi</b> để bot tự làm từng bước (có checkpoint để hoàn tác).\n"
+        "Bước nào lỗi, bot tự sửa tối đa 2 lần rồi báo rõ.")
+    await status.edit_text(text[:4000], parse_mode=HTML,
+                           reply_markup=plan_keyboard(plan))
+
+
+async def run_plan(chat_id: int, plan_id: str) -> None:
+    plan = planner.load_plan(HOME, plan_id)
+    if not plan:
+        if BOT_OBJ:
+            await BOT_OBJ.send_message(chat_id, "❌ Không tìm thấy kế hoạch này.")
+        return
+    if chat_id in PLAN_BUSY:
+        if BOT_OBJ:
+            await BOT_OBJ.send_message(chat_id, "⏳ Đang chạy một kế hoạch khác.")
+        return
+    PLAN_BUSY.add(chat_id)
+    PLAN_CANCEL.discard(chat_id)
+    msg = None
+    try:
+        rd = repo_dir()
+        if rd and not plan.get("checkpoint"):
+            meta, _err = await asyncio.to_thread(
+                planner.create_checkpoint, HOME, rd,
+                f"plan {plan['id']}: {plan.get('title') or ''}")
+            if meta:
+                plan["checkpoint"] = meta["id"]
+                LAST_CHECKPOINT[chat_id] = meta["id"]
+        plan["status"] = "running"
+        planner.save_plan(HOME, plan)
+        msg = await BOT_OBJ.send_message(chat_id, planner.render_plan(plan)[:4000],
+                                         parse_mode=HTML, reply_markup=STOP_KB)
+        total = len(plan.get("steps") or [])
+        for step in plan.get("steps") or []:
+            if step.get("status") == "done":
+                continue
+            if chat_id in PLAN_CANCEL:
+                plan["status"] = "cancelled"
+                break
+            planner.set_step(plan, step["n"], status="running", started=time.time(),
+                             attempts=0)
+            planner.save_plan(HOME, plan)
+            await _plan_edit(msg, plan, f"▶️ Bước {step['n']}/{total}: {step['title']}")
+            ok = False
+            answer = ""
+            hint = ""
+            stopped = False
+            for attempt in range(1, planner.STEP_ATTEMPTS_MAX + 1):
+                if chat_id in PLAN_CANCEL:
+                    stopped = True
+                    break
+                step["attempts"] = attempt
+                planner.save_plan(HOME, plan)
+                prompt = planner.step_prompt(
+                    plan, step, repo=str(rd or ""), workspace=str(WORKSPACE),
+                    verify_hint=hint)
+                ok, answer = await run_agent(chat_id, prompt)
+                if chat_id in PLAN_CANCEL or (not ok and str(answer).startswith("🛑")):
+                    stopped = True
+                    break
+                if not ok:
+                    hint = "Agent báo lỗi:\n" + str(answer)[:900]
+                    step["last_verify"] = oneline(answer, 400)
+                    planner.save_plan(HOME, plan)
+                    await _plan_edit(msg, plan, f"⚠️ Bước {step['n']} lỗi — thử lại "
+                                                f"({attempt}/{planner.STEP_ATTEMPTS_MAX})…")
+                    continue
+                ver = (await asyncio.to_thread(planner.verify_repo, rd, True)
+                       if rd else {"ok": True, "summary": "không có repo để kiểm chứng"})
+                if ver["ok"]:
+                    step["status"] = "done"
+                    step["result"] = oneline(answer, 320)
+                    step["last_verify"] = oneline(ver.get("summary") or "", 400)
+                    step["finished"] = time.time()
+                    planner.save_plan(HOME, plan)
+                    break
+                hint = "Kiểm chứng FAIL:\n" + (ver.get("summary") or "")
+                step["last_verify"] = oneline(ver.get("summary") or "", 400)
+                planner.save_plan(HOME, plan)
+                await _plan_edit(msg, plan, f"🧪 Bước {step['n']} chưa PASS — tự sửa "
+                                            f"({attempt}/{planner.STEP_ATTEMPTS_MAX})…")
+            if stopped:
+                plan["status"] = "cancelled"
+                planner.set_step(plan, step["n"], status="skipped", finished=time.time())
+                planner.save_plan(HOME, plan)
+                break
+            if step.get("status") != "done":
+                plan["status"] = "failed"
+                planner.set_step(plan, step["n"], status="failed",
+                                 finished=time.time(),
+                                 last_verify=oneline(hint or answer, 400))
+                planner.save_plan(HOME, plan)
+                break
+            await _plan_edit(msg, plan, f"✅ Xong bước {step['n']}/{total}")
+        ver = (await asyncio.to_thread(planner.verify_repo, rd, False)
+               if rd else {"ok": True, "summary": "không có repo để kiểm chứng"})
+        plan["verify"] = {"ok": bool(ver.get("ok")), "summary": oneline(ver.get("summary"), 800)}
+        if rd:
+            stat = await asyncio.to_thread(planner.diff_stat, rd)
+            plan["diff"] = stat.get("text") or ""
+        if plan["status"] == "running":
+            plan["status"] = "done" if ver.get("ok") else "failed"
+        done, total = planner.progress(plan)
+        plan["report"] = (f"Bot tự chạy {done}/{total} bước; kiểm chứng "
+                          f"{'PASS' if ver.get('ok') else 'FAIL'}.")
+        planner.save_plan(HOME, plan)
+        if msg:
+            try:
+                await msg.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        await BOT_OBJ.send_message(chat_id, planner.render_report(plan)[:4000],
+                                   parse_mode=HTML, reply_markup=plan_keyboard(plan))
+        try:
+            log_daily(f"/plan {plan.get('title')}",
+                      f"{plan['status']} · {plan['report']}")
+        except Exception:
+            pass
+    except Exception as e:  # noqa
+        log.exception("Kế hoạch %s lỗi", plan_id)
+        plan["status"] = "failed"
+        plan["report"] = "Lỗi hệ thống: " + oneline(str(e), 300)
+        try:
+            planner.save_plan(HOME, plan)
+        except Exception:
+            pass
+        if BOT_OBJ:
+            try:
+                await BOT_OBJ.send_message(
+                    chat_id, "❌ Kế hoạch dừng vì lỗi:\n" + esc(oneline(str(e), 600)),
+                    parse_mode=HTML, reply_markup=plan_keyboard(plan))
+            except Exception:
+                pass
+    finally:
+        PLAN_BUSY.discard(chat_id)
+        PLAN_CANCEL.discard(chat_id)
+
+
+async def push_repo_now() -> str:
+    slug = current_repo_slug() or repo_remote_slug()
+    if not slug:
+        raise RuntimeError("Chưa chọn repo đích — dùng /github repos để chọn.")
+    tok = github_token()
+    if not tok:
+        raise RuntimeError("Chưa kết nối GitHub — dùng /github login.")
+    if not await asyncio.to_thread(repo_can_push, slug, tok):
+        raise RuntimeError(f"Token không có quyền push vào {slug}.")
+    return await asyncio.to_thread(gh_push_code, slug)
+
+
+async def _q_edit(q, text: str, markup="keep") -> None:
+    kwargs = {"parse_mode": HTML}
+    if markup != "keep":
+        kwargs["reply_markup"] = markup
+    try:
+        await q.message.edit_text(text[:4000], **kwargs)
+    except Exception:
+        pass
+
+
+async def _on_review_button(q, data: str) -> None:
+    """Nút ⬆️ Push / ↩️ Hoàn tác / 📄 Xem thay đổi của cổng duyệt."""
+    uid = q.from_user.id if q.from_user else 0
+    if not is_owner(uid):
+        await q.answer("Chỉ chủ bot được duyệt code.", show_alert=True)
+        return
+    if planner is None:
+        await q.answer("Thiếu aistv_planner.py — chạy /update.")
+        return
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    cp = parts[2] if len(parts) > 2 else ""
+    rd = repo_dir()
+    if action == "noop":
+        await q.answer()
+        return
+    if action == "diff":
+        await q.answer()
+        if not rd:
+            await q.message.reply_text("Không tìm thấy repo git.")
+            return
+        rc, out = await asyncio.to_thread(_git, ["diff", "--stat", "HEAD"], rd)
+        rc2, unt = await asyncio.to_thread(
+            _git, ["ls-files", "--others", "--exclude-standard"], rd)
+        body = (out or "").strip() if rc == 0 else ""
+        names = [x for x in (unt or "").splitlines() if x.strip()] if rc2 == 0 else []
+        text = "<b>Thay đổi chưa commit</b>\n<pre>" + esc(body[:2500] or "(không có)") + "</pre>"
+        if names:
+            text += "\n<b>File mới:</b>\n<pre>" + esc("\n".join(names[:20])) + "</pre>"
+        await q.message.reply_text(text, parse_mode=HTML)
+        return
+    if action == "push":
+        await q.answer("Đang push…")
+        await _q_edit(q, "⬆️ Đang push lên GitHub…", markup=None)
+        try:
+            out = await push_repo_now()
+            await _q_edit(q, "✅ <b>Đã push.</b>\n<pre>" + esc(oneline(out, 1500))
+                          + "</pre>\nWindows chạy <code>run.bat</code> để nhận bản mới.")
+        except Exception as e:  # noqa
+            await _q_edit(q, "❌ Push lỗi: " + esc(oneline(str(e), 600)))
+        return
+    if action in ("undo", "undo2"):
+        if not rd:
+            await q.answer("Không tìm thấy repo.", show_alert=True)
+            return
+        if not cp:
+            await q.answer("Không có checkpoint cho lượt này.", show_alert=True)
+            return
+        if action == "undo":
+            await q.answer()
+            await _q_edit(
+                q,
+                "↩️ <b>Hoàn tác?</b>\nMọi thay đổi <b>chưa commit</b> trong repo sẽ mất "
+                "(file mới do agent tạo cũng bị xoá). File ignored như <code>.env</code> "
+                "được giữ nguyên.",
+                markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✔️ Hoàn tác ngay", callback_data=f"up:undo2:{cp}"),
+                    InlineKeyboardButton("✖️ Không", callback_data="up:noop")]]))
+            return
+        await q.answer("Đang hoàn tác…")
+        ok, detail = await asyncio.to_thread(planner.restore_checkpoint, HOME, rd, cp)
+        await _q_edit(q, ("✅ <b>Đã hoàn tác.</b>\n" if ok else "❌ <b>Không hoàn tác được.</b>\n")
+                      + esc(detail), markup=None)
+        return
+    await q.answer()
+
+
+async def _on_plan_button(q, data: str) -> None:
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    pid = parts[2] if len(parts) > 2 else ""
+    uid = q.from_user.id if q.from_user else 0
+    chat_id = q.message.chat_id if q.message else uid
+    if planner is None:
+        await q.answer("Thiếu aistv_planner.py — chạy /update.")
+        return
+    if action == "list":
+        await q.answer()
+        text, markup = plans_list_text()
+        await q.message.reply_text(text, parse_mode=HTML, reply_markup=markup)
+        return
+    plan = planner.load_plan(HOME, pid)
+    if not plan:
+        await q.answer("Không tìm thấy kế hoạch này.", show_alert=True)
+        return
+    if action in ("run", "cancel", "edit", "push", "undo", "undo2") and not is_owner(uid):
+        await q.answer("Chỉ chủ bot được điều khiển kế hoạch.", show_alert=True)
+        return
+    if action == "view":
+        await q.answer()
+        body = (planner.render_report(plan) if plan.get("status") in ("done", "failed", "cancelled")
+                else planner.render_plan(plan))
+        await q.message.reply_text(body[:4000], parse_mode=HTML,
+                                   reply_markup=plan_keyboard(plan))
+        return
+    if action == "run":
+        await q.answer("Bắt đầu…")
+        await q.message.reply_text(
+            f"▶️ Chạy kế hoạch <b>{esc(oneline(plan.get('title') or '', 90))}</b>.",
+            parse_mode=HTML)
+        asyncio.create_task(run_plan(chat_id, plan["id"]))
+        return
+    if action == "edit":
+        await q.answer()
+        await q.message.reply_text(
+            "✏️ Gửi <code>/plan &lt;yêu cầu đã chỉnh&gt;</code> để bot lập kế hoạch mới. "
+            "Kế hoạch cũ vẫn được giữ trong danh sách.", parse_mode=HTML)
+        return
+    if action == "cancel":
+        if plan.get("status") == "running":
+            PLAN_CANCEL.add(chat_id)
+        plan["status"] = "cancelled"
+        planner.save_plan(HOME, plan)
+        await q.answer("Đã huỷ kế hoạch.")
+        await _q_edit(q, planner.render_plan(plan), markup=plan_keyboard(plan))
+        return
+    if action == "push":
+        await q.answer("Đang push…")
+        await _q_edit(q, "⬆️ Đang push lên GitHub…", markup=None)
+        try:
+            out = await push_repo_now()
+            plan["pushed"] = True
+            planner.save_plan(HOME, plan)
+            await _q_edit(q, "✅ <b>Đã push kế hoạch.</b>\n<pre>" + esc(oneline(out, 1500))
+                          + "</pre>")
+        except Exception as e:  # noqa
+            await _q_edit(q, "❌ Push lỗi: " + esc(oneline(str(e), 600)))
+        return
+    if action in ("undo", "undo2"):
+        cp = plan.get("checkpoint") or ""
+        rd = repo_dir()
+        if not cp or not rd:
+            await q.answer("Kế hoạch này không có checkpoint.", show_alert=True)
+            return
+        if action == "undo":
+            await q.answer()
+            await _q_edit(
+                q,
+                "↩️ <b>Hoàn tác toàn bộ kế hoạch?</b>\nRepo sẽ về đúng trạng thái trước khi "
+                "chạy kế hoạch; thay đổi chưa commit sẽ mất.",
+                markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✔️ Hoàn tác ngay", callback_data=f"plan:undo2:{pid}"),
+                    InlineKeyboardButton("✖️ Không", callback_data="plan:view:" + pid)]]))
+            return
+        await q.answer("Đang hoàn tác…")
+        ok, detail = await asyncio.to_thread(planner.restore_checkpoint, HOME, rd, cp)
+        if ok:
+            plan["status"] = "cancelled"
+            plan["diff"] = ""
+            planner.save_plan(HOME, plan)
+        await _q_edit(q, ("✅ <b>Đã hoàn tác kế hoạch.</b>\n" if ok
+                          else "❌ <b>Không hoàn tác được.</b>\n") + esc(detail))
+        return
+    await q.answer()
+
+
+@guard()
+async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat_id = update.effective_chat.id
+    if planner is None:
+        await msg.reply_text("❌ Thiếu <code>aistv_planner.py</code> — chạy /update.",
+                             parse_mode=HTML)
+        return
+    raw = re.sub(r"^/plan(@\w+)?\s*", "", msg.text or "", flags=re.I).strip()
+    low = raw.lower()
+    if not raw or low in ("status", "xem"):
+        plan = planner.latest_plan(HOME, chat_id)
+        if not plan:
+            await msg.reply_text(
+                "🧭 <b>KẾ HOẠCH TỰ TRỊ</b>\nDùng: <code>/plan &lt;yêu cầu lớn&gt;</code>\n"
+                "Bot chia thành 2–8 bước, tự chạy từng bước, tự kiểm chứng và tự sửa "
+                "trước khi báo cáo.\n\n/undo — hoàn tác thay đổi gần nhất",
+                parse_mode=HTML)
+            return
+        body = (planner.render_report(plan) if plan.get("status") in ("done", "failed", "cancelled")
+                else planner.render_plan(plan))
+        await msg.reply_text(body[:4000], parse_mode=HTML,
+                             reply_markup=plan_keyboard(plan))
+        return
+    if low in ("list", "danh sách", "danhsach"):
+        text, markup = plans_list_text()
+        await msg.reply_text(text, parse_mode=HTML, reply_markup=markup)
+        return
+    if low in ("cancel", "huỷ", "huy", "off"):
+        plan = planner.latest_plan(HOME, chat_id)
+        if not plan or plan.get("status") not in ("draft", "running", "failed"):
+            await msg.reply_text("Không có kế hoạch nào đang chờ để huỷ.")
+            return
+        if plan.get("status") == "running":
+            PLAN_CANCEL.add(chat_id)
+        plan["status"] = "cancelled"
+        planner.save_plan(HOME, plan)
+        await msg.reply_text("🗑 Đã huỷ kế hoạch gần nhất.", parse_mode=HTML)
+        return
+    await create_plan(chat_id, raw, msg)
+
+
+@guard()
+async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if planner is None:
+        await msg.reply_text("❌ Thiếu <code>aistv_planner.py</code> — chạy /update.",
+                             parse_mode=HTML)
+        return
+    rd = repo_dir()
+    if not rd:
+        await msg.reply_text("Không tìm thấy repo git để hoàn tác.")
+        return
+    items = planner.list_checkpoints(HOME, 6)
+    stat = await asyncio.to_thread(planner.diff_stat, rd)
+    lines = ["↩️ <b>HOÀN TÁC</b>", f"Hiện tại: {esc(stat.get('text') or '')}", ""]
+    if not items:
+        await msg.reply_text("\n".join(lines) + "Chưa có checkpoint nào.",
+                             parse_mode=HTML)
+        return
+    lines.append("Chọn mốc để quay về (thay đổi chưa commit sẽ mất):")
+    rows = []
+    for m in items:
+        when = time.strftime("%d/%m %H:%M", time.localtime(m.get("at") or 0))
+        label = oneline(m.get("label") or "checkpoint", 40)
+        lines.append(f"• <code>{m['id'][:15]}</code> — {esc(when)} · {esc(label)}")
+        rows.append([InlineKeyboardButton(f"↩️ {when} · {label[:18]}",
+                                          callback_data=f"up:undo:{m['id']}")])
+    await msg.reply_text("\n".join(lines)[:4000], parse_mode=HTML,
+                         reply_markup=InlineKeyboardMarkup(rows))
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -4102,7 +4677,7 @@ def build_status(chat_id: int) -> str:
         f"• GitHub: {esc(gh)}\n"
         f"• Email: {esc(email_line())}\n"
         f"• Gemini ({VISION_MODEL}) đọc ảnh/video: "
-        f"{'✅ sẵn sàng' if GEMINI_READY else '⚠️ thiếu GEMINI_API_KEY'}"
+        f"{'✅ sẵn sàng' if GEMINI_READY else ('🟡 qua Web2API' if vision_ready() else '⚠️ thiếu GEMINI_API_KEY')}"
         f"{' · thảo luận 2 chiều' if VISION_HANDOFF else ' · trả lời trực tiếp'}\n"
         f"• Dự phòng Web2API: {esc(web2api_line())}\n"
         f"• Tạo ảnh: {esc(image_provider_line())}\n"
@@ -4257,6 +4832,11 @@ HELP_TEXT = (
     "/activity on|off — hiện/tắt chi tiết lệnh, code, output trong khung cuộn\n"
     "/variant [high|max|off] — mức reasoning của model\n"
     "Agent tự dùng nút bấm khi cần bạn chọn/xác nhận.\n\n"
+    "<b>Kế hoạch &amp; an toàn (chủ bot)</b>\n"
+    "/plan &lt;yêu cầu lớn&gt; — chia 2–8 bước, tự chạy, tự kiểm chứng, tự sửa\n"
+    "/plan · /plan list · /plan cancel — xem / danh sách / huỷ kế hoạch\n"
+    "/undo — hoàn tác thay đổi chưa commit gần nhất (quay về checkpoint)\n"
+    "Agent sửa repo xong bot hiện diff kèm nút ⬆️ Push / ↩️ Hoàn tác — không tự push.\n\n"
     "<b>GitHub &amp; tự cập nhật (chủ bot)</b>\n/github login — kết nối GitHub bằng mã, lưu lâu dài\n"
     "/github token &lt;PAT&gt; — đổi token; bot tự quét repo nếu repo cũ không truy cập được\n"
     "/github repos — quét repo của tài khoản, bấm nút để chọn repo đích\n"
@@ -4287,11 +4867,15 @@ async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @guard()
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    if chat_id in PLAN_BUSY:
+        PLAN_CANCEL.add(chat_id)
     proc = RUNNING.get(chat_id)
     if proc and proc.returncode is None:
         CANCELLED.add(chat_id)
         proc.kill()
         await update.effective_message.reply_text("🛑 Đang huỷ tác vụ…")
+    elif chat_id in PLAN_BUSY:
+        await update.effective_message.reply_text("⛔ Sẽ dừng kế hoạch sau bước hiện tại.")
     else:
         await update.effective_message.reply_text("Hiện không có tác vụ nào đang chạy.")
 
@@ -5257,11 +5841,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
-    if not GEMINI_READY:
+    if not vision_ready():
         try:
             await status.edit_text(
-                "⚠️ Cần GEMINI_API_KEY để nghe tin nhắn thoại.\n"
-                "Gửi: <code>/key gemini &lt;key&gt;</code>", parse_mode=HTML)
+                "⚠️ Cần GEMINI_API_KEY hoặc Web2API đã vá media để nghe tin nhắn thoại.\n"
+                "Gửi: <code>/key gemini &lt;key&gt;</code> hoặc <code>/web2api restart</code>",
+                parse_mode=HTML)
         except Exception:
             pass
         return
@@ -5368,8 +5953,10 @@ def _vision_question(kind: str, question: str) -> str:
 
 
 def _vision_cli_args(source: str, question: str, kind: str) -> list:
-    args = (["image", source, "--json"] if kind == "image"
-            else ["watch", source, "--engine", "gemini", "--detail", "balanced", "--json"])
+    if kind == "image":
+        args = ["image", source, "--engine", "auto", "--json"]
+    else:
+        args = ["watch", source, "--engine", "auto", "--detail", "balanced", "--json"]
     args += ["--question", question]
     return args
 
@@ -5644,13 +6231,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dest:
         return
     caption = (msg.caption or "").strip()
-    if GEMINI_READY:
+    if vision_ready():
         await gemini_media_reply(msg, context, update.effective_chat.id, str(dest), caption, "image")
         return
     prompt = caption or "Hãy cho tôi biết nội dung chính của ảnh này."
     await respond(msg, context, update.effective_chat.id,
                   f"{prompt}\n\n(Người dùng vừa gửi ảnh, đã lưu tại: inbox/{dest.name}. "
-                  "Chưa cấu hình GEMINI_API_KEY nên không đọc ảnh bằng Gemini.)",
+                  "Chưa có GEMINI_API_KEY và Web2API chưa vá media nên không đọc ảnh được.)",
                   quoted_msg=msg)
 
 
@@ -5668,13 +6255,13 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dest:
         return
     caption = (msg.caption or "").strip()
-    if GEMINI_READY:
+    if vision_ready():
         await gemini_media_reply(msg, context, update.effective_chat.id, str(dest), caption, "video")
         return
     prompt = caption or "Hãy xem video này và tóm tắt nội dung chính kèm mốc thời gian."
     await respond(msg, context, update.effective_chat.id,
                   f"{prompt}\n\n(Người dùng vừa gửi video, đã lưu tại: inbox/{dest.name}. "
-                  "Dùng skill watch với aistv_watch.py để xem; chưa có GEMINI_API_KEY nên ưu tiên "
+                  "Dùng skill watch với aistv_watch.py để xem; chưa có GEMINI_API_KEY/Web2API media nên ưu tiên "
                   "transcript + frames.)",
                   quoted_msg=msg)
 
@@ -5694,10 +6281,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not dest:
         return
     caption = (msg.caption or "").strip()
-    if GEMINI_READY and is_image:
+    if vision_ready() and is_image:
         await gemini_media_reply(msg, context, update.effective_chat.id, str(dest), caption, "image")
         return
-    if GEMINI_READY and is_video:
+    if vision_ready() and is_video:
         await gemini_media_reply(msg, context, update.effective_chat.id, str(dest), caption, "video")
         return
     prompt = caption or "Hãy đọc file này và tóm tắt nội dung chính."
@@ -5715,11 +6302,11 @@ async def _cmd_gemini_media(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                    else "/video https://youtu.be/... tóm tắt video")
         await msg.reply_text(f"Dùng: <code>{example}</code>", parse_mode=HTML)
         return
-    if not GEMINI_READY:
+    if not vision_ready():
         await msg.reply_text(
-            "⚠️ Chưa có <code>GEMINI_API_KEY</code>.\n"
-            "Thêm vào <code>.env</code> (hoặc Colab Secrets) rồi khởi động lại bot:\n"
-            "<code>GEMINI_API_KEY=AIza...</code>", parse_mode=HTML)
+            "⚠️ Chưa có nguồn đọc ảnh/video.\n"
+            "Thêm <code>GEMINI_API_KEY</code> vào <code>.env</code>, hoặc bật Web2API đã vá media:\n"
+            "<code>/web2api restart</code> (không tốn request API).", parse_mode=HTML)
         return
     source = _resolve_media_source(args[0])
     question = " ".join(args[1:]).strip()
@@ -6034,6 +6621,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = q.message.chat_id if q.message else (q.from_user.id if q.from_user else 0)
     data = q.data
+    if data.startswith("plan:"):
+        await _on_plan_button(q, data)
+        return
+    if data.startswith("up:"):
+        await _on_review_button(q, data)
+        return
     if data.startswith("ghr:"):
         await _on_gh_repo_button(q, data)
         return
@@ -6058,6 +6651,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         proc = RUNNING.get(chat_id)
         if proc and proc.returncode is None:
             CANCELLED.add(chat_id)
+            if chat_id in PLAN_BUSY:
+                PLAN_CANCEL.add(chat_id)
             proc.kill()
             await q.answer("🛑 Đang huỷ tác vụ…")
         else:
@@ -7307,6 +7902,8 @@ async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"XSRF: {'✅' if info['xsrf'] else '❌'} · "
             f"GitHub: {'✅ đã đồng bộ' if info['synced'] else '⏳ chưa đẩy'}",
             f"• Xem/tạo ảnh: {'✅ sẵn sàng' if info.get('images_ready') else ('⚠️ thiếu curl_cffi' if info.get('images') and not info.get('curl_cffi') else ('⚠️ server chưa chạy' if info.get('images') else '❌ chưa vá — chạy /web2api restart'))}",
+            f"• Nghe voice / xem video: {'✅ đã vá' if info.get('media') else '❌ chưa vá — chạy /web2api restart'}"
+            f" · {'🟢 server chạy' if info.get('running') else '🔴 server tắt'}",
             f"• File dán cookie: <code>{esc(info['cookie_file'])}</code>",
             f"• Kho đồng bộ: <code>{esc(info['store'])}</code> (nguyên văn, repo private)",
             "",
@@ -7372,6 +7969,7 @@ async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ════════════════════════════════════════════════════════════════════
 COMMANDS = [
     ("start", "Giới thiệu & menu"), ("new", "Cuộc trò chuyện mới"), ("stop", "Huỷ tác vụ đang chạy"),
+    ("plan", "Lập kế hoạch & tự thực thi"), ("undo", "Hoàn tác thay đổi gần nhất"),
     ("status", "Trạng thái bot"), ("model", "Xem / đổi model"), ("models", "Danh sách model"),
     ("remember", "Ghi nhớ dài hạn"), ("memory", "Xem trí nhớ"), ("forget", "Xoá trí nhớ"),
     ("skills", "Danh sách skills"), ("skill", "Chạy / thêm skill"),
@@ -7647,7 +8245,8 @@ def main() -> None:
            .concurrent_updates(True)          # để /stop hoạt động khi đang xử lý
            .build())
     for names, fn in [(["start"], cmd_start), (["help"], cmd_help), (["new", "reset", "clear"], cmd_new),
-                      (["stop"], cmd_stop), (["status"], cmd_status), (["model"], cmd_model),
+                      (["stop"], cmd_stop), (["plan"], cmd_plan), (["undo"], cmd_undo),
+                      (["status"], cmd_status), (["model"], cmd_model),
                       (["models"], cmd_models), (["remember"], cmd_remember), (["memory"], cmd_memory),
                       (["forget"], cmd_forget), (["skills"], cmd_skills), (["skill"], cmd_skill),
                       (["think"], cmd_think), (["activity", "progress"], cmd_activity),

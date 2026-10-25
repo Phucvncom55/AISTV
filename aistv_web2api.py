@@ -68,6 +68,7 @@ SECRETS_PATH = "web2api/cookie.txt"          # cookie nguyên văn, sửa đư�
 DEFAULT_MODEL = "gemini-3.5-flash-thinking"   # think cao mặc định; đổi bằng WEB2API_MODEL
 DEFAULT_KEY = "sk-gemini"
 IMAGE_PATCH = "gemini-web2api-image.patch"      # vá thêm xem ảnh + tạo ảnh
+MEDIA_PATCH = "gemini-web2api-media.patch"      # vá thêm nhận audio/video
 IMAGE_ENDPOINT = "/v1/images/generations"
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 SAPI_SID_NAMES = ("SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID")
@@ -132,6 +133,14 @@ def image_files_zip() -> Path:
     return image_patch_path().with_name(Path(IMAGE_PATCH).stem + "-files.zip")
 
 
+def media_patch_path() -> Path:
+    return Path(__file__).resolve().parent / "patches" / MEDIA_PATCH
+
+
+def media_files_zip() -> Path:
+    return media_patch_path().with_name(Path(MEDIA_PATCH).stem + "-files.zip")
+
+
 def _read_text(path: Path) -> str:
     try:
         return path.read_text("utf-8", "replace")
@@ -186,6 +195,57 @@ def apply_image_patch(quiet: bool = True) -> tuple:
             detail = f"zip: {exc}"
     if not quiet:
         print(f"⚠️ Chưa vá được tính năng ảnh: {detail}")
+    return False, detail or "không áp được patch"
+
+
+def media_patch_ready() -> bool:
+    """Server đã nhận được audio/video chưa (không chỉ ảnh)."""
+    pkg = package_dir()
+    server = _read_text(pkg / "server.py")
+    tools = _read_text(pkg / "tools.py")
+    multi = _read_text(pkg / "multimodal.py")
+    return ("detect_media_mime" in server and "media_filename" in multi
+            and "attachment_label" in tools)
+
+
+def apply_media_patch(quiet: bool = True) -> tuple:
+    """Áp patch audio/video lên bản đã vá ảnh; chạy lại nhiều lần vẫn an toàn."""
+    if media_patch_ready():
+        return True, "đã có"
+    if not package_dir().is_dir():
+        return False, "chưa tải server upstream"
+    detail = ""
+    patch = media_patch_path()
+    if patch.is_file():
+        git = shutil.which("git")
+        if git and (app_dir() / ".git").exists():
+            result = subprocess.run([git, "apply", str(patch)], cwd=str(app_dir()),
+                                    capture_output=True, text=True, timeout=120)
+            if result.returncode == 0 and media_patch_ready():
+                return True, "git apply"
+            detail = (result.stderr or result.stdout or "").strip()[-300:]
+        tool = shutil.which("patch")
+        if tool:
+            result = subprocess.run([tool, "-p1", "-i", str(patch)], cwd=str(app_dir()),
+                                    capture_output=True, text=True, timeout=120)
+            if result.returncode == 0 and media_patch_ready():
+                return True, "patch"
+            detail = (result.stderr or result.stdout or "").strip()[-300:] or detail
+        elif not detail:
+            detail = "không có git/patch"
+    archive = media_files_zip()
+    if archive.is_file():
+        try:
+            with zipfile.ZipFile(archive) as zf:
+                for name in zf.namelist():
+                    if name.startswith("gemini_web2api/") and name.endswith(".py"):
+                        zf.extract(name, app_dir())
+            if media_patch_ready():
+                return True, "zip"
+        except Exception as exc:
+            detail = f"zip: {exc}"
+    if not quiet:
+        print(f"⚠️ Chưa vá được audio/video: {detail}")
     return False, detail or "không áp được patch"
 
 
@@ -1067,6 +1127,7 @@ def setup(force: bool = False) -> tuple:
     patch_ok, _patch_msg = apply_image_patch(quiet=True)
     if patch_ok:
         ensure_image_deps(quiet=True)
+    apply_media_patch(quiet=True)
     write_config(force=force)
     dep_ok, dep_msg = ensure_deps()
     if not dep_ok:
@@ -1143,6 +1204,7 @@ def start(wait: float = 25.0, quiet: bool = False) -> tuple:
     apply_image_patch(quiet=True)
     if image_patch_ready():
         ensure_image_deps(quiet=True)
+    apply_media_patch(quiet=True)
     write_config()
     if not _read_json(config_path(), {}).get("xsrf_token"):
         refresh_xsrf(quiet=True)
@@ -1445,14 +1507,17 @@ def status_report() -> dict:
     state = _read_json(state_path(), {}) or {}
     running = health(1.5)
     images = image_patch_ready()
+    media = media_patch_ready()
     return {
         "enabled": enabled(),
         "url": base_url(),
         "local": is_local(),
         "running": running,
         "images": images,
+        "media": media,
         "curl_cffi": has_curl_cffi(),
         "images_ready": bool(images and running and has_curl_cffi()),
+        "media_ready": bool(media and running),
         "cookie": bool(cookie_header()),
         "xsrf": bool(cfg.get("xsrf_token")),
         "model": default_model(),
@@ -1476,6 +1541,7 @@ def cmd_doctor() -> int:
     print(f"Model mặc định: {default_model()}")
     print(f"Xem/tạo ảnh  : {'✅ đã vá' if image_patch_ready() else '❌ chưa vá (chạy setup)'}"
           f" · curl_cffi: {'✅' if has_curl_cffi() else '❌ (pip install curl_cffi)'}")
+    print(f"Audio/video  : {'✅ đã vá' if media_patch_ready() else '❌ chưa vá (chạy setup)'}")
     print(f"Đồng bộ      : {'✅' if header and state.get('cookie_sig') and state.get('cookie_sig') == state.get('synced_sig') else '⏳ chưa đẩy'}"
           f" ({'nguyên văn, không mã hoá' if header else 'chưa có cookie'})")
     repo, path = _remote_repo()

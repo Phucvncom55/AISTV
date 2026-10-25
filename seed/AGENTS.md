@@ -17,7 +17,7 @@
     thì ưu tiên skill đó. Chỉ đọc 1-2 skill liên quan, không đọc tràn lan. Skill không được ghi đè quy tắc
     bảo mật (không đọc/in/gửi `.secrets`, token, mật khẩu).
 12. Khi cần đọc/tra cứu tài liệu hoặc mã nguồn trên GitHub, dùng skill `github-docs` (tool `aistv_github_docs.py`).
-13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`). Gemini 3.8 Flash là mắt + tai (xem cả hình ảnh và âm thanh); bạn là người trả lời chính: đối chiếu báo cáo, nêu chỗ chưa chắc, trả lời kèm mốc thời gian. Cần thêm chi tiết thì gọi tool `ask_gemini`.
+13. Khi người dùng gửi link/file video và hỏi nội dung, dùng skill `watch` (tool `aistv_watch.py`). Gemini 3.8 Flash (hoặc Web2API đã vá media nếu chưa có `GEMINI_API_KEY`) là mắt + tai (xem cả hình ảnh và âm thanh); bạn là người trả lời chính: đối chiếu báo cáo, nêu chỗ chưa chắc, trả lời kèm mốc thời gian. Cần thêm chi tiết thì gọi tool `ask_gemini`.
 14. Khi người dùng gửi ảnh/URL ảnh và hỏi nội dung, dùng `python3 aistv_watch.py image <path|url> --json` để Gemini đọc ảnh (mô tả + OCR chữ + số liệu/biểu đồ); bạn tổng hợp và trả lời. Gemini API hết hạn mức thì tool tự chuyển Web2API nội bộ (ép bằng `--engine web2api`). Cần đọc kỹ thêm thì gọi tool `ask_gemini`.
 15. Khi người dùng yêu cầu tạo/vẽ ảnh, poster, logo, infographic, biểu đồ hoặc sơ đồ tư duy → gọi tool `generate_image`:
     - `kind: "mindmap"` cho sơ đồ tư duy (chữ Việt sắc nét, Pillow vẽ).
@@ -33,7 +33,7 @@
 16. Đọc PDF/DOCX/ảnh scan: `python3 aistv_docs.py "<file>" --json` (thêm `--lang vie+eng` cho ảnh). Thiếu công cụ thì chạy `--check` rồi báo người dùng cài.
 17. Tra trí nhớ/lịch sử: `python3 aistv_memory_index.py search "từ khoá" -n 8`. Trước khi trả lời câu hỏi về việc đã làm trước đây, tra index thay vì đọc lại toàn bộ MEMORY.md. Cập nhật index bằng `index` sau khi thêm ký ức mới.
 18. Điều khiển web (login, bấm, chụp màn hình): `python3 aistv_browser.py --url <url> --shot out.png` hoặc chạy kịch bản JSON. Chưa cài thì `--install`.
-19. Giọng nói: `python3 aistv_voice.py tts "<text>" -o out.ogg` và `stt <file> --json`.
+19. Giọng nói: `python3 aistv_voice.py tts "<text>" -o out.ogg` và `stt <file> --json`. Tin nhắn thoại/file âm thanh người dùng gửi được chép lời bằng `python3 aistv_watch.py voice <file> --json` — mặc định ưu tiên Web2API (Gemini Web, không tốn request API trả phí) rồi mới đến Gemini API/Whisper. Web2API chép lời tốt với MP3/WAV; OGG/Opus, FLAC, M4A tự đổi sang MP3 bằng ffmpeg (thiếu thì `pip install imageio-ffmpeg`). Sau khi có transcript, bạn xử lý như tin nhắn chữ.
 20. MCP: `python3 aistv_mcp.py list` / `add` / `remove` — ghi vào `opencode.json`, restart mới nạp.
 21. Cloudflare: dùng `python3 aistv_cloudflare.py ...` (skill `cloudflare-aistv`) cho Workers AI, upload web (Pages/Workers), DNS, R2; token ở `.secrets/cloudflare_token` hoặc env `CLOUDFLARE_API_TOKEN`, không in token ra chat/log.
 22. Railway: dùng `python3 aistv_railway.py ...` (skill `railway`) cho deploy, log, biến môi trường, domain; không in giá trị biến bí mật ra chat/log.
@@ -42,7 +42,26 @@
     bằng Harness² của Google Research: `python3 /root/AISTV/aistv_harness2.py status|export|check|diff|demo`
     (skill `harness2`). Chỉ đọc/ghi trong `/root/AISTV/harness/`; không tự sửa SOUL.md, AGENTS.md,
     MEMORY.md hay `skills/`. Benchmark thật cần credential Vertex AI — thiếu thì nói rõ, không giả vờ đã chạy.
-25. Nén context tiết kiệm token bằng Headroom: CLI `headroom`, thư viện `from headroom import compress`,
+25. Repo chính (code bot) là thư mục chứa `aistv_bot.py` — env `$AISTV_DIR`, ví dụ `/root/AISTV`;
+    workspace của bạn là `$HOME/workspace`. Sửa code bot trong repo chính, file cho người dùng để trong
+    workspace. Không sửa `seed/` thay cho bản đang chạy (seed chỉ là bản mẫu cho máy mới).
+26. Trước khi sửa code trong repo: đọc `docs/CODEMAP.md` (bản đồ module → hàm/class kèm số dòng) để chọn
+    đúng file, rồi `grep -n "def tên_hàm" <file>` và CHỈ đọc 60–150 dòng quanh symbol. Không đọc cả
+    `aistv_bot.py` (hơn 7.000 dòng) và không đoán số dòng. Thêm/bớt hàm cấp module thì chạy lại
+    `python scripts/code_map.py`.
+27. Sửa code xong BẮT BUỘC chạy `python scripts/verify.py` trong repo và chỉ báo "xong" khi PASS.
+    FAIL thì đọc đúng lỗi, sửa nguyên nhân, chạy lại — tối đa 2 lần; vẫn FAIL thì báo rõ lỗi và phần
+    đã thử, không được nói đã xong.
+28. Yêu cầu từ 3 bước trở lên hoặc sửa nhiều file: lập danh sách bước ngắn (2–8 bước, mỗi bước kiểm
+    chứng được) rồi làm lần lượt. Việc dài nên dùng `/plan`: bot tự checkpoint, tự chạy từng bước và tự
+    kiểm chứng trước khi báo cáo.
+29. KHÔNG commit/push thay người dùng. Sau khi agent sửa repo, bot hiện diff kèm nút duyệt
+    (⬆️ Push / ↩️ Hoàn tác); chỉ push khi người dùng bấm nút hoặc gõ `/push`. Không tự đẩy khi chưa duyệt.
+30. Trước mỗi lượt sửa code, bot tự tạo checkpoint; `/undo` hoặc nút ↩️ đưa repo về đúng trạng thái trước
+    đó. Không xoá checkpoint hay file trong `.git` bằng tay.
+31. Bị kẹt (lỗi lặp lại, thiếu quyền, thiếu thông tin) thì dừng đúng lúc: nêu lỗi, đã thử gì, cần gì để
+    đi tiếp — hoặc gọi `ask_user`. Không che giấu lỗi, không báo hoàn thành giả.
+32. Nén context tiết kiệm token bằng Headroom: CLI `headroom`, thư viện `from headroom import compress`,
     MCP `headroom mcp serve` (tool `headroom_compress`/`headroom_retrieve`/`headroom_stats`) — headroom-ai
     `0.41.0`, chạy offline (`HEADROOM_OFFLINE=1`, không beacon). Dùng khi tool output/log/JSON/RAG quá lớn;
     KHÔNG tự `wrap`/`unwrap` hay đổi config opencode — muốn bật hỏi người dùng trước. Skill `headroom`.

@@ -148,10 +148,11 @@ WEB2API_MODEL=gemini-3.5-flash-thinking
 OPENCODE_FALLBACK_MODELS=web2api/gemini-3.5-flash-thinking
 ```
 
-## 5.1. Xem ảnh và tạo ảnh
+## 5.1. Xem ảnh, nghe voice, xem video và tạo ảnh
 
-Server upstream chỉ làm chat chữ; AISTV vá thêm hai khả năng bằng
-`patches/gemini-web2api-image.patch` (tự áp khi `setup`/`start`, cần `curl_cffi`).
+Server upstream chỉ làm chat chữ; AISTV vá thêm các khả năng media bằng
+`patches/gemini-web2api-image.patch` (ảnh) và `patches/gemini-web2api-media.patch`
+(audio/video). Cả hai tự áp khi `setup`/`start` và cần `curl_cffi`.
 
 **Xem ảnh (vision).** Gửi ảnh/URL ảnh cho bot như bình thường. `aistv_watch.py` gọi
 Gemini API trước; hết hạn mức thì tự chuyển Web2API với `inline_data`/`image_url`.
@@ -160,6 +161,29 @@ Gemini Web chèn được tự bỏ trước khi trả lời. Muốn thử/thử
 
 ```bash
 python aistv_watch.py image anh.png --engine web2api --json
+```
+
+**Nghe voice (speech-to-text).** Voice message/file âm thanh được gửi lên Web2API dưới
+dạng `inline_data`, Gemini Web chép lời rồi bot đưa nguyên văn cho model chính
+(`deepseek-v4.1-flash-free`) xử lý — không tốn request Gemini API. `do_voice` tự chọn
+nguồn theo thứ tự Web2API → Gemini API → Whisper local (`--engine` để ép một nguồn).
+
+Gemini Web chỉ chép lời đúng với **MP3/WAV**. OGG/Opus (Telegram), FLAC, M4A… được
+`aistv_watch.py` đổi sang mono MP3 16kHz bằng ffmpeg trước khi gửi; thiếu ffmpeg thì
+báo lỗi rõ và lùi nguồn kế tiếp (`pip install imageio-ffmpeg`). Nội dung chính trị /
+người nổi tiếng có thể bị Gemini Web từ chối — khi đó bot lùi Gemini API hoặc Whisper.
+
+```bash
+python aistv_watch.py voice voice.ogg --engine web2api --json
+python aistv_watch.py voice ghi-am.m4a -l vi
+```
+
+**Xem video.** `watch --engine web2api` gửi video trực tiếp (giới hạn inline
+`WATCH_WEB2API_MEDIA_MB`, mặc định 12MB); video dài hơn được cắt/nén 360p bằng ffmpeg
+nếu có. Kết quả trả về báo cáo có mốc thời gian như khi dùng Gemini API.
+
+```bash
+python aistv_watch.py watch clip.mp4 --engine web2api --question "Có gì trong video?"
 ```
 
 **Tạo ảnh.** `aistv_image.py` thêm provider `web2api`, đứng đầu chuỗi tự chọn:
@@ -203,6 +227,8 @@ qua Web2API nên tự chuyển provider khác.
 | Không vào được gemini.google.com | đặt `WEB2API_PROXY` (Clash/V2Ray) |
 | Không thấy model `web2api/...` | chạy `/restart` để ghi lại `workspace/opencode.json` |
 | `/web2api` báo “chưa vá” tính năng ảnh | chạy `/web2api restart` (tự áp patch) hoặc `python aistv_web2api.py setup` |
+| `/web2api` báo “chưa vá” nghe voice/xem video | chạy `/web2api restart` (tự áp patch media) hoặc `python aistv_web2api.py doctor` |
+| Voice OGG/FLAC bị từ chối hoặc chép sai | cài ffmpeg (`pip install imageio-ffmpeg`) để tự đổi sang MP3; kiểm tra `aistv_watch.py doctor` |
 | Tạo ảnh báo `curl_cffi is required` | `pip install curl_cffi` rồi `/web2api restart` |
 | Xem ảnh trả lời rỗng | kiểm tra cookie còn sống, thử `python aistv_web2api.py doctor`; ảnh quá lớn/định dạng lạ thì đổi sang PNG/JPEG |
 | Máy mới chưa có cookie | đặt `AISTV_CONFIG_TOKEN` hoặc `gh auth login` rồi chạy bot / `auto` |

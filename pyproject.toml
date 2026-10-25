@@ -1,0 +1,14 @@
+# Cấu hình công cụ cho repo (không phải gói cài đặt).
+# Bot vẫn chạy bằng requirements.txt; file này cho lint/test nhất quán.
+
+[tool.ruff]
+line-length = 110
+target-version = "py38"
+extend-exclude = [".venv", "venv", "seed", "patches", "__pycache__", "workspace"]
+
+[tool.ruff.lint]
+# Chỉ bắt lỗi thật (cú pháp, import hỏng, biến chưa định nghĩa) — không bắt style.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

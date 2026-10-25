@@ -23,11 +23,14 @@ python3 "$W" watch "URL" --question "câu hỏi nguyên văn" --detail balanced
 python3 "$W" watch "inbox/video.mp4" --question "..." --detail balanced
 python3 "$W" transcript "URL" --timestamps
 python3 "$W" frames "URL" --max-frames 24 --at "1:23,4:56"
+python3 "$W" voice "inbox/voice.ogg" --json
 ```
 
 - `image` đọc một hoặc nhiều ảnh (local/URL) bằng Gemini: mô tả + OCR chữ; in ra report và lưu `report.md`/`report.json` trong `watch/<tên>_<thời gian>/`.
 - `watch` in ra `report.md` và lưu `report.json`, frames, contact sheet trong `watch/<tên>_<thời gian>/`.
-- `--engine auto` (mặc định): dùng Gemini nếu có `GEMINI_API_KEY`, không thì local.
+- `voice` chép lời tin nhắn thoại/file âm thanh; in `{"text", "via", ...}`. Web2API chép lời tốt với MP3/WAV, còn OGG/Opus (Telegram), FLAC, M4A tự đổi sang MP3 bằng ffmpeg.
+- `--engine auto` (mặc định): Gemini nếu có `GEMINI_API_KEY`, không thì Web2API đã vá media, cuối cùng local.
+- `--engine web2api`: dùng Gemini Web nội bộ (không tốn request API trả phí); video ≤ 12MB gửi trực tiếp, video dài cần ffmpeg để cắt/nén.
 - `--engine local`: chỉ dùng máy (frames + transcript), không gửi video đi đâu.
 - `--engine gemini`: bắt buộc Gemini; lỗi thì báo, không tự đổi.
 - Model mặc định `gemini-3.8-flash`, tự fallback `gemini-3.7-flash` → `gemini-3.5-flash`. Đổi bằng `WATCH_GEMINI_MODEL` / `WATCH_GEMINI_FALLBACKS`.
