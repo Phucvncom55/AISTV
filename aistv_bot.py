@@ -5179,7 +5179,7 @@ async def _guest_answer(msg, context, chat, user, text: str) -> None:
         hist += [{"role": "user", "content": _clip(text, 2000)},
                  {"role": "assistant", "content": _clip(answer, 4000)}]
         del hist[:-GUEST_HISTORY * 2]
-    footer = f"<i>💬 Web2API · {time.monotonic() - started:.1f}s</i>"
+    footer = f"<i>💬 AI STV · {time.monotonic() - started:.1f}s</i>"
     await send_rich(msg, answer, footer)
 
 
