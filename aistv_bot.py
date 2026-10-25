@@ -266,10 +266,10 @@ USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google
 FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
                                 #        không cần hỏi quyền (mọi tool của OpenCode đều được auto-approve)
 # Model chính, đổi nhanh bằng /model hoặc OPENCODE_MODEL.
-# Chọn model CÓ trả "reasoning" thì khung 💭 Suy nghĩ mới có nội dung:
-# deepseek-v4.1-flash-free không phát event reasoning (chỉ text), còn
-# glm-5.3-flash-free / flint-40b-free / nemotron thì có.
-DEFAULT_MODEL = "opencode/glm-5.3-flash-free"
+# Mặc định DeepSeek v4.1 Flash. Model này thường KHÔNG phát event reasoning
+# (chỉ trả text), nên khung 💭 Suy nghĩ sẽ báo rõ "không trả reasoning".
+# Muốn thấy reasoning: /model chọn glm-5.3-flash-free / flint-40b-free / nemotron.
+DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"
 LEGACY_GEMINI_MODEL = "google/gemini-3.8-flash"       # bản trước lỡ đặt Gemini làm model chính → tự quay lại model mặc định
 VISION_MODEL = "gemini-3.8-flash"                     # mắt + tai: đọc ảnh / xem video (không phải model trả lời)
 WEB2API_MODEL = (os.getenv("WEB2API_MODEL") or "gemini-3.6-flash").strip()
@@ -3713,7 +3713,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     new = context.args[0].strip()
     if not re.fullmatch(r"[\w.\-]+/[\w.\-:/]+", new):
-        await msg.reply_text("⚠️ Sai định dạng. Ví dụ: <code>/model opencode/glm-5.3-flash-free</code>", parse_mode=HTML)
+        await msg.reply_text("⚠️ Sai định dạng. Ví dụ: <code>/model opencode/deepseek-v4.1-flash-free</code>", parse_mode=HTML)
         return
     STATE["model"] = new
     save_state()
