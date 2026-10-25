@@ -182,6 +182,21 @@ nhắn. Chỉ cần `ALLOWED_USER_IDS` có trong `config.env` (repo private lo s
 - Nếu để trống, người nhắn tin riêng đầu tiên sẽ thành chủ bot (tiện cho lần chạy đầu).
 - Cấp/thu quyền thêm trong chat: `/allow <id>`, `/deny <id>` (chủ bot).
 
+### Người khác chat: chỉ chữ qua Web2API
+
+Người **không** có trong `ALLOWED_USER_IDS` (và không được `/allow`) vẫn nhắn được với bot,
+nhưng chỉ ở chế độ khách:
+
+- Tin nhắn chữ được trả lời **thuần bằng Web2API** (Gemini nội bộ), không qua OpenCode,
+  không có công cụ, không đọc được file/lịch sử của chủ bot. Mỗi khách có ngữ cảnh ngắn riêng
+  (mặc định 6 lượt, chỉ trong RAM).
+- **Lệnh, nút bấm, ảnh, video, file, tin nhắn thoại đều bị từ chối** — kể cả trong nhóm.
+  Gửi ảnh/video không được xem, không được tạo ảnh.
+- Trong nhóm, khách phải `@tên_bot` hoặc reply vào tin của bot thì mới được trả lời.
+- Khách không bao giờ chạm vào luồng `ask_user` của agent.
+- Tắt hoàn toàn chat khách: `AISTV_GUEST_CHAT=0`. Đổi model/thời gian chờ:
+  `AISTV_GUEST_MODEL`, `AISTV_GUEST_TIMEOUT`.
+
 ### Gemini key: không bắt nhập khi chạy
 
 Gemini là **tuỳ chọn** — thiếu key thì bot vẫn chạy, chỉ mất phần đọc ảnh/xem video không phụ đề. `run.sh` **không hỏi** key nữa; có 3 cách thêm:
@@ -488,6 +503,9 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `OPENCODE_MODEL` | `opencode/deepseek-v4.1-flash-free` | Model chính của agent (DeepSeek v4.1 Flash); đổi trực tiếp bằng `/model` |
 | `WEB2API_FALLBACK` | `1` | `1` = khi model chính hết hạn mức (429/hết token) hoặc lỗi server/UnknownError tự chuyển sang Gemini Web2API nội bộ |
 | `WEB2API_URL` / `WEB2API_MODEL` | `http://127.0.0.1:8081` / `gemini-3.5-flash-thinking` | Server + model dự phòng (mặc định think cao; đổi `gemini-3.6-flash` nếu cần nhanh) |
+| `AISTV_GUEST_CHAT` | `1` | `1` = người lạ chỉ được chat chữ qua Web2API; `0` = chặn hoàn toàn |
+| `AISTV_GUEST_MODEL` / `AISTV_GUEST_TIMEOUT` | theo `WEB2API_MODEL` / `180` | Model và thời gian chờ cho câu trả lời khách |
+| `AISTV_GUEST_HISTORY` / `AISTV_GUEST_GAP` / `AISTV_GUEST_PARALLEL` | `6` / `1` / `3` | Số lượt nhớ riêng mỗi khách / giây tối thiểu giữa 2 tin / số câu trả lời khách song song |
 | `WEB2API_COOKIE_FILE` | `~/.config/aistv/web2api/cookie.txt` | File dán cookie mới; dán vào là server tự nạp lại |
 | `WEB2API_AUTOSYNC` | `1` | `1` = tự kéo/đẩy cookie nguyên văn với repo private |
 | `GEMINI_RPM` / `GEMINI_RPD` | `10` / `1500` | Tự giữ nhịp request/phút và request/ngày |
@@ -640,6 +658,8 @@ Dữ liệu chạy nằm ngoài repo tại `STV_HOME` (mặc định `~/stv_agen
 ## 7. Bảo mật
 
 - Luôn đặt `ALLOWED_USER_IDS` nếu bot ở nơi công cộng.
+- Người lạ chỉ chat chữ qua Web2API; lệnh/nút/ảnh/video và lịch sử của chủ bot không mở cho họ
+  (`AISTV_GUEST_CHAT=0` nếu muốn chặn hẳn).
 - Token chỉ đọc từ biến môi trường / Colab Secrets / `.env`; agent không nhìn thấy token (đã xoá khỏi môi trường tiến trình con).
 - `FULL_ACCESS = False` mặc định: agent chỉ ghi trong workspace và bị OpenCode chặn thao tác cần quyền.
 - Repo public **không chứa bí mật**; đừng commit `.env`.

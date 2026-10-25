@@ -275,6 +275,13 @@ VISION_MODEL = "gemini-3.8-flash"                     # mắt + tai: đọc ản
 WEB2API_MODEL = (os.getenv("WEB2API_MODEL") or "gemini-3.5-flash-thinking").strip()
                                                       # mặc định think cao (server: "Deep thinking mode")
 WEB2API_FALLBACK = os.getenv("WEB2API_FALLBACK", "1") != "0"   # 0 = tắt dự phòng Gemini Web2API
+# Người không phải chủ bot: chỉ được chat chữ qua Web2API (không lệnh, không ảnh/video).
+GUEST_CHAT = os.getenv("AISTV_GUEST_CHAT", "1") != "0"         # 0 = chặn hoàn toàn người lạ
+GUEST_MODEL = (os.getenv("AISTV_GUEST_MODEL") or WEB2API_MODEL).strip()
+GUEST_TIMEOUT = max(30, int(os.getenv("AISTV_GUEST_TIMEOUT", "180") or 180))
+GUEST_HISTORY = max(0, int(os.getenv("AISTV_GUEST_HISTORY", "6") or 6))   # số lượt nhớ riêng của khách
+GUEST_MIN_GAP = max(0.0, float(os.getenv("AISTV_GUEST_GAP", "1") or 1))   # giây giữa 2 tin của 1 khách
+GUEST_CONCURRENCY = max(1, int(os.getenv("AISTV_GUEST_PARALLEL", "3") or 3))
 VISION_HANDOFF = os.getenv("AISTV_VISION_HANDOFF", "1") != "0"
                                                       # 1 = Gemini đọc media → DeepSeek (model chính) trả lời
 VISION_FOLLOWUPS = max(0, int(os.getenv("AISTV_VISION_FOLLOWUPS", "2") or 2))
@@ -907,6 +914,53 @@ def authorized(uid: int, chat_type: str) -> bool:
     return uid == STATE["owner_id"] or uid in STATE["allowed"]
 
 
+def _addressed_to_bot(msg, context, text: str = "") -> bool:
+    """Trong nhóm: chỉ coi là gửi cho bot khi @tên bot hoặc reply vào tin của bot."""
+    if bool(getattr(msg, "reply_to_message", None)
+            and msg.reply_to_message.from_user
+            and msg.reply_to_message.from_user.id == context.bot.id):
+        return True
+    bot_user = getattr(context.bot, "username", "") or ""
+    return bool(bot_user) and ("@" + bot_user).lower() in (text or "").lower()
+
+
+def _strip_bot_mention(text: str, context) -> str:
+    bot_user = getattr(context.bot, "username", "") or ""
+    if not bot_user:
+        return (text or "").strip()
+    return re.sub(re.escape("@" + bot_user), "", text or "", flags=re.I).strip()
+
+
+GUEST_REJECT_AT: dict = {}
+GUEST_NOTICE = ("🔒 Lệnh, ảnh và video chỉ dành cho chủ bot.\n"
+                "Bạn vẫn có thể nhắn tin chữ để trò chuyện với trợ lý.")
+GUEST_OFF_NOTICE = "⛔ Bot này chỉ dành cho chủ bot."
+
+
+async def _deny_guest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Từ chối người lạ dùng lệnh/nút/ảnh/video (chat chữ vẫn được nếu GUEST_CHAT bật)."""
+    user, chat, msg = update.effective_user, update.effective_chat, update.effective_message
+    if not (user and chat and msg):
+        return
+    if chat.type != "private" and not _addressed_to_bot(
+            msg, context, msg.text or msg.caption or ""):
+        return                                   # trong nhóm: không nhắc bot thì im lặng
+    if update.callback_query is not None and chat.type != "private":
+        return                                   # bấm nút trong nhóm: không trả lời để khỏi spam
+    key = (chat.id, user.id)
+    now = time.monotonic()
+    if now - GUEST_REJECT_AT.get(key, 0.0) < 30:
+        return                                   # chống spam khi bấm nút / gõ lệnh liên tục
+    GUEST_REJECT_AT[key] = now
+    body = GUEST_NOTICE if GUEST_CHAT else GUEST_OFF_NOTICE
+    if chat.type == "private":
+        body += f"\nID của bạn: <code>{user.id}</code>"
+    try:
+        await msg.reply_text(body, parse_mode=HTML)
+    except Exception:
+        pass
+
+
 def guard(owner_only: bool = False):
     def deco(fn):
         @functools.wraps(fn)
@@ -915,10 +969,7 @@ def guard(owner_only: bool = False):
             if not (user and chat and msg):
                 return
             if not authorized(user.id, chat.type):
-                if chat.type == "private":
-                    await msg.reply_text(
-                        f"⛔ Đây là bot riêng tư.\nID của bạn: {user.id}\n"
-                        f"Chủ bot có thể cấp quyền bằng: /allow {user.id}")
+                await _deny_guest(update, context)
                 return
             if owner_only and not is_owner(user.id):
                 await msg.reply_text("🔒 Lệnh này chỉ dành cho chủ bot.")
@@ -5041,11 +5092,105 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML")
 
 
-async def _dispatch_text(msg, context, chat, text: str):
-    """Dùng chung cho tin nhắn gõ tay và tin nhắn thoại đã chép lời."""
+GUEST_SYSTEM = (
+    "Bạn là trợ lý AI trong một bot Telegram và đang trả lời một người KHÔNG phải chủ bot.\n"
+    "Bạn chỉ trò chuyện bằng văn bản: không có công cụ, không chạy lệnh, không đọc/ghi tệp, "
+    "không truy cập web, không xem ảnh/video, không tạo ảnh, không đọc dữ liệu hay lịch sử của chủ bot.\n"
+    "Nếu được yêu cầu những việc đó, nói ngắn gọn rằng chỉ chủ bot mới làm được.\n"
+    "Trả lời gọn (thường ≤ 20 dòng), đúng ngôn ngữ người dùng; không bịa là đã thực hiện hành động."
+)
+GUEST_HIST: dict = {}
+GUEST_LOCKS = defaultdict(asyncio.Lock)
+GUEST_LAST: dict = {}
+GUEST_SEM = asyncio.Semaphore(GUEST_CONCURRENCY)
+
+
+async def _guest_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            await bot.send_chat_action(chat_id, ChatAction.TYPING)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=4.5)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _guest_answer(msg, context, chat, user, text: str) -> None:
+    """Khách (không phải chủ bot): chỉ trả lời bằng chữ qua Web2API, không tool, không lịch sử của chủ."""
+    if chat.type != "private":
+        if not _addressed_to_bot(msg, context, text):
+            return
+        text = _strip_bot_mention(text, context)
     text = (text or "").strip()
     if not text:
         return
+    if web2api is None:
+        await msg.reply_text("⚠️ Trợ lý chữ đang không sẵn sàng.")
+        return
+    key = (chat.id, user.id)
+    wait = GUEST_MIN_GAP - (time.monotonic() - GUEST_LAST.get(key, 0.0))
+    if wait > 0:
+        await asyncio.sleep(min(wait, GUEST_MIN_GAP))   # giữ nhịp, không bỏ tin của khách
+    GUEST_LAST[key] = time.monotonic()
+    lock = GUEST_LOCKS[key]
+    if lock.locked():
+        await msg.reply_text("⏳ Đang trả lời tin trước của bạn…")
+        return
+
+    text = _clip(text, 4000)
+    started = time.monotonic()
+    status = await msg.reply_text("💬 <i>Đang trả lời…</i>", parse_mode=HTML)
+    stop = asyncio.Event()
+    typing = asyncio.create_task(_guest_typing(context.bot, chat.id, stop))
+    answer, err = "", ""
+    try:
+        async with lock, GUEST_SEM:
+            ready = await asyncio.to_thread(web2api.ensure_server)
+            if not ready:
+                err = "Web2API chưa sẵn sàng"
+            else:
+                messages = [{"role": "system", "content": GUEST_SYSTEM}]
+                messages += GUEST_HIST.get(key, [])
+                messages.append({"role": "user", "content": text})
+                answer, err = await asyncio.to_thread(
+                    web2api.chat, messages, GUEST_MODEL, GUEST_TIMEOUT)
+    except Exception as exc:
+        err = f"{type(exc).__name__}: {exc}"
+    finally:
+        stop.set()
+        await typing
+    answer = (answer or "").strip()
+    if not answer:
+        log.warning("Web2API trả lời khách lỗi: %s", _redact_secrets(str(err)))
+        try:
+            await status.edit_text(
+                "⚠️ Trợ lý chữ đang bận, bạn thử lại sau ít phút nhé.", parse_mode=HTML)
+        except Exception:
+            pass
+        return
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    hist = GUEST_HIST.setdefault(key, [])
+    if GUEST_HISTORY:
+        hist += [{"role": "user", "content": _clip(text, 2000)},
+                 {"role": "assistant", "content": _clip(answer, 4000)}]
+        del hist[:-GUEST_HISTORY * 2]
+    footer = f"<i>💬 Web2API · {time.monotonic() - started:.1f}s</i>"
+    await send_rich(msg, answer, footer)
+
+
+async def _dispatch_text(msg, context, chat, text: str):
+    """Dùng chung cho tin nhắn gõ tay và tin nhắn thoại đã chép lời (chỉ chủ bot)."""
+    text = (text or "").strip()
+    if not text:
+        return
+    user = getattr(msg, "from_user", None)
+    if not (user and authorized(user.id, chat.type)):
+        return                                       # khách không bao giờ chạm vào luồng hỏi-đáp của agent
     with ASK_LOCK:
         ask_id = ASK_BY_CHAT.get(chat.id)
     if ask_id:                                       # đang chờ agent hỏi → tin nhắn này là câu trả lời
@@ -5060,19 +5205,26 @@ async def _dispatch_text(msg, context, chat, text: str):
                 pass
             return
     if chat.type != "private":                       # trong nhóm: chỉ trả lời khi được nhắc tên / reply
-        uname = "@" + (context.bot.username or "")
-        replied = bool(msg.reply_to_message and msg.reply_to_message.from_user
-                       and msg.reply_to_message.from_user.id == context.bot.id)
-        if uname.lower() not in text.lower() and not replied:
+        if not _addressed_to_bot(msg, context, text):
             return
-        text = re.sub(re.escape(uname), "", text, flags=re.I).strip()
+        text = _strip_bot_mention(text, context)
     await respond(msg, context, chat.id, text, quoted_msg=msg)
 
 
-@guard()
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg, chat = update.effective_message, update.effective_chat
-    await _dispatch_text(msg, context, chat, msg.text or "")
+    user = update.effective_user
+    if not (msg and chat and user):
+        return
+    text = msg.text or ""
+    if not text.strip():
+        return
+    if authorized(user.id, chat.type):
+        await _dispatch_text(msg, context, chat, text)
+    elif GUEST_CHAT:
+        await _guest_answer(msg, context, chat, user, text)
+    else:
+        await _deny_guest(update, context)
 
 
 _VOICE_EXTS = {
