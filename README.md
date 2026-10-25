@@ -306,12 +306,15 @@ cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
 
 Nếu bot báo `Database is not empty and has no session table` (thường kèm `/models` trống):
 máy còn binary OpenCode **v1** ở `~/.opencode/bin/opencode` trong khi dữ liệu phiên đã là **v2**.
-Bot tự ưu tiên binary v2; nếu vẫn lỗi thì cài lại rồi xoá bản cũ:
+Khi đó **mọi model chạy qua OpenCode** đều trả `Unexpected server error`, bot chuyển sang Web2API
+chat-only (không có tool) — trông như "model hỏng" dù model vẫn ổn. Bot tự ưu tiên binary v2;
+nếu vẫn lỗi thì cài lại rồi xoá bản cũ:
 
 ```bash
 curl -fsSL https://opencode.ai/install | bash
 rm -rf ~/.opencode           # bản v1 cũ (dữ liệu phiên v2 giữ nguyên)
-# hoặc chỉ định rõ binary: OPENCODE_BIN=$(command -v opencode) trong .env
+# hoặc ghim đường dẫn tuyệt đối (lấy bằng `command -v opencode`) vào .env:
+# OPENCODE_BIN=/usr/local/bin/opencode
 ```
 
 ## 4. Dùng bot
