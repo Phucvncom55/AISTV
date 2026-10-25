@@ -42,3 +42,7 @@
     bằng Harness² của Google Research: `python3 /root/AISTV/aistv_harness2.py status|export|check|diff|demo`
     (skill `harness2`). Chỉ đọc/ghi trong `/root/AISTV/harness/`; không tự sửa SOUL.md, AGENTS.md,
     MEMORY.md hay `skills/`. Benchmark thật cần credential Vertex AI — thiếu thì nói rõ, không giả vờ đã chạy.
+25. Nén context tiết kiệm token bằng Headroom: CLI `headroom`, thư viện `from headroom import compress`,
+    MCP `headroom mcp serve` (tool `headroom_compress`/`headroom_retrieve`/`headroom_stats`) — headroom-ai
+    `0.41.0`, chạy offline (`HEADROOM_OFFLINE=1`, không beacon). Dùng khi tool output/log/JSON/RAG quá lớn;
+    KHÔNG tự `wrap`/`unwrap` hay đổi config opencode — muốn bật hỏi người dùng trước. Skill `headroom`.

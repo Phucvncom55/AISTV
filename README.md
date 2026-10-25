@@ -651,6 +651,22 @@ script được nhắc phải tồn tại). Chạy benchmark thật (JobBench/LA
 Đã kiểm chứng 25/10/2026 trên commit `1cfe254`: tree 38 skills / 58 file / 23.664 ký tự always-on,
 `check` hợp lệ và `demo --k 2` hoàn tất 2 task, 0 failed.
 
+### Headroom — nén context, tiết kiệm token (tuỳ chọn)
+
+Cầu nối sang [headroomlabs-ai/headroom](https://github.com/headroomlabs-ai/headroom) — nén tool output, log,
+JSON, RAG trước khi đưa vào LLM (cùng câu trả lời, token giảm 20-95%). Chạy local, đảo ngược được (CCR).
+
+```bash
+pip install "headroom-ai[proxy,mcp]"   # CLI + MCP server (Python 3.10+); thêm [ml] nếu muốn nén cả văn bản
+export HEADROOM_OFFLINE=1              # tắt beacon telemetry ẩn danh
+headroom doctor                        # kiểm tra cài đặt
+headroom mcp serve                     # MCP: headroom_compress / headroom_retrieve / headroom_stats
+```
+
+Đã kiểm chứng 25/10/2026 trên v0.41.0: JSON tool output 9.262 → 3.940 token (−57,5%), nén dưới 1 ms;
+log thuần và văn dày đặc nén gần 0. MCP server `headroom` đã ghi trong `opencode.json` (env
+`HEADROOM_OFFLINE=1`). Không dùng `headroom wrap` tự động — nó đổi upstream của agent về OpenAI mặc định.
+
 Dữ liệu chạy nằm ngoài repo tại `STV_HOME` (mặc định `~/stv_agent`), nên cập nhật code không mất trí nhớ.
 
 ## 7. Bảo mật
