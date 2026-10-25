@@ -1283,7 +1283,7 @@ def web2api_generate(parts, timeout=240, temperature=0.2, max_output_tokens=8192
             return None, "Web2API đã tắt"
     except Exception:
         return None, "Web2API lỗi cấu hình"
-    model = config_value("WEB2API_MODEL", "gemini-3.6-flash") or "gemini-3.6-flash"
+    model = config_value("WEB2API_MODEL", "") or web2api.default_model()
     ep(f"↪︎ Gemini hết hạn mức — chuyển Web2API nội bộ ({model})…")
     text, err = web2api.generate(
         parts, model=model, timeout=max(30, min(timeout, 300)),

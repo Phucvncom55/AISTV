@@ -429,7 +429,7 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 
 **Reply / trích dẫn tin nhắn:** trả lời (reply) một tin nhắn rồi nhắn yêu cầu — agent hiểu các cụm như "cái này", "đoạn trên", "sửa chỗ đó" là chỉ tin nhắn vừa reply. Nếu bôi đen một phần trước khi reply, agent ưu tiên đúng phần được trích dẫn. Reply một tin rồi gõ `/remember` (không kèm nội dung) sẽ lưu chính tin đó vào trí nhớ dài hạn. Ngữ cảnh trích dẫn cũng được ghi vào lịch sử hội thoại kèm nhãn `↪︎ trả lời “…”`.
 
-**Tiến độ kiểu terminal:** trong lúc chạy, tin nhắn "Đang làm việc" tự cập nhật ~1 giây/lần trong một **trích dẫn thu gọn/mở rộng** (`blockquote expandable`); lệnh và code nằm trong khối mã nên dễ đọc trên điện thoại. Dòng cũ rơi khỏi đỉnh khi đầy. `/think off` ẩn suy nghĩ; `/activity on` hiện thêm output chi tiết.
+**Tiến độ kiểu terminal:** trong lúc chạy, tin nhắn "Đang làm việc" tự cập nhật ~3 giây/lần (giãn nhịp để tránh giới hạn tần suất của Telegram; hiệu ứng "đang nhập" vẫn nhấp nháy đều) trong một **trích dẫn thu gọn/mở rộng** (`blockquote expandable`); lệnh và code nằm trong khối mã nên dễ đọc trên điện thoại. Mỗi dòng tool kèm thời gian chạy (vd `⚙️ Chạy lệnh npm test · 35s`), dòng cũ rơi khỏi đỉnh khi đầy. Nút **⛔ Dừng** (hoặc `/stop`) huỷ tác vụ ngay. `/think off` ẩn suy nghĩ; `/activity on` hiện thêm output chi tiết.
 
 ## 5. Biến môi trường
 
@@ -484,7 +484,7 @@ python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
 | `WATCH_GEMINI_THINKING` | `low` | Mức suy nghĩ khi đọc ảnh/video: `low` (nhanh) hoặc `high` (kỹ hơn) |
 | `OPENCODE_MODEL` | `opencode/deepseek-v4.1-flash-free` | Model chính của agent (DeepSeek v4.1 Flash); đổi trực tiếp bằng `/model` |
 | `WEB2API_FALLBACK` | `1` | `1` = khi model chính hết hạn mức (429/hết token) hoặc lỗi server/UnknownError tự chuyển sang Gemini Web2API nội bộ |
-| `WEB2API_URL` / `WEB2API_MODEL` | `http://127.0.0.1:8081` / `gemini-3.6-flash` | Server + model dự phòng |
+| `WEB2API_URL` / `WEB2API_MODEL` | `http://127.0.0.1:8081` / `gemini-3.5-flash-thinking` | Server + model dự phòng (mặc định think cao; đổi `gemini-3.6-flash` nếu cần nhanh) |
 | `WEB2API_COOKIE_FILE` | `~/.config/aistv/web2api/cookie.txt` | File dán cookie mới; dán vào là server tự nạp lại |
 | `WEB2API_AUTOSYNC` | `1` | `1` = tự kéo/đẩy cookie nguyên văn với repo private |
 | `GEMINI_RPM` / `GEMINI_RPD` | `10` / `1500` | Tự giữ nhịp request/phút và request/ngày |

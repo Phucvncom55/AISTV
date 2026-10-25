@@ -129,7 +129,7 @@ Trong Telegram: `/web2api` (trạng thái), `/web2api import <cookie>`,
   (`@opencode/ai/providers/openai-compatible` → `http://127.0.0.1:8081/v1`).
 - `run_agent()` chạy model chính; nếu lỗi khớp `429/quota` **hoặc lỗi server**
   (`UnknownError`, `Unexpected server error`, 5xx, `fetch failed`…) **và chưa chạy
-  tool nào**, nó tự chạy lại bằng `web2api/gemini-3.6-flash`.
+  tool nào**, nó tự chạy lại bằng `web2api/gemini-3.5-flash-thinking`.
   Nếu tool đã chạy, bot dừng và báo lý do để tránh lặp tác dụng phụ.
 - Nếu OpenCode trả lỗi nội bộ `Unexpected server error … (ref err_...)` cho cả model
   dự phòng (request không hề tới server Web2API), bot gọi **thẳng** Web2API một lần
@@ -184,7 +184,7 @@ qua Web2API nên tự chuyển provider khác.
 | `WEB2API_AUTOSYNC` | `1` | `0` = không tự kéo/đẩy GitHub |
 | `WEB2API_URL` | `http://127.0.0.1:8081` | Địa chỉ server |
 | `WEB2API_API_KEY` | `sk-gemini` | Khoá nội bộ |
-| `WEB2API_MODEL` | `gemini-3.6-flash` | Model dự phòng |
+| `WEB2API_MODEL` | `gemini-3.5-flash-thinking` | Model dự phòng — mặc định **think cao** (DEEP, ~20k ký tự); đổi sang `gemini-3.6-flash` nếu cần nhanh |
 | `WEB2API_COOKIE_FILE` | `~/.config/aistv/web2api/cookie.txt` | File dán cookie |
 | `WEB2API_SECRETS_REPO` | `Phucvncom55/AISTV-secrets` | Repo private backup |
 | `WEB2API_SECRETS_PATH` | `web2api/cookie.txt` | Đường dẫn file trong repo |

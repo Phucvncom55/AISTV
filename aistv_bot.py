@@ -272,7 +272,8 @@ FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI worksp
 DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"
 LEGACY_GEMINI_MODEL = "google/gemini-3.8-flash"       # bản trước lỡ đặt Gemini làm model chính → tự quay lại model mặc định
 VISION_MODEL = "gemini-3.8-flash"                     # mắt + tai: đọc ảnh / xem video (không phải model trả lời)
-WEB2API_MODEL = (os.getenv("WEB2API_MODEL") or "gemini-3.6-flash").strip()
+WEB2API_MODEL = (os.getenv("WEB2API_MODEL") or "gemini-3.5-flash-thinking").strip()
+                                                      # mặc định think cao (server: "Deep thinking mode")
 WEB2API_FALLBACK = os.getenv("WEB2API_FALLBACK", "1") != "0"   # 0 = tắt dự phòng Gemini Web2API
 VISION_HANDOFF = os.getenv("AISTV_VISION_HANDOFF", "1") != "0"
                                                       # 1 = Gemini đọc media → DeepSeek (model chính) trả lời
@@ -2798,6 +2799,9 @@ def _token_footer(chat_id: int, saved: int = 0) -> str:
 
 _TOOL_INFO = {
     "bash": ("⚙️", "Chạy lệnh"),
+    "shell": ("⚙️", "Chạy lệnh"),         # OpenCode v2 đổi tên bash → shell
+    "execute": ("🤖", "Chạy tool phụ"),
+    "search": ("🌐", "Tìm web"),
     "write": ("📝", "Tạo file"),
     "edit": ("✏️", "Sửa code"),
     "patch": ("✏️", "Sửa code"),
@@ -2822,11 +2826,21 @@ def _tool_entry(part: dict) -> Optional[dict]:
     target, detail, lang = "", "", ""
 
     output = ""
-    if tool == "bash":
+    if tool in ("bash", "shell"):
         cmd = _clip(_redact(inp.get("command", "")), PROGRESS_DETAIL)
+        target = _clip(" ".join(str(cmd).split()), 80)
         output = _clip(_redact(st.get("output", "")), PROGRESS_DETAIL)
-        detail = _clip(f"$ {cmd}")
+        detail = _clip(f"$ {cmd}") if (len(cmd) > 80 or "\n" in cmd) else ""
         lang = "bash"
+    elif tool == "execute":
+        code = str(inp.get("code") or "")
+        m = re.search(r"tools(?:\.|\[\s*[\"'])(\w+)", code)
+        target = m.group(1) if m else ""
+        if not target:
+            detail = _clip(_redact(code))
+            lang = "javascript"
+    elif tool == "search":
+        target = _clip(_redact(inp.get("query", "")), 120)
     elif tool in ("write", "patch"):
         target = _rel(inp.get("filePath", ""))
         detail = _clip(_redact(inp.get("content", "") or inp.get("patch", "")))
@@ -2865,9 +2879,51 @@ def _tool_entry(part: dict) -> Optional[dict]:
     if not target:
         target = _clip(_redact(st.get("title") or ""), 100)
     target = " ".join(str(target).split())
+    when = st.get("time") or {}
+    status = str(st.get("status") or "").lower()
     return {"icon": icon, "label": label, "target": target, "detail": detail,
-            "output": output, "lang": lang, "ok": st.get("status") != "error",
-            "call": part.get("callID")}
+            "output": output, "lang": lang, "ok": status != "error",
+            "call": part.get("callID") or part.get("id") or part.get("partID"),
+            "status": status,
+            "tstart": when.get("start"), "tend": when.get("end"),
+            "seen": time.monotonic()}
+
+
+def _keep_tool_timing(old: dict, new: dict) -> dict:
+    """Cập nhật cùng callID: giữ mốc quan sát đầu tiên để đo thời gian chạy."""
+    new["seen"] = old.get("seen") or new.get("seen")
+    new["tstart"] = new.get("tstart") or old.get("tstart")
+    new["tend"] = new.get("tend") or old.get("tend")
+    return new
+
+
+def _dur_text(sec: float) -> str:
+    sec = max(0, int(sec))
+    if sec < 60:
+        return f"{sec}s"
+    m, s = divmod(sec, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s" if s else f"{m}m"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
+def _tool_dur(e: dict, live: bool = True) -> str:
+    """Thời gian tool đang/đã chạy: ' · 35s' (rỗng nếu chưa đo được)."""
+    try:
+        start, end = e.get("tstart"), e.get("tend")
+        if start and end:
+            sec = (float(end) - float(start)) / 1000.0
+        elif (live and str(e.get("status") or "").lower() in ("running", "pending")
+              and e.get("seen")):
+            sec = time.monotonic() - float(e["seen"])
+        else:
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    if sec < 1 or sec > 86400:
+        return ""
+    return " · " + _dur_text(sec)
 
 
 def _status_rows(chat_id: int, limit: int = PROGRESS_KEEP) -> list:
@@ -2877,6 +2933,7 @@ def _status_rows(chat_id: int, limit: int = PROGRESS_KEEP) -> list:
         line = f"{e['icon']} {mark}<b>{esc(e['label'])}</b>"
         if e.get("target"):
             line += f" <code>{esc(e['target'])}</code>"
+        line += _tool_dur(e, live=False)
         rows.append(line)
         if e.get("detail"):
             rows.append(f"<pre>{esc(e['detail'])}</pre>")
@@ -2910,7 +2967,10 @@ def _last_action(chat_id: int) -> str:
     if not items:
         return ""
     e = items[-1]
-    return f"{e['icon']} {e['label']}"
+    line = f"{e['icon']} {e['label']}"
+    if e.get("target"):
+        line += " " + _clip(e["target"], 48)
+    return line
 
 
 def _push_live(chat_id: int, kind: str, payload, call: Optional[str] = None) -> None:
@@ -2928,7 +2988,9 @@ def _push_live(chat_id: int, kind: str, payload, call: Optional[str] = None) -> 
         if call:
             for i, old in enumerate(box):
                 if old.get("call") == call:
-                    box[i] = {"kind": "tool", "entry": payload, "call": call}
+                    prev = old.get("entry") or {}
+                    box[i] = {"kind": "tool", "entry": _keep_tool_timing(prev, payload),
+                              "call": call}
                     return
         box.append({"kind": "tool", "entry": payload, "call": call})
     del box[:-300]
@@ -2976,6 +3038,7 @@ def _live_blocks(chat_id: int, detailed: bool = False) -> list:
             line += f"<b>{esc(e.get('label', 'Công cụ'))}</b>"
             if e.get("target"):
                 line += f" <code>{esc(e['target'])}</code>"
+            line += _tool_dur(e)
             detail = str(e.get("detail") or "").strip()
             if detail:
                 dlines = detail.splitlines()
@@ -3013,7 +3076,7 @@ def _render_status(chat_id: int, started: float, frame: str = "🧠") -> str:
     secs = int(time.monotonic() - started)
     last = _last_action(chat_id)
     head = (f"{frame} <i>Đang làm việc…</i> {secs}s"
-            + (f" · {esc(last)}" if last else "") + " · /stop để huỷ")
+            + (f" · {esc(last)}" if last else ""))
     detailed = bool(STATE.get("show_activity", False))
     blocks = _live_blocks(chat_id, detailed=detailed)
     if (STATE.get("show_thinking", True) and not THINKING.get(chat_id)
@@ -3133,7 +3196,7 @@ async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list) -> s
                     if call:
                         for i, old in enumerate(items):          # cùng callID: cập nhật, không lặp
                             if old.get("call") == call:
-                                items[i] = entry
+                                entry = items[i] = _keep_tool_timing(old, entry)
                                 break
                         else:
                             items.append(entry)
@@ -3781,6 +3844,7 @@ async def send_thinking(message, chat_id: int) -> None:
 # ════════════════════════════════════════════════════════════════════
 ANSWER_KB = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Viết lại", callback_data="regen"),
                                    InlineKeyboardButton("🧹 Chat mới", callback_data="new")]])
+STOP_KB = InlineKeyboardMarkup([[InlineKeyboardButton("⛔ Dừng", callback_data="stop")]])
 MENU_KB = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Trạng thái", callback_data="status"),
                                  InlineKeyboardButton("🧩 Skills", callback_data="skills"),
                                  InlineKeyboardButton("🧠 Trí nhớ", callback_data="memory")],
@@ -3789,31 +3853,39 @@ MENU_KB = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Trạng thái", call
 
 async def _ticker(bot, chat_id: int, status, started: float, stop: asyncio.Event) -> None:
     frames, i, last = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", 0, ""
-    delay = max(0.3, PROGRESS_TICK)
+    tick = max(0.3, PROGRESS_TICK)
+    edit_every = max(3.0, tick)        # sửa tin nhắn dày ~1/s sẽ bị Telegram 429
     typing_at = 0.0
+    next_edit = 0.0
     while not stop.is_set():
-        if time.monotonic() - typing_at >= 4.5:      # "đang nhập" chỉ cần ~5s/lần
-            typing_at = time.monotonic()
+        now = time.monotonic()
+        # "đang nhập" ~5s/lần, chạy độc lập với nhịp sửa tin nhắn: khi bị 429
+        # chỉ hoãn lần sửa kế tiếp, không làm tắt luôn hiệu ứng đang nhập.
+        if now - typing_at >= 4.5:
+            typing_at = now
             try:
                 await bot.send_chat_action(chat_id, ChatAction.TYPING)
             except Exception:
                 pass
-        body = _render_status(chat_id, started, frames[i % len(frames)])
-        if body != last:
-            try:
-                await status.edit_text(body, parse_mode=HTML, link_preview_options=NO_PREVIEW)
-                last = body
-                delay = max(0.3, PROGRESS_TICK)
-            except RetryAfter as e:
-                delay = min(30.0, e.retry_after + 1)
-                await asyncio.sleep(delay)
-            except BadRequest:
-                last = body
-            except Exception:
-                pass
+        if now >= next_edit:
+            body = _render_status(chat_id, started, frames[i % len(frames)])
+            if body != last:
+                try:
+                    await status.edit_text(body, parse_mode=HTML, link_preview_options=NO_PREVIEW)
+                    last = body
+                    next_edit = time.monotonic() + edit_every
+                except RetryAfter as e:
+                    next_edit = time.monotonic() + min(30.0, e.retry_after + 1)
+                except BadRequest:
+                    last = body
+                    next_edit = time.monotonic() + edit_every
+                except Exception:
+                    next_edit = time.monotonic() + edit_every
+            else:
+                next_edit = time.monotonic() + tick
         i += 1
         try:
-            await asyncio.wait_for(stop.wait(), timeout=delay)
+            await asyncio.wait_for(stop.wait(), timeout=tick)
         except asyncio.TimeoutError:
             pass
 
@@ -3841,6 +3913,10 @@ async def _finish_status(status, chat_id: int, started: float, ok: bool) -> None
             await status.delete()
         except Exception:
             pass
+    try:
+        await status.edit_reply_markup(reply_markup=None)   # bỏ nút Dừng
+    except Exception:
+        pass
     ACTIVITY.pop(chat_id, None)
     LIVE.pop(chat_id, None)
 
@@ -3872,7 +3948,8 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
     async with lock:
         async with SEM:
             await ensure_history(chat_id)        # máy mới → lấy lại hội thoại từ cloud
-            status = await message.reply_text("🧠 <i>Đang làm việc…</i>", parse_mode=HTML)
+            status = await message.reply_text("🧠 <i>Đang làm việc…</i>", parse_mode=HTML,
+                                              reply_markup=STOP_KB)
             started = time.monotonic()
             prompt = build_prompt(chat_id, text, skill, quote)
             prompt, hr_before, hr_after = await _headroom_prompt(prompt)
@@ -5816,6 +5893,23 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         REMINDERS.pop(rid, None)
         await rem_save()
         await q.answer("Đã xoá nhắc việc")
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+    if data == "stop":
+        uid = q.from_user.id if q.from_user else 0
+        if not is_owner(uid):
+            await q.answer("Chỉ chủ bot được huỷ tác vụ.", show_alert=True)
+            return
+        proc = RUNNING.get(chat_id)
+        if proc and proc.returncode is None:
+            CANCELLED.add(chat_id)
+            proc.kill()
+            await q.answer("🛑 Đang huỷ tác vụ…")
+        else:
+            await q.answer("Không có tác vụ nào đang chạy.")
         try:
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
