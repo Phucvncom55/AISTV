@@ -364,15 +364,69 @@ def _opencode_dirs() -> list:
     return dirs
 
 
+_OPENCODE_PICK: Optional[str] = None
+_OPENCODE_VER: dict = {}
+
+
+def _opencode_version(binary: str) -> str:
+    """Chuỗi phiên bản của binary (vd "1.19.4", "opencode v2.1.4"); "" nếu không chạy được."""
+    if binary in _OPENCODE_VER:
+        return _OPENCODE_VER[binary]
+    ver = ""
+    try:
+        r = subprocess.run([binary, "--version"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=20)
+        lines = (r.stdout or "").strip().splitlines()
+        ver = lines[-1].strip() if lines else ""
+    except (OSError, subprocess.SubprocessError):
+        ver = ""
+    _OPENCODE_VER[binary] = ver
+    return ver
+
+
+def _opencode_major(ver: str) -> int:
+    m = re.search(r"(\d+)\.", ver or "")
+    return int(m.group(1)) if m else 0
+
+
 def find_opencode() -> Optional[str]:
+    """Tìm binary OpenCode, ưu tiên bản v2.
+
+    Máy hay còn binary v1 do lần cài cũ (~/.opencode/bin/opencode) trong khi dữ
+    liệu ~/.local/share/opencode đã được nâng lên schema v2. Chạy v1 trên DB v2
+    sẽ báo "Database is not empty and has no session table" và /models trống,
+    nên chỉ dùng v1 khi không có bản v2 nào.
+    """
+    global _OPENCODE_PICK
+    env_bin = (os.getenv("OPENCODE_BIN") or "").strip()
+    if env_bin and Path(env_bin).exists():
+        return env_bin                    # người dùng chỉ định rõ thì tôn trọng
+    if _OPENCODE_PICK:
+        return _OPENCODE_PICK
+    cands = []
+    found = shutil.which("opencode")
+    if found:
+        cands.append(found)
     for p in _opencode_dirs():
-        sp = str(p)
-        if _safe_is_dir(p) and sp not in os.environ.get("PATH", "").split(os.pathsep):
-            os.environ["PATH"] = sp + os.pathsep + os.environ.get("PATH", "")
-    binary = os.getenv("OPENCODE_BIN")
-    if binary and Path(binary).exists():
-        return binary
-    return shutil.which("opencode")
+        exe = p / ("opencode.exe" if IS_WINDOWS else "opencode")
+        if _safe_is_dir(p) and exe.exists():
+            cands.append(str(exe))
+    seen = set()
+    v1 = None
+    pick = None
+    for c in [c for c in cands if not (c in seen or seen.add(c))]:
+        if _opencode_major(_opencode_version(c)) >= 2:
+            pick = c
+            break
+        if v1 is None:
+            v1 = c
+    pick = pick or v1
+    if pick:
+        folder = str(Path(pick).parent)
+        if folder not in os.environ.get("PATH", "").split(os.pathsep):
+            os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+        _OPENCODE_PICK = pick
+    return pick
 
 
 def _install_opencode_windows() -> Optional[str]:
@@ -489,6 +543,33 @@ def _install_opencode_unix() -> Optional[str]:
     return find_opencode()
 
 
+def _reset_opencode_cache() -> None:
+    global _OPENCODE_PICK
+    _OPENCODE_PICK = None
+    _OPENCODE_VER.clear()
+
+
+def _upgrade_opencode() -> None:
+    """Nâng OpenCode lên v2 đè lên bản cũ, GIỮ nguyên dữ liệu phiên.
+
+    Khác với cài sạch: không xoá ~/.local/share/opencode (nơi chứa phiên, memory).
+    """
+    _reset_opencode_cache()
+    if IS_WINDOWS:
+        _install_opencode_windows()
+        return
+    print("   • Đang nâng cấp OpenCode lên bản mới (giữ nguyên dữ liệu phiên)…")
+    res = _sh("curl -fsSL https://opencode.ai/install | bash")
+    if res.returncode != 0:
+        print("\n".join(res.stdout.splitlines()[-15:]))
+    if _opencode_major(_opencode_version(find_opencode() or "")) < 2 and shutil.which("npm"):
+        print("   • Thử cài bằng npm…")
+        _sh("npm install -g opencode-ai", timeout=900)
+    if _opencode_major(_opencode_version(find_opencode() or "")) < 2:
+        print("   • Tải binary trực tiếp từ GitHub Releases…")
+        _install_opencode_unix()
+
+
 def setup_environment() -> None:
     print("⏳ [1/3] Kiểm tra thư viện Python (python-telegram-bot, nest_asyncio)...")
     missing = [name for name in ("telegram", "nest_asyncio")
@@ -503,12 +584,18 @@ def setup_environment() -> None:
     print("✅ [1/3] Thư viện Python OK")
 
     print("⏳ [2/3] Cài OpenCode...")
+    current = find_opencode()
+    outdated = bool(current) and _opencode_major(_opencode_version(current)) < 2
     if IS_WINDOWS:
-        if CLEAN_INSTALL or not find_opencode():
+        if CLEAN_INSTALL or not current:
+            _reset_opencode_cache()
             for d in (Path.home() / ".local" / "share" / "opencode", Path.home() / ".opencode"):
                 shutil.rmtree(d, ignore_errors=True)
             _install_opencode_windows()
-    elif CLEAN_INSTALL or not find_opencode():
+        elif outdated:
+            _upgrade_opencode()
+    elif CLEAN_INSTALL or not current:
+        _reset_opencode_cache()
         _sh("rm -rf ~/.local/share/opencode ~/.opencode")
         res = _sh("curl -fsSL https://opencode.ai/install | bash")
         if res.returncode != 0:
@@ -519,6 +606,8 @@ def setup_environment() -> None:
         if not find_opencode():
             print("   • Tải binary trực tiếp từ GitHub Releases…")
             _install_opencode_unix()
+    elif outdated:
+        _upgrade_opencode()
     binary = find_opencode()
     if not binary:
         raise SystemExit("❌ Không cài được OpenCode.\n"
@@ -2774,6 +2863,10 @@ def _pretty_error(text: str) -> str:
     """Rút gọn JSON lỗi của OpenCode thành một dòng dễ đọc."""
     raw = (text or "").strip()
     low = raw.lower()
+    if "has no session table" in low:
+        return ("OpenCode đang chạy bản cũ (v1) trên dữ liệu của bản mới (v2). "
+                "Cài bản mới rồi chạy lại bot: curl -fsSL https://opencode.ai/install | bash "
+                "(hoặc đặt OPENCODE_BIN trỏ tới binary v2).")
     if "free usage limit" in low or "provider.free-limit" in low \
             or "freeusagelimiterror" in low:
         msg = "OpenCode đã hết hạn mức model miễn phí"
@@ -3579,7 +3672,13 @@ async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.reply_text(f"⚠️ Không lấy được danh sách model: {e}")
         return
-    lines = [l.strip() for l in clean_output(out.decode("utf-8", "replace")).splitlines() if "/" in l]
+    raw = clean_output(out.decode("utf-8", "replace"))
+    lines = [l.strip() for l in raw.splitlines() if "/" in l]
+    if not lines:
+        detail = _pretty_error(raw) or f"opencode models không trả về dữ liệu (rc={proc.returncode})"
+        await msg.reply_text(f"⚠️ Không lấy được danh sách model.\n\n{esc(detail[-800:])}",
+                             parse_mode=HTML)
+        return
     zen = [l for l in lines if l.startswith("opencode/")] or lines
     free = [l for l in zen if "free" in l] or zen          # model miễn phí lên đầu
     body = esc("\n".join(free[:40])) or "(trống)"
@@ -6724,6 +6823,14 @@ def main() -> None:
         OPENCODE_VERSION = (_r.stdout or "").strip().splitlines()[-1]
     except Exception:
         pass
+    if _opencode_major(OPENCODE_VERSION) < 2:
+        msg = (f"⚠️ OpenCode đang dùng bản cũ ({OPENCODE_VERSION or '?'}): {OPENCODE_BIN}\n"
+               "   Dữ liệu phiên bản mới (v2) sẽ không đọc được → lỗi "
+               "\"Database is not empty and has no session table\" và /models trống.\n"
+               "   Cài bản mới: curl -fsSL https://opencode.ai/install | bash "
+               "(hoặc đặt OPENCODE_BIN trỏ tới binary v2) rồi chạy lại bot.")
+        print(msg)
+        log.warning(msg)
 
     app = (ApplicationBuilder().token(BOT_TOKEN).post_init(post_init)
            .concurrent_updates(True)          # để /stop hoạt động khi đang xử lý

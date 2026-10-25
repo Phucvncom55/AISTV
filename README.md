@@ -304,6 +304,16 @@ Muốn chạy nền trên VPS:
 cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
 ```
 
+Nếu bot báo `Database is not empty and has no session table` (thường kèm `/models` trống):
+máy còn binary OpenCode **v1** ở `~/.opencode/bin/opencode` trong khi dữ liệu phiên đã là **v2**.
+Bot tự ưu tiên binary v2; nếu vẫn lỗi thì cài lại rồi xoá bản cũ:
+
+```bash
+curl -fsSL https://opencode.ai/install | bash
+rm -rf ~/.opencode           # bản v1 cũ (dữ liệu phiên v2 giữ nguyên)
+# hoặc chỉ định rõ binary: OPENCODE_BIN=$(command -v opencode) trong .env
+```
+
 ## 4. Dùng bot
 
 | Lệnh | Tác dụng |
