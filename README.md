@@ -546,9 +546,11 @@ Cấu hình nâng cao nằm ở đầu `aistv_bot.py` (model, timeout, số lị
 ### Dự phòng khi hết hạn mức (Gemini Web2API)
 
 Model chính hết token/429 hoặc lỗi từ nhà cung cấp (`UnknownError`, 5xx) → bot tự chạy
-lại bằng server Gemini Web2API ngay trên máy (không cần API key trả phí). Cookie Google
-lưu **nguyên văn** trong `~/.config/aistv/web2api/cookie.txt` và backup ở repo private
-(`web2api/cookie.txt`), nên đổi máy chỉ cần chạy bot — hoặc `python aistv_web2api.py auto`.
+lại bằng server Gemini Web2API ngay trên máy (không cần API key trả phí). Nếu OpenCode
+báo lỗi nội bộ cho cả model dự phòng, bot gọi thẳng Web2API nên vẫn trả lời được.
+Cookie Google lưu **nguyên văn** trong `~/.config/aistv/web2api/cookie.txt` và backup ở
+repo private (`web2api/cookie.txt`), nên đổi máy chỉ cần chạy bot — hoặc
+`python aistv_web2api.py auto`.
 
 ```bash
 python aistv_web2api.py auto             # kéo cookie + bật server, không cần start

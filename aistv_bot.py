@@ -2206,6 +2206,8 @@ def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple] = None,
     lines, used = [], 0
     for m in reversed(load_history(chat_id)[-MAX_HISTORY * 2:]):
         c = m["content"]
+        if _is_error_history(c):
+            continue                      # bỏ JSON lỗi cũ từng bị lưu nhầm
         c = c if len(c) <= 2500 else c[:2500] + " …[cắt bớt]"
         line = f"[{'Người dùng' if m['role'] == 'user' else 'AI STV'}]: {c}"
         b = len(line.encode()) + 1
@@ -2632,6 +2634,7 @@ _ERROR_TEXT_MARKERS = (
     "unknownerror", "provider error", "bad gateway", "service unavailable",
     "gateway timeout", "fetch failed", "socket hang up", "econnreset",
     "connection reset", "upstream connect error", "no healthy upstream",
+    "freeusagelimiterror", "provider.free-limit",
 )
 
 
@@ -2644,19 +2647,34 @@ def _is_opencode_error_output(text: str) -> bool:
 def _is_error_payload(text: str) -> bool:
     """OpenCode đôi khi in nguyên JSON/lỗi (UnknownError...) như 'câu trả lời'."""
     raw = (text or "").strip()
-    low = raw.lower()
-    if '"unknownerror"' in low or '"unexpected server error"' in low:
-        return True
-    if "ref err_" in low or "check server logs" in low:
-        return True
-    # Lỗi dạng chữ (không phải JSON) mà OpenCode in ra thay vì câu trả lời.
-    if len(raw) < 1500 and any(marker in low for marker in _ERROR_TEXT_MARKERS):
-        return True
-    if low.startswith(("error:", "unknown error", "provider error")):
-        return True
+    if not raw:
+        return False
     stripped = re.sub(r"(?is)^```[a-z0-9_-]*\s*|\s*```$", "", raw).strip()
+    low = stripped.lower()
+
+    # 1) Dạng chữ thuần: chỉ coi là lỗi khi cả phản hồi bắt đầu bằng lỗi.
+    #    (Không dùng danh sách marker cho mọi câu chữ, vì một câu trả lời giải
+    #    thích lỗi — vd. "Mình đã sửa lỗi UnknownError…" — sẽ bị bỏ oan.)
+    if low.startswith(("error:", "unknown error", "unknownerror",
+                       "unexpected server error", "provider error",
+                       "internal server error")):
+        return True
+
+    # 2) Dạng JSON do `opencode run --format json` in ra stdout.
     if not stripped.startswith(("{", "[")):
         return False
+    if "ref err_" in low or "check server logs" in low:
+        return True
+    # Object lỗi hạn mức free: type=provider.free-limit, status=429, retryAfterMs…
+    # Trước đây bị coi là câu trả lời nên còn được lưu vào lịch sử.
+    if "provider.free-limit" in low or "freeusagelimiterror" in low \
+            or '"retryafterms"' in low:
+        return True
+    if "free usage limit" in low and '"status"' in low:
+        return True
+    if re.search(r'"status"\s*:\s*(?:429|5\d\d)\b', stripped) \
+            and ('"body"' in low or '"provider.' in low):
+        return True
     candidates = [stripped.splitlines()[0].strip(), stripped]
     for candidate in candidates:
         try:
@@ -2674,12 +2692,30 @@ def _is_error_payload(text: str) -> bool:
     return False
 
 
+def _is_error_history(content: str) -> bool:
+    """Lọc bỏ nội dung lỗi từng bị lưu nhầm vào lịch sử hội thoại.
+
+    Không dùng thẳng _is_error_payload vì một câu trả lời bình thường có thể
+    nhắc tới cụm "Unexpected server error" khi đang giải thích lỗi.
+    """
+    raw = (content or "").strip()
+    if not raw:
+        return False
+    if raw.startswith(("{", "[")) and _is_error_payload(raw):
+        return True
+    return raw.lower().startswith((
+        "error:", "unknownerror", "⚠️ model chính", "⚠️ opencode không trả về",
+    ))
+
+
 _QUOTA_MARKERS = (
     "429", "too many requests", "rate limit", "rate-limit", "quota",
     "resource exhausted", "resource_exhausted", "insufficient",
     "out of tokens", "token budget", "usage limit", "limit exceeded",
     "exceeded your", "no credits", "credit balance", "payment required",
     "billing", "free trial", "402", "exhausted", "daily limit", "monthly limit",
+    "free usage limit", "freeusagelimiterror", "provider.free-limit",
+    "subscribe to opencode go", "retryafterms",
 )
 
 
@@ -2716,9 +2752,39 @@ def _is_server_error(text: str) -> bool:
     return any(marker in low for marker in _SERVER_ERROR_MARKERS)
 
 
+def _human_secs(sec: float) -> str:
+    """Đổi số giây thành chuỗi ngắn kiểu '18 giờ 20 phút'."""
+    try:
+        sec = int(max(0, sec))
+    except Exception:
+        return "?"
+    if sec < 90:
+        return f"{sec} giây"
+    minutes = sec // 60
+    if minutes < 90:
+        return f"{minutes} phút"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 36:
+        return f"{hours} giờ" + (f" {minutes} phút" if minutes else "")
+    days, hours = divmod(hours, 24)
+    return f"{days} ngày" + (f" {hours} giờ" if hours else "")
+
+
 def _pretty_error(text: str) -> str:
     """Rút gọn JSON lỗi của OpenCode thành một dòng dễ đọc."""
     raw = (text or "").strip()
+    low = raw.lower()
+    if "free usage limit" in low or "provider.free-limit" in low \
+            or "freeusagelimiterror" in low:
+        msg = "OpenCode đã hết hạn mức model miễn phí"
+        retry = re.search(r'"retryAfterMs"\s*:\s*(\d+)', raw)
+        if retry:
+            try:
+                msg += f" — thử lại sau khoảng {_human_secs(int(retry.group(1)) / 1000)}"
+            except Exception:
+                pass
+        msg += " (hoặc đổi model trả phí / dùng model dự phòng)."
+        return msg
     match = re.search(r'"message"\s*:\s*"([^"]{3,400})"', raw)
     if not match:
         return raw[-1200:]
@@ -2749,7 +2815,7 @@ def agent_model_chain() -> list:
 
 
 def _fallback_hint() -> str:
-    """Gợi ý ngắn khi model dự phòng không trả lời được (cookie/server)."""
+    """Gợi ý ngắn khi model dự phòng không trả lời được (dựa trên trạng thái thật)."""
     if web2api is None:
         return "💡 Thiếu aistv_web2api.py nên không có model dự phòng."
     try:
@@ -2763,16 +2829,20 @@ def _fallback_hint() -> str:
                 "__Secure-1PSID=...; SAPISID=... rồi thử lại.")
     if not info.get("running"):
         return "💡 Server dự phòng chưa chạy. Gửi /web2api auto để bật lại."
-    return "💡 Cookie có thể đã hết hạn. Export cookie mới rồi gửi /web2api import."
+    if not info.get("xsrf"):
+        return "💡 Web2API thiếu XSRF token. Gửi /web2api refresh rồi thử lại."
+    # Server + cookie + XSRF đều ổn → đừng đổ lỗi cookie. Xem log để biết lý do thật.
+    return ("💡 Web2API vẫn chạy và đã có cookie/XSRF — lỗi nằm ở phía Gemini "
+            "hoặc OpenCode. Gửi /web2api logs (hoặc /web2api test \"ping\") để xem chi tiết.")
 
 
 def _agent_failure(err_text: str, quota: bool = False, tools: bool = False,
                    server: bool = False) -> str:
     if server:
-        head = ("⚠️ Model chính gặp lỗi từ nhà cung cấp (UnknownError) và model dự phòng "
+        head = ("⚠️ Model chính gặp lỗi từ nhà cung cấp và model dự phòng "
                 "cũng chưa trả lời được.")
         if tools:
-            head = ("⚠️ Model chính gặp lỗi từ nhà cung cấp (UnknownError). Tác vụ đã chạy "
+            head = ("⚠️ Model chính gặp lỗi từ nhà cung cấp. Tác vụ đã chạy "
                     "được một phần nên không tự chạy lại để tránh trùng lặp.")
     elif not quota:
         head = "⚠️ OpenCode không trả về phản hồi."
@@ -2831,6 +2901,35 @@ async def _run_opencode_once(chat_id: int, prompt: str, env: dict, model: str) -
     return False, err_text, tools_ran
 
 
+async def _run_web2api_direct(prompt: str, model: str) -> tuple:
+    """Gọi thẳng server Web2API, không qua OpenCode.
+
+    OpenCode đôi khi trả 500 "Unexpected server error. Check server logs for
+    details." cho cả model dự phòng dù server Web2API vẫn khoẻ (request không
+    hề tới server). Đường tắt này giữ cho dự phòng hoạt động đúng ý nghĩa của nó.
+    Trả (ok, text hoặc lỗi).
+    """
+    if web2api is None:
+        return False, "Thiếu aistv_web2api.py nên không gọi được Web2API."
+    mid = model.split("/", 1)[1] if "/" in model else ""
+    try:
+        ready = await asyncio.to_thread(web2api.ensure_server)
+    except Exception as exc:
+        return False, f"Web2API: {type(exc).__name__}: {exc}"
+    if not ready:
+        return False, "Web2API: server chưa sẵn sàng"
+    timeout = 240 if AGENT_TIMEOUT <= 0 else max(60, min(AGENT_TIMEOUT, 300))
+    try:
+        text, err = await asyncio.to_thread(
+            web2api.chat, [{"role": "user", "content": prompt}], mid, timeout)
+    except Exception as exc:
+        return False, f"Web2API: {type(exc).__name__}: {exc}"
+    text = clean_output(text or "")
+    if text:
+        return True, text
+    return False, "Web2API: " + (err or "không trả lời")
+
+
 async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
     """Trả về (ok, text).
     Luôn gửi prompt qua stdin + `--format json` để theo dõi tiến độ và tránh giới
@@ -2866,6 +2965,17 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
             err_text = text
             quota = _is_quota_error(err_text)
             server = (not quota) and _is_server_error(err_text)
+            # Model dự phòng mà OpenCode báo lỗi nội bộ (500/UnknownError) → gọi
+            # thẳng Web2API. Chỉ làm khi chưa có tool nào chạy để tránh trùng tác dụng.
+            if model.startswith("web2api/") and not tools_ran:
+                direct_ok, direct_text = await _run_web2api_direct(prompt, model)
+                if direct_ok:
+                    log.info("Đã trả lời bằng Web2API trực tiếp: %s", model)
+                    return True, direct_text
+                log.warning("Web2API trực tiếp cũng lỗi (%s): %s", model, direct_text[-300:])
+                err_text = direct_text
+                quota = _is_quota_error(err_text)
+                server = (not quota) and _is_server_error(err_text)
             if not quota and not server:
                 if attempt + 1 < attempts:
                     continue

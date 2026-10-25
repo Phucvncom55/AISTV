@@ -131,6 +131,11 @@ Trong Telegram: `/web2api` (trạng thái), `/web2api import <cookie>`,
   (`UnknownError`, `Unexpected server error`, 5xx, `fetch failed`…) **và chưa chạy
   tool nào**, nó tự chạy lại bằng `web2api/gemini-3.6-flash`.
   Nếu tool đã chạy, bot dừng và báo lý do để tránh lặp tác dụng phụ.
+- Nếu OpenCode trả lỗi nội bộ `Unexpected server error … (ref err_...)` cho cả model
+  dự phòng (request không hề tới server Web2API), bot gọi **thẳng** Web2API một lần
+  (`web2api.chat`) rồi mới bỏ cuộc — dự phòng không còn phụ thuộc vào OpenCode.
+- Lỗi hết hạn mức model free của OpenCode (`provider.free-limit`, `status: 429`,
+  `retryAfterMs`) được nhận diện là lỗi, không còn bị lưu vào lịch sử như câu trả lời.
 - `aistv_watch.py` (đọc ảnh/video) khi Gemini API chính hết quota cũng tự gọi
   Web2API nội bộ.
 
@@ -166,7 +171,8 @@ OPENCODE_FALLBACK_MODELS=web2api/gemini-3.5-flash-thinking
 | `HTTP 400: Bad Request` khi chat | thiếu/hết XSRF → `refresh` (bot tự làm mới mỗi 6 giờ) |
 | Cookie hết hạn | export cookie mới → dán vào `cookie.txt` (dán y như copy) hoặc `import` |
 | Repo cũ chỉ có `cookies.enc` | chạy `auto` — tự giải mã, tạo `cookie.txt` nguyên văn, xoá file cũ |
-| `UnknownError` / `Unexpected server error` từ model chính | bot tự chuyển Web2API; nếu vẫn lỗi xem `logs`, `doctor`, rồi `/web2api auto` |
+| `UnknownError` / `Unexpected server error` từ model chính | bot tự chuyển Web2API; nếu OpenCode vẫn báo lỗi nội bộ, bot gọi thẳng Web2API. Vẫn lỗi thì xem `logs`, `doctor` |
+| `Free usage limit reached` (`provider.free-limit`, 429) | hết hạn mức model free của OpenCode → chờ hết `retryAfterMs`, đổi model trả phí, hoặc để bot dùng Web2API |
 | `502` / rỗng khi dùng Docker | dùng `--network host` (xem README repo gốc) |
 | Không vào được gemini.google.com | đặt `WEB2API_PROXY` (Clash/V2Ray) |
 | Không thấy model `web2api/...` | chạy `/restart` để ghi lại `workspace/opencode.json` |
