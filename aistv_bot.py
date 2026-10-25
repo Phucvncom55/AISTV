@@ -2994,16 +2994,43 @@ async def _run_opencode_once(chat_id: int, prompt: str, env: dict, model: str) -
     return False, err_text, tools_ran
 
 
+_TOOLLESS_RULES = (
+    "HƯỚNG DẪN HỆ THỐNG (quan trọng hơn yêu cầu bên dưới):\n"
+    "Bạn đang trả lời ở chế độ DỰ PHÒNG và KHÔNG có công cụ nào: không mở trình duyệt, "
+    "không chạy lệnh, không đọc/ghi/gửi file, không chụp màn hình, không truy cập mạng. "
+    "Tuyệt đối không viết như đã thực hiện, không bịa tên file, không ghi dòng "
+    "'File kết quả: ...'. Nếu người dùng yêu cầu một hành động, hãy nói thật là chưa "
+    "thực hiện được vì model chính đang lỗi, và đề nghị họ thử lại sau ít phút."
+)
+
+_FAKE_FILE_LINE = re.compile(
+    r"^\s*(?:[-*>]+\s*)?(?:file\s+(?:kết quả|đính kèm|đầu ra)|output\s+file)\s*:.*$",
+    re.IGNORECASE)
+
+
+def _drop_fake_files(text: str) -> str:
+    """Bỏ dòng 'File kết quả: …' khi câu trả lời đến từ đường không có công cụ."""
+    lines = (text or "").splitlines()
+    kept = [ln for ln in lines if not _FAKE_FILE_LINE.match(ln)]
+    if len(kept) == len(lines):
+        return text
+    note = ("⚠️ Lượt này chạy ở chế độ dự phòng (không có công cụ) nên "
+            "không có file nào được tạo.")
+    return ("\n".join(kept).strip() + "\n\n" + note).strip()
+
+
 async def _run_web2api_direct(prompt: str, model: str) -> tuple:
     """Gọi thẳng server Web2API, không qua OpenCode.
 
     OpenCode đôi khi trả 500 "Unexpected server error. Check server logs for
     details." cho cả model dự phòng dù server Web2API vẫn khoẻ (request không
     hề tới server). Đường tắt này giữ cho dự phòng hoạt động đúng ý nghĩa của nó.
+    Đường tắt này KHÔNG có công cụ nên phải nói rõ để model không bịa là đã làm.
     Trả (ok, text hoặc lỗi).
     """
     if web2api is None:
         return False, "Thiếu aistv_web2api.py nên không gọi được Web2API."
+    prompt = _TOOLLESS_RULES + "\n\nYÊU CẦU CỦA NGƯỜI DÙNG:\n" + prompt
     mid = model.split("/", 1)[1] if "/" in model else ""
     try:
         ready = await asyncio.to_thread(web2api.ensure_server)
@@ -3017,7 +3044,7 @@ async def _run_web2api_direct(prompt: str, model: str) -> tuple:
             web2api.chat, [{"role": "user", "content": prompt}], mid, timeout)
     except Exception as exc:
         return False, f"Web2API: {type(exc).__name__}: {exc}"
-    text = clean_output(text or "")
+    text = _drop_fake_files(clean_output(text or ""))
     if text:
         return True, text
     return False, "Web2API: " + (err or "không trả lời")

@@ -23,7 +23,7 @@ steps.json
     {"text": "h1"}
   ]
 """
-import argparse, json, os, shutil, subprocess, sys
+import argparse, json, os, re, shutil, subprocess, sys
 from pathlib import Path
 
 HOME = Path(os.getenv("STV_HOME") or (Path.home() / "stv_agent"))
@@ -46,7 +46,7 @@ def _pw():
 
 
 def check() -> dict:
-    info = {"playwright": False, "chromium": False}
+    info = {"playwright": False, "chromium": False, "launch": False}
     try:
         import playwright  # noqa
         info["playwright"] = True
@@ -56,9 +56,44 @@ def check() -> dict:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             info["chromium"] = Path(p.chromium.executable_path).exists()
+            if info["chromium"]:
+                # Chỉ kiểm tra đường dẫn là chưa đủ: thiếu lib hệ thống thì
+                # Chromium có file nhưng vẫn không khởi động được.
+                try:
+                    b = p.chromium.launch(args=["--no-sandbox"])
+                    b.close()
+                    info["launch"] = True
+                except Exception:
+                    info["launch"] = False
     except Exception:
         pass
     return info
+
+
+def _deps_hint(exc: Exception) -> str:
+    msg = str(exc)
+    m = re.search(r"error while loading shared libraries:\s*([^:\s]+)", msg)
+    missing = f" (thiếu {m.group(1)})" if m else ""
+    return ("Chromium không khởi động được" + missing + ".\n"
+            "Cài thư viện hệ thống:\n"
+            "  python3 -m playwright install-deps chromium\n"
+            "hoặc Debian/Ubuntu:\n"
+            "  sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 "
+            "libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 "
+            "libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 "
+            "libcairo2 libxss1 fonts-liberation")
+
+
+def _launch(p, headless: bool, slow: int = 0):
+    try:
+        return _context(p, headless, slow)
+    except BrowserError:
+        raise
+    except Exception as exc:
+        low = str(exc).lower()
+        if "shared libraries" in low or "libatk" in low or "libnss3" in low:
+            raise BrowserError(_deps_hint(exc)) from None
+        raise BrowserError(f"Không mở được trình duyệt: {str(exc)[:400]}") from None
 
 
 def _context(p, headless: bool, slow: int = 0):
@@ -125,6 +160,9 @@ def cmd_install(args) -> int:
               "libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 "
               "libxfixes3 libxrandr2 libgbm1 libasound2", file=sys.stderr)
         return 1
+    # Chromium tải xong vẫn có thể thiếu lib hệ thống (libatk, libnss3…).
+    print("· playwright install-deps chromium")
+    subprocess.run([sys.executable, "-m", "playwright", "install-deps", "chromium"])
     print("Xong. Kiểm tra: python aistv_browser.py --check")
     return 0
 
@@ -182,7 +220,11 @@ def main(argv=None) -> int:
         return 1
 
     with sync_playwright() as p:
-        ctx = _context(p, headless=not args.open, slow=args.slow)
+        try:
+            ctx = _launch(p, headless=not args.open, slow=args.slow)
+        except BrowserError as e:
+            print(f"LỖI: {e}", file=sys.stderr)
+            return 1
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         log = []
         try:
