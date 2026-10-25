@@ -31,3 +31,6 @@ state.json
 Thumbs.db
 .idea/
 .vscode/
+
+# Harness tree sinh tự động (aistv_harness2.py export)
+harness/

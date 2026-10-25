@@ -606,6 +606,7 @@ AISTV/
 ├── aistv_image.py    tạo ảnh (Web2API/Cloudflare/Gemini/Together/HF) + vẽ sơ đồ tư duy Pillow
 ├── aistv_skills.py   cài skill chuẩn Agent Skills từ GitHub/zip
 ├── aistv_github_docs.py  đọc README/docs, tìm trong tài liệu và mã GitHub
+├── aistv_harness2.py audit/tối ưu harness bằng Harness² (Google Research): export/check/diff/demo
 ├── aistv_config.py   đồng bộ config/token dùng chung cho mọi runner (sync/check/get/set/doctor)
 ├── aistv_web2api.py  dự phòng Gemini Web2API + đồng bộ cookie nguyên văn (auto/import/push/pull)
 ├── patches/          patch thêm xem ảnh + tạo ảnh cho server Web2API
@@ -622,6 +623,25 @@ AISTV/
 ├── logs/             (tạo lúc chạy) aistv.log xoay vòng 2MB × 3
 └── workspace/        (tạo lúc chạy) trí nhớ, skills, inbox, file agent tạo
 ```
+
+### Harness² (tuỳ chọn)
+
+Cầu nối sang [google-research/harness2](https://github.com/google-research/harness2) — framework tối ưu lớp
+bao quanh model (system prompt, guardrails, memory, tool guidance, skills, subagents).
+
+```bash
+git clone --depth 1 https://github.com/google-research/harness2.git /root/harness2-src
+cd /root/harness2-src && uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e '.[render]'
+python3 /root/AISTV/aistv_harness2.py status
+python3 /root/AISTV/aistv_harness2.py export   # -> /root/AISTV/harness/tree (không sửa harness thật)
+python3 /root/AISTV/aistv_harness2.py check
+python3 /root/AISTV/aistv_harness2.py demo --k 2   # offline, không cần credential
+```
+
+`export` đóng gói SOUL.md + AGENTS.md + MEMORY.md + skills thành harness tree chuẩn Harness² rồi validate
+bằng luật surface `opencode` (skill phải có `name:`/`description:` và được nêu tên, always-on ≤ 24.000 ký tự,
+script được nhắc phải tồn tại). Chạy benchmark thật (JobBench/LAB/WorkBuddy) cần `GOOGLE_CLOUD_PROJECT`,
+`HARNESS2_*_MODEL` và `gcloud auth application-default login`.
 
 Dữ liệu chạy nằm ngoài repo tại `STV_HOME` (mặc định `~/stv_agent`), nên cập nhật code không mất trí nhớ.
 

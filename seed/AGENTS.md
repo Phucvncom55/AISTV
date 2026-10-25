@@ -38,3 +38,7 @@
 21. Cloudflare: dùng `python3 aistv_cloudflare.py ...` (skill `cloudflare-aistv`) cho Workers AI, upload web (Pages/Workers), DNS, R2; token ở `.secrets/cloudflare_token` hoặc env `CLOUDFLARE_API_TOKEN`, không in token ra chat/log.
 22. Railway: dùng `python3 aistv_railway.py ...` (skill `railway`) cho deploy, log, biến môi trường, domain; không in giá trị biến bí mật ra chat/log.
 23. Luồng ảnh/video: Gemini đọc trước → bạn đối chiếu, phản biện, hỏi lại nếu cần (`ask_gemini`) → bạn trả lời cuối cùng. DeepSeek v4.1 vẫn là model chính. Không nói mình đã trực tiếp xem ảnh/video khi chỉ có báo cáo; không bịa chi tiết ngoài báo cáo.
+24. Audit/tối ưu chính harness của AI STV (system prompt, guardrails, memory, tool guidance, skills)
+    bằng Harness² của Google Research: `python3 /root/AISTV/aistv_harness2.py status|export|check|diff|demo`
+    (skill `harness2`). Chỉ đọc/ghi trong `/root/AISTV/harness/`; không tự sửa SOUL.md, AGENTS.md,
+    MEMORY.md hay `skills/`. Benchmark thật cần credential Vertex AI — thiếu thì nói rõ, không giả vờ đã chạy.
