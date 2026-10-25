@@ -189,9 +189,16 @@ def apply_image_patch(quiet: bool = True) -> tuple:
     return False, detail or "không áp được patch"
 
 
+def app_entry() -> str:
+    """Bản đang chạy: 'package' (đã vá, có ảnh) hoặc 'single' (file đơn cũ)."""
+    if image_patch_ready() and (package_dir() / "__main__.py").is_file():
+        return "package"
+    return "single"
+
+
 def app_command() -> list:
     """Chạy package đã vá khi có (hỗ trợ ảnh), không thì file đơn cũ."""
-    if image_patch_ready() and (package_dir() / "__main__.py").is_file():
+    if app_entry() == "package":
         return [_python(), "-m", "gemini_web2api", "--config", str(config_path())]
     return [_python(), str(app_script()), "--config", str(config_path())]
 
@@ -1114,7 +1121,13 @@ def _alive(pid: int) -> bool:
 
 def start(wait: float = 25.0, quiet: bool = False) -> tuple:
     if health():
-        return True, "đã chạy"
+        state = _read_json(state_path(), {}) or {}
+        entry = state.get("entry")
+        desired = app_entry()
+        # Bản cũ (single) đang chạy trong khi đã có bản vá → khởi động lại 1 lần.
+        if entry == desired or (entry is None and desired == "single"):
+            return True, "đã chạy"
+        stop()
     if not is_local():
         return False, f"server từ xa không phản hồi: {base_url()}"
     if not cleanup_cookie_header(cookie_header()):
@@ -1145,7 +1158,7 @@ def start(wait: float = 25.0, quiet: bool = False) -> tuple:
         app_command(),
         cwd=str(app_dir()), stdin=subprocess.DEVNULL, stdout=log, stderr=log,
         **kwargs)
-    _state_update(pid=proc.pid, started=time.time(), url=base_url())
+    _state_update(pid=proc.pid, started=time.time(), url=base_url(), entry=app_entry())
     deadline = time.time() + max(3, wait)
     while time.time() < deadline:
         if health():
@@ -1195,6 +1208,11 @@ def ensure_server(quiet: bool = True) -> bool:
     except Exception:
         pass
     if health():
+        state = _read_json(state_path(), {}) or {}
+        entry, desired = state.get("entry"), app_entry()
+        if entry != desired and not (entry is None and desired == "single"):
+            ok, _msg = start(quiet=quiet)      # bản cũ → tự chuyển bản vá
+            return ok
         cfg = _read_json(config_path(), {}) or {}
         if str(cfg.get("cookie_file") or "") != str(cookie_path()):
             write_config()
