@@ -1151,17 +1151,23 @@ def bootstrap_workspace() -> None:
     if web2api is not None and WEB2API_FALLBACK:
         try:
             if web2api.enabled():
+                models = {
+                    WEB2API_MODEL: {"name": f"Gemini {WEB2API_MODEL} (web2api)"},
+                    "gemini-3.5-flash-thinking": {
+                        "name": "Gemini Thinking (web2api)"},
+                }
+                for item in (os.getenv("OPENCODE_FALLBACK_MODELS") or "").split(","):
+                    item = item.strip()
+                    if item.startswith("web2api/") and item.split("/", 1)[1]:
+                        mid = item.split("/", 1)[1].strip()
+                        models.setdefault(mid, {"name": f"Gemini {mid} (web2api)"})
                 cfg["providers"] = {
                     "web2api": {
                         "name": "Gemini Web2API (nội bộ)",
                         "package": "@opencode/ai/providers/openai-compatible",
                         "settings": {"baseURL": web2api.base_url() + "/v1"},
                         "headers": {"Authorization": "Bearer " + web2api.api_key()},
-                        "models": {
-                            WEB2API_MODEL: {"name": f"Gemini {WEB2API_MODEL} (web2api)"},
-                            "gemini-3.5-flash-thinking": {
-                                "name": "Gemini Thinking (web2api)"},
-                        },
+                        "models": models,
                     }
                 }
         except Exception:
@@ -2621,6 +2627,13 @@ _OPENCODE_BAD_OUTPUT = (
     "the command line is too long",
 )
 
+_ERROR_TEXT_MARKERS = (
+    "unexpected server error", "internal server error", "unknown error",
+    "unknownerror", "provider error", "bad gateway", "service unavailable",
+    "gateway timeout", "fetch failed", "socket hang up", "econnreset",
+    "connection reset", "upstream connect error", "no healthy upstream",
+)
+
 
 def _is_opencode_error_output(text: str) -> bool:
     """CLI in help/lỗi cú pháp thay vì câu trả lời — đừng gửi nguyên văn cho người dùng."""
@@ -2629,14 +2642,22 @@ def _is_opencode_error_output(text: str) -> bool:
 
 
 def _is_error_payload(text: str) -> bool:
-    """OpenCode đôi khi in nguyên JSON lỗi (UnknownError...) như 'câu trả lời'."""
+    """OpenCode đôi khi in nguyên JSON/lỗi (UnknownError...) như 'câu trả lời'."""
     raw = (text or "").strip()
     low = raw.lower()
     if '"unknownerror"' in low or '"unexpected server error"' in low:
         return True
-    if not raw.startswith("{"):
+    if "ref err_" in low or "check server logs" in low:
+        return True
+    # Lỗi dạng chữ (không phải JSON) mà OpenCode in ra thay vì câu trả lời.
+    if len(raw) < 1500 and any(marker in low for marker in _ERROR_TEXT_MARKERS):
+        return True
+    if low.startswith(("error:", "unknown error", "provider error")):
+        return True
+    stripped = re.sub(r"(?is)^```[a-z0-9_-]*\s*|\s*```$", "", raw).strip()
+    if not stripped.startswith(("{", "[")):
         return False
-    candidates = [raw.splitlines()[0].strip(), raw]
+    candidates = [stripped.splitlines()[0].strip(), stripped]
     for candidate in candidates:
         try:
             data = json.loads(candidate)
@@ -2646,6 +2667,9 @@ def _is_error_payload(text: str) -> bool:
             continue
         name = str(data.get("name") or "")
         if name.endswith("Error") or data.get("type") == "error" or "error" in data:
+            return True
+        message = str(data.get("message") or "")
+        if message and any(marker in message.lower() for marker in _ERROR_TEXT_MARKERS):
             return True
     return False
 
@@ -2675,6 +2699,9 @@ _SERVER_ERROR_MARKERS = (
     "internal server error", "server error", "bad gateway",
     "service unavailable", "overloaded", "upstream", "econnreset",
     "socket hang up", "fetch failed", "provider error", "502", "503", "504",
+    "http 500", "http 400", "http 401", "http 403", "bad request",
+    "unauthorized", "forbidden", "invalid cookie", "cookie expired",
+    "xsrf", "snlm0e", "authentication",
 )
 
 
@@ -2721,6 +2748,24 @@ def agent_model_chain() -> list:
     return chain
 
 
+def _fallback_hint() -> str:
+    """Gợi ý ngắn khi model dự phòng không trả lời được (cookie/server)."""
+    if web2api is None:
+        return "💡 Thiếu aistv_web2api.py nên không có model dự phòng."
+    try:
+        info = web2api.status_report()
+    except Exception:
+        return "💡 Chạy /web2api để kiểm tra model dự phòng."
+    if not info.get("enabled"):
+        return "💡 Model dự phòng đang tắt (WEB2API_ENABLE=0)."
+    if not info.get("cookie"):
+        return ("💡 Chưa có cookie Gemini. Dán cookie mới: /web2api import "
+                "__Secure-1PSID=...; SAPISID=... rồi thử lại.")
+    if not info.get("running"):
+        return "💡 Server dự phòng chưa chạy. Gửi /web2api auto để bật lại."
+    return "💡 Cookie có thể đã hết hạn. Export cookie mới rồi gửi /web2api import."
+
+
 def _agent_failure(err_text: str, quota: bool = False, tools: bool = False,
                    server: bool = False) -> str:
     if server:
@@ -2737,7 +2782,14 @@ def _agent_failure(err_text: str, quota: bool = False, tools: bool = False,
     else:
         head = "⚠️ Model chính đã hết hạn mức request và model dự phòng cũng chưa trả lời được."
     detail = _pretty_error(err_text)
-    return head + (f"\n\n{detail}" if detail else "")
+    hint = ""
+    if not tools and (server or quota):
+        try:
+            if len(agent_model_chain()) > 1:
+                hint = _fallback_hint()
+        except Exception:
+            hint = ""
+    return head + (f"\n\n{detail}" if detail else "") + (f"\n\n{hint}" if hint else "")
 
 
 async def _run_opencode_once(chat_id: int, prompt: str, env: dict, model: str) -> tuple:

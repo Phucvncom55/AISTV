@@ -556,7 +556,10 @@ python aistv_web2api.py import cookies.json   # nạp cookie + tự chạy + t�
 python aistv_web2api.py doctor           # kiểm tra
 ```
 
-Dán cookie mới (header `name=value; ...`) vào `cookie.txt` là server tự nạp lại và chạy.
+Dán cookie mới vào `cookie.txt` là server tự nạp lại và chạy. Dán **y như lúc copy**:
+header `name=value; ...`, `Cookie: ...`, JSON export, Netscape `cookies.txt` (cả dòng
+`#HttpOnly_...`) hay cURL đều được tự chuẩn hoá, không cần sửa tay. Bản mã hoá cũ
+(`cookies.enc` + `passphrase`) được tự giải mã một lần sang `cookie.txt` nguyên văn.
 Trong chat: `/web2api` hoặc `/web2api import <chuỗi cookie>` (tin nhắn chứa cookie tự xoá).
 Chi tiết: [docs/WEB2API.md](docs/WEB2API.md).
 

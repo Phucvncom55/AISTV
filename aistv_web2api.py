@@ -12,7 +12,13 @@ Cookie lưu thẳng dạng chữ (KHÔNG mã hoá) để dễ sửa:
   • file đang dùng: ~/.config/aistv/web2api/cookie.txt (header `name=value; ...`);
   • bản sao trên GitHub: repo private, `web2api/cookie.txt` — sửa trực tiếp trên
     web cũng được, máy khác chạy `pull`/`auto` là có ngay;
-  • dán cookie mới vào cookie.txt là server tự nạp lại và chạy, không cần `start`.
+  • dán cookie mới vào cookie.txt là server tự nạp lại và chạy, không cần `start`;
+  • bản cũ `cookies.enc` + `passphrase` được tự giải mã một lần rồi chuyển sang
+    `cookie.txt` nguyên văn (local và repo private), sau đó xoá file mã hoá cũ.
+
+Dán cookie y như copy từ trình duyệt: header `a=b; c=d`, `Cookie: ...`, nhiều dòng,
+JSON export (Cookie-Editor / EditThisCookie), Netscape `cookies.txt` (kể cả dòng
+`#HttpOnly_...`) hoặc lệnh cURL đều được chuẩn hoá, không cần sửa tay.
 
 Cookie là bí mật sống (ai có cookie = vào được tài khoản). Chỉ đồng bộ vào
 repo PRIVATE, đừng commit vào repo public.
@@ -189,16 +195,67 @@ def _write_json(path: Path, data) -> None:
 # ────────────────────────────────────────────────────────────────────
 # Cookie: đọc / ghi / chuyển đổi
 # ────────────────────────────────────────────────────────────────────
+COOKIE_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+COOKIE_META = {
+    "path", "domain", "expires", "max-age", "samesite", "secure", "httponly",
+    "priority", "partitioned",
+}
+
+
+def _strip_cookie_wrapping(text: str) -> str:
+    """Bỏ BOM, dấu nháy và tiền tố `Cookie:` khi người dùng dán nguyên từ trình duyệt."""
+    text = (text or "").replace("\ufeff", "").replace("\r", "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"(?is)^```[a-z0-9_-]*\s*", "", text)
+        text = re.sub(r"(?is)\s*```\s*$", "", text).strip()
+    # DevTools "Copy as cURL": lấy đúng phần sau header cookie.
+    if "cookie:" in text.lower() and re.search(r"(?i)(?:^|\s)(?:-H|--header|curl)\b", text):
+        match = re.search(r"(?is)cookie\s*:\s*(.+)$", text)
+        if match:
+            text = match.group(1).strip().rstrip("\\").strip()
+            text = re.split(r"""["']""", text, maxsplit=1)[0]
+    text = re.sub(r"(?im)^\s*cookie\s*:\s*", "", text)
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
+
+
+def _cookie_pairs(raw: str) -> list:
+    """Tách `name=value` từ header / nhiều dòng; giữ giá trị y như người dùng dán."""
+    raw = _strip_cookie_wrapping(raw)
+    pairs, seen = [], set()
+    for chunk in re.split(r"[;\n]+", raw):
+        chunk = chunk.strip().strip(",").strip()
+        if not chunk or "=" not in chunk:
+            continue
+        name, val = chunk.split("=", 1)
+        name = name.strip().strip("\"'").strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        if not name or not COOKIE_NAME_RE.match(name):
+            continue
+        if name.lower() in COOKIE_META or name in seen:
+            continue
+        seen.add(name)
+        pairs.append(f"{name}={val}")
+    return pairs
+
+
 def _cookie_header(cookies: list) -> str:
     pairs = {}
     for item in cookies:
-        name = str(item.get("name") or "").strip()
-        val = str(item.get("value") or "")
-        domain = str(item.get("domain") or "google.com").lower()
-        if not name or not val:
+        if not isinstance(item, dict):
             continue
-        if not any(domain.endswith(d) for d in ("google.com", "googleusercontent.com",
-                                                "gemini.google.com")):
+        name = str(item.get("name") or "").strip()
+        value = item.get("value")
+        val = "" if value is None else str(value)
+        domain = str(item.get("domain") or "google.com").lower().lstrip(".")
+        if not name or not COOKIE_NAME_RE.match(name):
+            continue
+        if not any(domain == d or domain.endswith("." + d)
+                   for d in ("google.com", "googleusercontent.com",
+                             "gemini.google.com")):
             continue
         pairs[name] = val
     ordered = [n for n in COOKIE_PRIORITY if n in pairs]
@@ -206,37 +263,60 @@ def _cookie_header(cookies: list) -> str:
     return "; ".join(f"{n}={pairs[n]}" for n in ordered)
 
 
+def _parse_json_cookies(data) -> list:
+    if isinstance(data, dict) and "cookies" in data:
+        data = data["cookies"]
+    if isinstance(data, dict) and isinstance(data.get("cookies"), dict):
+        data = data["cookies"]
+    if isinstance(data, dict):
+        raw = data.get("cookie") or data.get("Cookie") or ""
+        cookies = []
+        if isinstance(raw, str) and raw.strip():
+            cookies = parse_cookie_input(raw)
+        if not cookies:
+            # Một số công cụ export dạng {"TÊN": "giá trị", ...}.
+            cookies = [{"name": str(k), "value": str(v)}
+                       for k, v in data.items()
+                       if isinstance(v, (str, int, float))
+                       and COOKIE_NAME_RE.match(str(k))
+                       and str(k).lower() not in COOKIE_META]
+        if data.get("sapisid") and not any(c["name"] == "SAPISID" for c in cookies):
+            cookies.append({"name": "SAPISID", "value": str(data["sapisid"])})
+        return cookies
+    if isinstance(data, list):
+        return [c for c in data
+                if isinstance(c, dict) and c.get("name")
+                and c.get("value") is not None]
+    return []
+
+
 def parse_cookie_input(text: str) -> list:
     """Nhận JSON export (Cookie-Editor / EditThisCookie), Netscape hoặc header."""
-    text = (text or "").strip()
+    text = _strip_cookie_wrapping(text)
     if not text:
         return []
     if text[0] in "[{":
         data = json.loads(text)
-        if isinstance(data, dict) and "cookies" in data:
-            data = data["cookies"]
-        if isinstance(data, dict):
-            raw = data.get("cookie") or data.get("Cookie") or ""
-            cookies = [{"name": k.strip(), "value": v.strip()}
-                       for k, v in (p.split("=", 1) for p in raw.split(";") if "=" in p)]
-            if data.get("sapisid") and not any(c["name"] == "SAPISID" for c in cookies):
-                cookies.append({"name": "SAPISID", "value": data["sapisid"]})
-            return cookies
-        if isinstance(data, list):
-            return [c for c in data if isinstance(c, dict) and c.get("name")]
-        return []
+        return _parse_json_cookies(data)
     if "\t" in text:
         cookies = []
         for line in text.splitlines():
-            if not line.strip() or line.startswith("#"):
+            line = line.rstrip()
+            if not line.strip():
+                continue
+            if line.startswith("#HttpOnly_"):     # Netscape: cookie HttpOnly vẫn là dữ liệu
+                line = line[len("#HttpOnly_"):]
+            elif line.lstrip().startswith("#"):
                 continue
             fields = line.split("\t")
             if len(fields) >= 7:
-                cookies.append({"name": fields[5], "value": fields[6],
-                                "domain": fields[0]})
-        return cookies
-    return [{"name": k.strip(), "value": v.strip()}
-            for k, v in (p.split("=", 1) for p in text.split(";") if "=" in p)]
+                cookies.append({"name": fields[5].strip(),
+                                "value": fields[6].strip(),
+                                "domain": fields[0].strip()})
+        if cookies:
+            return cookies
+    return [{"name": p.split("=", 1)[0], "value": p.split("=", 1)[1]}
+            for p in _cookie_pairs(text)]
 
 
 def load_cookies() -> list:
@@ -244,37 +324,54 @@ def load_cookies() -> list:
 
 
 def save_cookies(cookies: list) -> str:
-    cookies = [c for c in cookies if c.get("name") and c.get("value") is not None]
+    cookies = [c for c in cookies if isinstance(c, dict)
+               and c.get("name") and c.get("value") is not None]
+    header = _cookie_header(cookies)
     _write_json(export_path(), cookies)
-    cookie_path().write_text(_cookie_header(cookies), "utf-8")
+    cookie_path().parent.mkdir(parents=True, exist_ok=True)
+    cookie_path().write_text(header, "utf-8")
     try:
         cookie_path().chmod(0o600)
     except Exception:
         pass
-    return _cookie_header(cookies)
+    return header
 
 
 def cookie_header() -> str:
+    """Cookie đang dùng, luôn trả về header sạch dù người dùng dán định dạng nào."""
     if cookie_path().exists():
-        raw = cookie_path().read_text("utf-8").strip()
+        try:
+            raw = cookie_path().read_text("utf-8", "replace").strip()
+        except Exception:
+            raw = ""
         if raw:
-            if raw[0] in "[{" or "\t" in raw:   # dán JSON / Netscape vào cookie.txt
-                try:
-                    cookies = parse_cookie_input(raw)
-                    if cookies:
-                        return _cookie_header(cookies)
-                except Exception:
-                    pass
-            return raw
-    return _cookie_header(load_cookies())
+            try:
+                header = cleanup_cookie_header(raw)
+                if header:
+                    return header
+            except Exception:
+                pass
+    header = _cookie_header(load_cookies())
+    if header:
+        return header
+    return _legacy_local_header()
 
 
 def cleanup_cookie_header(raw: str) -> str:
-    """Chuẩn hoá header cookie: bỏ xuống dòng, giữ đúng các cặp name=value."""
-    raw = (raw or "").replace("\r", "")
-    raw = re.sub(r"(?im)^\s*cookie:\s*", "", raw)      # dán nguyên dòng "Cookie: ..."
-    pairs = [p.strip() for p in raw.replace("\n", "; ").split(";") if "=" in p]
-    return "; ".join(pairs)
+    """Chuẩn hoá cookie: nhận header/JSON/Netscape, bỏ xuống dòng, giữ nguyên giá trị."""
+    raw = (raw or "").replace("\ufeff", "").replace("\r", "")
+    if not raw.strip():
+        return ""
+    stripped = _strip_cookie_wrapping(raw)
+    if stripped[:1] in ("[", "{") or "\t" in stripped:
+        try:
+            cookies = parse_cookie_input(stripped)
+            header = _cookie_header(cookies)
+            if header:
+                return header
+        except Exception:
+            pass
+    return "; ".join(_cookie_pairs(raw))
 
 
 def refresh_xsrf(quiet: bool = False) -> tuple:
@@ -414,6 +511,182 @@ def _gh_get_text(path: str) -> str:
     return ""
 
 
+def _gh_delete_text(path: str, message: str) -> tuple:
+    """Xoá file cũ trên repo private (dùng khi chuyển cookie mã hoá → nguyên văn)."""
+    repo, _ = _remote_repo()
+    url = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}"
+    tokens = _gh_tokens()
+    if not tokens:
+        return False, "chưa có token GitHub"
+    last = ""
+    for _source, token in tokens:
+        if not token:
+            continue
+        try:
+            status, body = _gh_request(url, token)
+            if status != 200:
+                return True, "không có"
+            sha = json.loads(body).get("sha") or ""
+            _gh_request(url, token, "DELETE",
+                        {"message": message, "sha": sha})
+            return True, f"{repo}/{path}"
+        except Exception as exc:
+            last = f"{type(exc).__name__}: {exc}"
+    return False, last or "không xoá được"
+
+
+def _sibling_secret_path(name: str) -> str:
+    _repo, path = _remote_repo()
+    prefix = path.rsplit("/", 1)[0] if "/" in path else ""
+    return (prefix + "/" if prefix else "") + name
+
+
+def _legacy_passphrase() -> str:
+    for name in ("WEB2API_COOKIE_PASSPHRASE", "AISTV_COOKIE_PASSPHRASE"):
+        raw = value(name)
+        if raw:
+            return raw
+    for folder in (runtime_dir(), cookie_path().parent):
+        local = folder / "passphrase.txt"
+        try:
+            raw = local.read_text("utf-8").strip()
+            if raw:
+                return raw
+        except Exception:
+            continue
+    return ""
+
+
+def _decode_legacy_blob(text: str, phrase: str) -> str:
+    """Giải mã blob AES-256-GCM của bản cũ; trả cookie dạng chữ."""
+    blob = json.loads(text)
+    if not isinstance(blob, dict) or not blob.get("data"):
+        return text if isinstance(text, str) else ""
+    if not phrase:
+        raise RuntimeError("thiếu passphrase để giải mã cookie cũ")
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+    if int(blob.get("v") or 0) != 1:
+        raise RuntimeError("định dạng cookie cũ không hỗ trợ")
+    salt = base64.b64decode(blob["salt"])
+    nonce = base64.b64decode(blob["nonce"])
+    data = base64.b64decode(blob["data"])
+    key = Scrypt(salt=salt, length=32, n=2 ** 14, r=8, p=1).derive(
+        phrase.encode("utf-8"))
+    return AESGCM(key).decrypt(nonce, data, b"aistv-web2api-v1").decode(
+        "utf-8", "replace")
+
+
+def _legacy_local_payload() -> tuple:
+    """Đọc cookies.enc + passphrase.txt của bản cũ (nếu còn) → cookie dạng chữ."""
+    phrase = _legacy_passphrase()
+    seen = set()
+    for folder in (runtime_dir(), cookie_path().parent):
+        enc = folder / "cookies.enc"
+        try:
+            key = str(enc.resolve())
+        except Exception:
+            key = str(enc)
+        if key in seen or not enc.exists():
+            continue
+        seen.add(key)
+        try:
+            return _decode_legacy_blob(enc.read_text("utf-8", "replace"), phrase), str(enc)
+        except Exception:
+            continue
+    return "", ""
+
+
+def _legacy_local_header() -> str:
+    try:
+        payload, _source = _legacy_local_payload()
+        if payload:
+            return _cookie_header(parse_cookie_input(payload))
+    except Exception:
+        pass
+    return ""
+
+
+def _apply_legacy_meta(payload: str) -> None:
+    """Giữ XSRF/auth_user cũ nếu blob có sẵn (sẽ refresh lại sau)."""
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    cfg = _read_json(config_path(), {}) or {}
+    if data.get("xsrf_token") and not cfg.get("xsrf_token"):
+        cfg["xsrf_token"] = str(data["xsrf_token"])
+        cfg["xsrf_at"] = 0
+    if data.get("auth_user") and not cfg.get("auth_user"):
+        cfg["auth_user"] = str(data["auth_user"])
+    if cfg:
+        _write_json(config_path(), cfg)
+
+
+def migrate_legacy(quiet: bool = True) -> tuple:
+    """Chuyển cookie mã hoá cũ (local hoặc repo private) sang cookie.txt nguyên văn."""
+    plain = ""
+    if cookie_path().exists():
+        try:
+            plain = cleanup_cookie_header(cookie_path().read_text("utf-8", "replace"))
+        except Exception:
+            plain = ""
+    if plain:
+        return False, "đã có cookie nguyên văn"
+    json_cookies = load_cookies()
+    if json_cookies:
+        json_header = _cookie_header(json_cookies)
+        if json_header:
+            save_cookies(json_cookies)
+            return False, "đã có cookie nguyên văn"
+    payload, source = _legacy_local_payload()
+    if not payload:
+        enc_path = _sibling_secret_path("cookies.enc")
+        remote = _gh_get_text(enc_path)
+        if remote.strip():
+            phrase = _legacy_passphrase() or _gh_get_text(
+                _sibling_secret_path("passphrase")).strip()
+            try:
+                payload = _decode_legacy_blob(remote, phrase)
+                source = f"{_remote_repo()[0]}/{enc_path}"
+            except Exception as exc:
+                if not quiet:
+                    print(f"Không giải mã được cookie cũ: {exc}")
+                payload = ""
+    if not payload:
+        return False, "không có cookie cũ để chuyển"
+    try:
+        cookies = parse_cookie_input(payload)
+    except Exception as exc:
+        return False, f"cookie cũ không đọc được: {exc}"
+    if not cookies:
+        return False, "cookie cũ không có cookie hợp lệ"
+    header = save_cookies(cookies)
+    sig = cookie_sig(header)
+    _state_update(cookie_sig=sig, cookie_changed=time.time())
+    _apply_legacy_meta(payload)
+    ok_xsrf, xsrf_msg = refresh_xsrf(quiet=True)
+    pushed = False
+    if _autosync():
+        pushed, _pmsg = push_secrets(quiet=True)
+    if pushed:
+        # Bản mã hoá cũ không còn dùng — xoá để không ai tưởng vẫn là nguồn chính.
+        for name in ("cookies.enc", "passphrase"):
+            try:
+                _gh_delete_text(_sibling_secret_path(name),
+                                "chore(web2api): bo file cookie ma hoa cu")
+            except Exception:
+                pass
+        _state_update(synced_sig=cookie_sig(header), synced_at=time.time())
+    if not quiet:
+        print(f"Đã chuyển cookie cũ ({source}) → cookie.txt nguyên văn"
+              + (" + GitHub" if pushed else "")
+              + ("" if ok_xsrf else f" (XSRF lỗi: {xsrf_msg})"))
+    return True, "đã chuyển cookie cũ sang định dạng nguyên văn"
+
+
 def push_secrets(quiet: bool = False) -> tuple:
     """Đẩy cookie NGUYÊN VĂN lên repo private (một dòng, sửa được trên GitHub)."""
     header = cleanup_cookie_header(cookie_header())
@@ -431,18 +704,28 @@ def push_secrets(quiet: bool = False) -> tuple:
 
 
 def pull_secrets(quiet: bool = False) -> tuple:
-    """Tải cookie nguyên văn từ repo private, ghi cookie.txt + cookies.json."""
+    """Tải cookie nguyên văn từ repo private, ghi cookie.txt + cookies.json.
+
+    Repo cũ chỉ có `cookies.enc` + `passphrase` vẫn dùng được: tự giải mã một lần,
+    lưu `cookie.txt` nguyên văn rồi xoá file mã hoá cũ.
+    """
     repo, path = _remote_repo()
     if not _gh_tokens():
         return False, "chưa có token GitHub (gh auth login hoặc AISTV_CONFIG_TOKEN)"
     text = _gh_get_text(path)
-    if not text.strip():
-        return False, f"không tải được {repo}/{path}"
-    try:
-        cookies = parse_cookie_input(text)
-    except Exception as exc:
-        return False, f"file trên GitHub không đọc được: {exc}"
+    cookies = []
+    if text.strip():
+        try:
+            cookies = parse_cookie_input(text)
+        except Exception as exc:
+            if not quiet:
+                print(f"File trên GitHub không đọc được: {exc}")
     if not cookies:
+        migrated, migrate_msg = migrate_legacy(quiet=True)
+        if migrated:
+            return True, migrate_msg
+        if not text.strip():
+            return False, f"không tải được {repo}/{path}"
         return False, "file trên GitHub không có cookie hợp lệ"
     header = save_cookies(cookies)
     sig = cookie_sig(header)
@@ -460,16 +743,26 @@ def pull_if_safe(quiet: bool = True) -> tuple:
     if not _gh_tokens():
         return False, "chưa có token GitHub"
     text = _gh_get_text(path)
-    if not text.strip():
-        return False, f"chưa có {repo}/{path}"
-    remote = parse_cookie_input(text)
+    remote = []
+    if text.strip():
+        try:
+            remote = parse_cookie_input(text)
+        except Exception:
+            remote = []
     if not remote:
+        migrated, migrate_msg = migrate_legacy(quiet=True)
+        if migrated:
+            return True, migrate_msg
+        if not text.strip():
+            return False, f"chưa có {repo}/{path}"
         return False, "bản trên GitHub không có cookie hợp lệ"
     remote_header = _cookie_header(remote)
     rsig = cookie_sig(remote_header)
     local_header = cleanup_cookie_header(cookie_header())
     lsig = cookie_sig(local_header)
     if rsig == lsig:
+        if not cookie_path().exists():
+            save_cookies(remote)
         return False, "đã mới nhất"
     state = _read_json(state_path(), {}) or {}
     if local_header and lsig != (state.get("synced_sig") or ""):
@@ -495,10 +788,15 @@ def sync_if_changed(quiet: bool = True, push: bool = None) -> tuple:
         if time.time() - float(state.get("pull_try") or 0) < 60:
             return False, f"chưa có cookie — dán vào {cookie_path()}"
         _state_update(pull_try=time.time())
-        ok, _msg = pull_secrets(quiet=True)
+        ok, msg = pull_secrets(quiet=True)
         if not ok:
             return False, f"chưa có cookie — dán vào {cookie_path()}"
-        return True, "đã tải cookie từ GitHub"
+        return True, msg
+    if not cookie_path().exists():
+        # Cookie cũ chỉ nằm trong cookies.enc/cookies.json → ghi cookie.txt nguyên văn.
+        cookies = parse_cookie_input(header)
+        if cookies:
+            header = save_cookies(cookies)
     sig = cookie_sig(header)
     state = _read_json(state_path(), {}) or {}
     if sig == state.get("cookie_sig"):
@@ -509,6 +807,14 @@ def sync_if_changed(quiet: bool = True, push: bool = None) -> tuple:
             pushed, _pmsg = push_secrets(quiet=True)
             if pushed:
                 return True, "đã đẩy cookie lên GitHub"
+        # XSRF sống vài giờ: làm mới trước khi model dự phòng gọi Gemini.
+        if _xsrf_stale():
+            ok, _msg = refresh_xsrf(quiet=True)
+            if ok:
+                _state_update(xsrf_ok=True, xsrf_at=time.time())
+                if health():
+                    _reload_server()
+                return True, "đã làm mới XSRF token"
         return False, "không đổi"
     cookies = parse_cookie_input(header)
     if cookies:
@@ -529,12 +835,14 @@ def sync_if_changed(quiet: bool = True, push: bool = None) -> tuple:
 
 def auto(quiet: bool = True) -> tuple:
     """Một lệnh cho máy mới: kéo cookie, nạp cookie vừa dán, bật server."""
+    _migrated, migrate_msg = migrate_legacy(quiet=True)
     _pulled, pull_msg = pull_if_safe(quiet=True)
     _changed, change_msg = sync_if_changed(quiet=True)
     ok = ensure_server(quiet=True)
     detail = ("server sẵn sàng" if ok else
-              (change_msg if _changed else pull_msg if _pulled
-               else "chưa có cookie hoặc server không khởi động được"))
+              (migrate_msg if _migrated else change_msg if _changed else
+               pull_msg if _pulled else
+               "chưa có cookie hoặc server không khởi động được"))
     if not quiet:
         print(detail)
     return ok, detail
@@ -705,6 +1013,10 @@ def start(wait: float = 25.0, quiet: bool = False) -> tuple:
         return True, "đã chạy"
     if not is_local():
         return False, f"server từ xa không phản hồi: {base_url()}"
+    if not cleanup_cookie_header(cookie_header()):
+        migrate_legacy(quiet=True)
+    if cookie_header() and not cookie_path().exists():
+        save_cookies(parse_cookie_input(cookie_header()))
     if not cookie_header():
         return False, f"chưa có cookie — dán vào {cookie_path()}"
     if not app_script().exists():
@@ -761,17 +1073,31 @@ def stop() -> tuple:
 def ensure_server(quiet: bool = True) -> bool:
     """Bảo đảm server sẵn sàng; dùng từ bot/watch trước khi fallback.
 
-    Tự kéo cookie trên GitHub (máy mới), tự nạp cookie vừa dán vào cookie.txt
-    và tự bật server — không cần chạy `start`.
+    Tự kéo cookie trên GitHub (máy mới), tự chuyển cookie mã hoá cũ, tự nạp
+    cookie vừa dán vào cookie.txt và tự bật server — không cần chạy `start`.
     """
     if not enabled():
         return False
+    if not cleanup_cookie_header(cookie_header()):
+        try:
+            migrate_legacy(quiet=True)
+        except Exception:
+            pass
     try:
         sync_if_changed(quiet=True)
     except Exception:
         pass
     if health():
-        return True
+        cfg = _read_json(config_path(), {}) or {}
+        if str(cfg.get("cookie_file") or "") != str(cookie_path()):
+            write_config()
+            _reload_server()
+        if _xsrf_stale():
+            ok, _msg = refresh_xsrf(quiet=True)
+            if ok:
+                _state_update(xsrf_ok=True, xsrf_at=time.time())
+                _reload_server()
+        return health()
     if not is_local() or not autostart():
         return False
     try:
@@ -789,6 +1115,9 @@ def _reload_server() -> None:
         return
     try:
         stop()
+        deadline = time.time() + 8
+        while health(0.8) and time.time() < deadline:
+            time.sleep(0.3)
         start(quiet=True)
     except Exception:
         pass
@@ -891,7 +1220,10 @@ def generate(parts: list, model: str = "", timeout: float = 240,
 # ────────────────────────────────────────────────────────────────────
 def cmd_import(path: str, push: bool = None) -> int:
     try:
-        raw = Path(path).expanduser().read_text("utf-8", "replace")
+        if path in ("-", "/dev/stdin"):
+            raw = sys.stdin.read()
+        else:
+            raw = Path(path).expanduser().read_text("utf-8", "replace")
     except Exception as exc:
         print(f"Không đọc được file: {exc}")
         return 1
@@ -981,7 +1313,8 @@ def main(argv=None) -> int:
     p_setup.add_argument("--force", action="store_true", help="ghi lại config.json")
 
     p_import = sub.add_parser("import", help="nạp cookie export từ trình duyệt")
-    p_import.add_argument("file")
+    p_import.add_argument("file", nargs="?", default="-",
+                          help="file cookie, hoặc - để dán từ stdin")
     p_import.add_argument("--push", action="store_true", help="(mặc định) đẩy cookie lên GitHub")
     p_import.add_argument("--no-push", action="store_true", help="không đẩy lên GitHub")
 

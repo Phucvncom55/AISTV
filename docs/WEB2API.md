@@ -37,11 +37,17 @@ Cookie lưu **nguyên văn**, không mã hoá, không passphrase:
 %USERPROFILE%\.config\aistv\web2api\cookie.txt   # Windows
 ```
 
-Mở file, dán header dạng:
+Mở file, dán **y như lúc copy** — không cần sửa tay. Nhận được tất cả các dạng:
 
-```
-__Secure-1PSID=...; __Secure-1PSIDTS=...; SAPISID=...; SSID=...; HSID=...; SID=...
-```
+- header: `__Secure-1PSID=...; SAPISID=...; SSID=...`
+- nguyên dòng `Cookie: __Secure-1PSID=...`
+- nhiều dòng, mỗi dòng một cookie
+- JSON export của Cookie-Editor / EditThisCookie / Playwright
+- Netscape `cookies.txt` (kể cả dòng `#HttpOnly_...`)
+- lệnh `curl` có `-H 'cookie: ...'`
+
+Giá trị được giữ nguyên (không mã hoá, không cắt, không giải mã URL), chỉ bỏ khoảng
+trắng thừa và sắp xếp lại cho dễ đọc.
 
 Lưu file là bot tự phát hiện (vòng lặp nền ~10 giây), làm mới XSRF, khởi động lại
 server và đẩy bản mới lên GitHub. **Không cần gõ `start`.**
@@ -94,7 +100,9 @@ WEB2API_COOKIE_FILE=D:\cookies\gemini.txt   # đổi luôn file local
 Repo phải là **private**. Cookie Google là mật khẩu sống: ai có cookie vào được
 tài khoản. Không commit vào repo public, không dán vào chat công khai.
 
-Bản mã hoá cũ (`web2api/cookies.enc`, `passphrase.txt`) không còn dùng — có thể xoá.
+Bản mã hoá cũ (`web2api/cookies.enc`, `passphrase`) được **tự động** giải mã một
+lần, lưu thành `web2api/cookie.txt` nguyên văn rồi xoá khỏi repo private. Không cần
+làm tay; nếu muốn kiểm tra: `python aistv_web2api.py auto` rồi `doctor`.
 
 ## 4. Lệnh quản lý
 
@@ -155,9 +163,10 @@ OPENCODE_FALLBACK_MODELS=web2api/gemini-3.5-flash-thinking
 
 | Triệu chứng | Cách xử lý |
 | --- | --- |
-| `HTTP 400: Bad Request` khi chat | thiếu/hết XSRF → `refresh` |
-| Cookie hết hạn | export cookie mới → dán vào `cookie.txt` hoặc `import` |
-| `UnknownError` / `Unexpected server error` từ model chính | bot tự chuyển Web2API; nếu vẫn lỗi xem `logs` và `doctor` |
+| `HTTP 400: Bad Request` khi chat | thiếu/hết XSRF → `refresh` (bot tự làm mới mỗi 6 giờ) |
+| Cookie hết hạn | export cookie mới → dán vào `cookie.txt` (dán y như copy) hoặc `import` |
+| Repo cũ chỉ có `cookies.enc` | chạy `auto` — tự giải mã, tạo `cookie.txt` nguyên văn, xoá file cũ |
+| `UnknownError` / `Unexpected server error` từ model chính | bot tự chuyển Web2API; nếu vẫn lỗi xem `logs`, `doctor`, rồi `/web2api auto` |
 | `502` / rỗng khi dùng Docker | dùng `--network host` (xem README repo gốc) |
 | Không vào được gemini.google.com | đặt `WEB2API_PROXY` (Clash/V2Ray) |
 | Không thấy model `web2api/...` | chạy `/restart` để ghi lại `workspace/opencode.json` |
