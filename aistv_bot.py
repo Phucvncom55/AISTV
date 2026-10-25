@@ -2414,6 +2414,7 @@ def _headroom_fn():
             os.environ.setdefault("HEADROOM_OFFLINE", "1")   # không tải model, không gửi telemetry
             from headroom import compress as fn
             _headroom_compress = fn
+            logging.getLogger("headroom").setLevel(logging.WARNING)   # đỡ rác log mỗi lượt
         except Exception as e:                      # thiếu thư viện / lỗi cài đặt
             log.info("Headroom không dùng được: %s", e)
     return _headroom_compress
