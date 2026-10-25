@@ -218,12 +218,15 @@ AISTV_CONFIG_TOKEN=github_pat_xxx \
   Colab, VPS) nhận thay đổi ở lần chạy sau.
 - **Máy đã đăng nhập `gh` thì không cần PAT**: cả `run.bat` và `run.sh` tự dùng `gh auth token`.
   Windows chỉ cần dán lệnh `bootstrap.bat` ở trên — không hỏi token nếu repo private đã có.
-- **Chưa có `gh` lẫn PAT**: runner tự mở **device login** — in mã `XXXX-XXXX` và
-  `https://github.com/login/device`, chờ bạn nhập (tối đa `AISTV_DEVICE_TIMEOUT`, mặc định 600s)
-  rồi lưu token vào `config.env` và chạy tiếp, không phải nhập lại lần sau.
+- **Chưa có `gh` lẫn PAT**: nếu máy đã có `config.env`/`.env` với token bot thì script
+  **không hỏi đăng nhập** (chỉ đồng bộ repo private khi đã có sẵn token). Máy mới trắng thì
+  runner tự mở **device login** — in mã `XXXX-XXXX` và `https://github.com/login/device`,
+  chờ bạn nhập (tối đa `AISTV_DEVICE_TIMEOUT`, mặc định 600s) rồi lưu token vào `config.env`
+  và `.env` của repo, chạy tiếp, không phải nhập lại lần sau.
   Tắt bằng `AISTV_DEVICE_LOGIN=0`.
-- Token đã lưu bởi `/github login` trong bot (`<STV_HOME>/.secrets/github_token`) cũng được
-  dùng để đọc repo private — đăng nhập một lần là cả hai phía dùng chung.
+- Token đã lưu bởi `/github login` trong bot (`<STV_HOME>/.secrets/github_token`, kể cả
+  `/content/drive/MyDrive/stv_agent/.secrets/github_token` trên Colab) cũng được dùng để đọc
+  repo private — đăng nhập một lần là cả hai phía dùng chung.
 - PAT (nếu muốn tự cấp): *Settings → Developer settings → Fine-grained tokens* → chỉ chọn repo
   `AISTV-secrets`, quyền **Contents: Read-only**.
 - Lưu lệnh trên vào ghi chú/alias → các lần sau chạy là bot lên, không hỏi gì.

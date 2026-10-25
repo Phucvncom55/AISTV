@@ -270,7 +270,8 @@ def _pick(name: str, values: dict) -> str:
 def stored_github_token() -> str:
     """Token bot đã lưu sau /github login — dùng được cả khi máy không có gh."""
     stv = (os.getenv("STV_HOME") or "").strip()
-    candidates = [Path("/content/stv_agent/.secrets/github_token"),
+    candidates = [Path("/content/drive/MyDrive/stv_agent/.secrets/github_token"),
+                  Path("/content/stv_agent/.secrets/github_token"),
                   Path.home() / "stv_agent" / ".secrets" / "github_token",
                   Path.home() / ".secrets" / "github_token",
                   repo_dir() / ".secrets" / "github_token"]
@@ -492,6 +493,13 @@ def fetch_remote(values: dict = None, log=None) -> tuple:
     if repo.lower() not in ("0", "off", "none", "false"):
         path = _pick("AISTV_CONFIG_PATH", values) or DEFAULT_PATH
         tokens = github_tokens(values)
+        # Máy đã có cấu hình cục bộ (token bot) thì không chặn 10 phút chờ đăng nhập
+        # GitHub chỉ để làm mới cấu hình — bot vẫn chạy bình thường.
+        if not tokens and _have_token(values):
+            if log:
+                log("[config] Đã có cấu hình cục bộ — bỏ qua đăng nhập GitHub. "
+                    "Muốn đồng bộ repo private: đặt AISTV_CONFIG_TOKEN hoặc `gh auth login`.")
+            return merged, labels
         # Chưa có nguồn token nào → đăng nhập GitHub bằng mã một lần rồi tiếp tục.
         if not tokens:
             token = github_device_login(log=log)
