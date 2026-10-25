@@ -630,13 +630,15 @@ Cầu nối sang [google-research/harness2](https://github.com/google-research/h
 bao quanh model (system prompt, guardrails, memory, tool guidance, skills, subagents).
 
 ```bash
-git clone --depth 1 https://github.com/google-research/harness2.git /root/harness2-src
-cd /root/harness2-src && uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e '.[render]'
+python3 /root/AISTV/aistv_harness2.py setup    # clone + venv 3.12 + dependency (chạy lại vẫn an toàn)
 python3 /root/AISTV/aistv_harness2.py status
 python3 /root/AISTV/aistv_harness2.py export   # -> /root/AISTV/harness/tree (không sửa harness thật)
 python3 /root/AISTV/aistv_harness2.py check
 python3 /root/AISTV/aistv_harness2.py demo --k 2   # offline, không cần credential
 ```
+
+`setup` clone Harness² vào `/root/harness2-src` (đổi bằng `HARNESS2_ROOT`) và cài vào venv riêng;
+không cần clone tay. Máy chưa có `uv` thì cài theo hướng dẫn ở trên.
 
 `export` đóng gói SOUL.md + AGENTS.md + MEMORY.md + skills thành harness tree chuẩn Harness² rồi validate
 bằng luật surface `opencode` (skill phải có `name:`/`description:` và được nêu tên, always-on ≤ 24.000 ký tự,

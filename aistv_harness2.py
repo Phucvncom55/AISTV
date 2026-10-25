@@ -17,6 +17,7 @@ rác trong SOUL.md / AGENTS.md / MEMORY.md / skills/. Tool này:
   run     -> chạy benchmark thật (cần Vertex AI), passthrough sang harness2
 
 CLI
+  python aistv_harness2.py setup              # clone + venv + dependency (idempotent)
   python aistv_harness2.py status
   python aistv_harness2.py export [--out DIR] [--json]
   python aistv_harness2.py check [--tree DIR]
@@ -39,6 +40,7 @@ from pathlib import Path
 AI = Path(__file__).resolve().parent
 WORKSPACE = Path(os.getenv("AISTV_WORKSPACE") or "/content/stv_agent/workspace")
 H2_ROOT = Path(os.getenv("HARNESS2_ROOT") or "/root/harness2-src")
+H2_REPO = os.getenv("HARNESS2_REPO") or "https://github.com/google-research/harness2.git"
 H2_PY = H2_ROOT / ".venv" / "bin" / "python"
 TREE_OUT = AI / "harness" / "tree"
 ALWAYS_ON_CAP = 24_000
@@ -282,6 +284,46 @@ def creds() -> dict:
     return env
 
 
+def cmd_setup(a) -> int:
+    """Cài Harness² lần đầu (hoặc bổ sung venv) — chạy lại nhiều lần vẫn an toàn."""
+    uv = shutil.which("uv")
+    if not uv:
+        print("❌ Thiếu `uv`. Cài: curl -LsSf https://astral.sh/uv/install.sh | sh")
+        return 2
+    if not (H2_ROOT / "pyproject.toml").is_file():
+        if H2_ROOT.exists() and any(H2_ROOT.iterdir()):
+            print(f"❌ {H2_ROOT} đang có dữ liệu nhưng không phải Harness². "
+                  f"Đổi HARNESS2_ROOT hoặc dọn thư mục đó rồi thử lại.")
+            return 2
+        H2_ROOT.parent.mkdir(parents=True, exist_ok=True)
+        print(f"→ git clone {H2_REPO} {H2_ROOT}", flush=True)
+        rc = subprocess.run(["git", "clone", "--depth", "1", H2_REPO, str(H2_ROOT)]).returncode
+        if rc:
+            print("❌ Clone Harness² thất bại (kiểm tra mạng/quyền truy cập GitHub).")
+            return rc
+    if not H2_PY.is_file():
+        print(f"→ uv venv --python 3.12 {H2_ROOT / '.venv'}", flush=True)
+        rc = subprocess.run([uv, "venv", "--python", "3.12", ".venv"],
+                            cwd=str(H2_ROOT)).returncode
+        if rc:
+            print("❌ Tạo venv Python 3.12 thất bại.")
+            return rc
+    print("→ uv pip install -e '.[render]'", flush=True)
+    rc = subprocess.run([uv, "pip", "install", "--python", str(H2_PY), "-e", ".[render]"],
+                        cwd=str(H2_ROOT)).returncode
+    if rc:
+        print("❌ Cài dependency của Harness² thất bại.")
+        return rc
+    check = subprocess.run([str(H2_PY), "-c", "import harness2"], cwd=str(H2_ROOT),
+                           capture_output=True, text=True)
+    if check.returncode:
+        print("❌ Harness² đã cài nhưng import lỗi:")
+        print((check.stderr or "").strip()[-500:])
+        return check.returncode
+    print("✅ Harness² sẵn sàng.")
+    return cmd_status(argparse.Namespace(tree=None))
+
+
 def cmd_status(a) -> int:
     ok_repo = (H2_ROOT / "pyproject.toml").is_file()
     print(f"{'✅' if ok_repo else '❌'} Harness²: {H2_ROOT} (commit {h2_commit() if ok_repo else '-'})")
@@ -353,6 +395,9 @@ def main() -> int:
 
     ap = argparse.ArgumentParser(description="Cầu nối AI STV ↔ Harness²")
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("setup", help="clone + cài Harness² (chạy lại vẫn an toàn)")
+    s.set_defaults(fn=cmd_setup)
 
     s = sub.add_parser("status", help="tình trạng cài đặt + credential")
     s.add_argument("--tree")

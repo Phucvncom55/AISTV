@@ -15,6 +15,7 @@ Audit và tối ưu "harness" của chính AI STV (prompt, guardrails, memory, t
 `python3 /root/AISTV/aistv_harness2.py <lệnh>` (Harness² ở `/root/harness2-src`, venv Python 3.12, commit 1cfe254).
 
 ```bash
+python3 aistv_harness2.py setup           # clone + venv + dependency (idempotent)
 python3 aistv_harness2.py status          # cài đặt + credential còn thiếu
 python3 aistv_harness2.py export          # SOUL+AGENTS+MEMORY+skills -> /root/AISTV/harness/tree
 python3 aistv_harness2.py check           # validate tree bằng luật surface opencode
