@@ -2,9 +2,11 @@
 """Kiểm tra chế độ khách: phân loại yêu cầu, giới hạn chống spam, tách dữ liệu."""
 import os
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -15,6 +17,7 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456789:AAH" + "x" * 32)
 
 import aistv_bot as bot  # noqa: E402
 import aistv_image as image  # noqa: E402
+import aistv_watch as watch  # noqa: E402
 import aistv_web2api as web2api  # noqa: E402
 
 
@@ -140,6 +143,41 @@ class GuestImageLinkTest(unittest.TestCase):
         order = image.provider_order("guest")
         self.assertTrue(set(order) <= {"web2api", "pollinations"})
         self.assertIn("pollinations", order)
+
+
+class GuestVisionTest(unittest.TestCase):
+    def test_guest_vision_uses_web2api_only(self):
+        for kind in ("image", "video"):
+            args = bot._guest_vision_args(kind, "file.bin", "nội dung gì?")
+            self.assertIn("--engine", args)
+            self.assertEqual(args[args.index("--engine") + 1], "web2api")
+            self.assertNotIn("auto", args)
+            self.assertIn("--question", args)
+
+    def test_explicit_web2api_does_not_spend_owner_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "a.png"
+            src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+            with mock.patch.object(watch, "api_key", return_value="FAKE"), \
+                    mock.patch.object(watch, "web2api_generate", return_value=(None, "lỗi")), \
+                    mock.patch.object(watch, "gemini_generate") as fallback:
+                answer, err = watch.gemini_image([str(src)], Path(td), "x", engine="web2api")
+            self.assertIsNone(answer)
+            self.assertIn("lỗi", err)
+            fallback.assert_not_called()
+
+    def test_auto_still_falls_back_for_owner(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "a.png"
+            src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+            with mock.patch.object(watch, "api_key", return_value="FAKE"), \
+                    mock.patch.object(watch, "web2api_media_ready", return_value=True), \
+                    mock.patch.object(watch, "web2api_generate", return_value=(None, "lỗi")), \
+                    mock.patch.object(watch, "gemini_generate",
+                                      return_value=({"model": "m", "text": "ok"}, None)) as fallback:
+                answer, err = watch.gemini_image([str(src)], Path(td), "x", engine="auto")
+            self.assertEqual(answer["text"], "ok")
+            fallback.assert_called_once()
 
 
 class DisplayNameTest(unittest.TestCase):

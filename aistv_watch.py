@@ -1633,6 +1633,7 @@ def gemini_image(sources, workdir: Path, question="", engine="auto"):
     gemini = chỉ API; web2api = chỉ server Gemini Web nội bộ (không cần API key).
     """
     key = api_key("GEMINI_API_KEY") or api_key("GOOGLE_API_KEY")
+    explicit_web2api = engine == "web2api"
     if engine == "auto":
         engine = "web2api" if web2api_media_ready() else "gemini"
     if engine != "web2api" and not key:
@@ -1690,7 +1691,7 @@ def gemini_image(sources, workdir: Path, question="", engine="auto"):
             instructions += "\n\nGhi chú: một số nguồn không tải được: " + "; ".join(errors)
         if engine == "web2api":
             answer, err = web2api_generate(parts + [{"text": instructions}], timeout=300)
-            if err and key:
+            if err and key and not explicit_web2api:
                 ep("↪︎ Web2API lỗi — thử Gemini API…")
                 answer, err = gemini_generate(parts + [{"text": instructions}], timeout=300)
         else:

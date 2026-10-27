@@ -34,7 +34,7 @@ KIẾN TRÚC (học theo OpenClaw)
 # ════════════════════════════════════════════════════════════════════
 # 0. CẤU HÌNH — chỉnh ở đây
 # ════════════════════════════════════════════════════════════════════
-import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib, importlib.util, mimetypes, unicodedata
+import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib, importlib.util, mimetypes, unicodedata, tempfile
 import base64, hmac
 import secrets, threading, textwrap, urllib.request, urllib.parse, urllib.error
 from pathlib import Path
@@ -280,7 +280,7 @@ VISION_MODEL = "gemini-3.8-flash"                     # mắt + tai: đọc ản
 WEB2API_MODEL = (os.getenv("WEB2API_MODEL") or "gemini-3.5-flash-thinking").strip()
                                                       # mặc định think cao (server: "Deep thinking mode")
 WEB2API_FALLBACK = os.getenv("WEB2API_FALLBACK", "1") != "0"   # 0 = tắt dự phòng Gemini Web2API
-# Người không phải chủ bot: chỉ được chat chữ qua Web2API (không lệnh, không ảnh/video).
+# Người không phải chủ bot: chat, tạo ảnh/sơ đồ và nhờ Gemini đọc ảnh/video qua Web2API.
 GUEST_CHAT = os.getenv("AISTV_GUEST_CHAT", "1") != "0"         # 0 = chặn hoàn toàn người lạ
 GUEST_MODEL = (os.getenv("AISTV_GUEST_MODEL") or WEB2API_MODEL).strip()
 GUEST_TIMEOUT = max(30, int(os.getenv("AISTV_GUEST_TIMEOUT", "180") or 180))
@@ -297,6 +297,14 @@ GUEST_MEDIA_RATE = max(1, int(os.getenv("AISTV_GUEST_MEDIA_RATE", "6") or 6))  #
 GUEST_MEDIA_CHAT_RATE = max(1, int(os.getenv("AISTV_GUEST_MEDIA_CHAT", "20") or 20))
 GUEST_MEDIA_PARALLEL = max(1, int(os.getenv("AISTV_GUEST_MEDIA_PARALLEL", "1") or 1))
 GUEST_MEDIA_TIMEOUT = max(60, int(os.getenv("AISTV_GUEST_MEDIA_TIMEOUT", "180") or 180))
+# Đọc ảnh/video miễn phí cho khách (Gemini qua Web2API, không dùng key của chủ).
+GUEST_VISION = os.getenv("AISTV_GUEST_VISION", "1") != "0"      # 0 = tắt đọc ảnh/video
+GUEST_VISION_GAP = max(3, int(os.getenv("AISTV_GUEST_VISION_GAP", "10") or 10))
+GUEST_VISION_RATE = max(1, int(os.getenv("AISTV_GUEST_VISION_RATE", "20") or 20))   # lượt/giờ/người
+GUEST_VISION_CHAT_RATE = max(1, int(os.getenv("AISTV_GUEST_VISION_CHAT", "40") or 40))
+GUEST_VISION_PARALLEL = max(1, int(os.getenv("AISTV_GUEST_VISION_PARALLEL", "1") or 1))
+GUEST_VISION_TIMEOUT = max(60, int(os.getenv("AISTV_GUEST_VISION_TIMEOUT", "420") or 420))
+GUEST_VISION_MAX_SEC = max(30, int(os.getenv("AISTV_GUEST_VISION_SEC", "600") or 600))
 GUEST_HIST_USERS = max(20, int(os.getenv("AISTV_GUEST_HIST_USERS", "200") or 200))
 GUEST_MODEL_OPTIONS = list(dict.fromkeys(
     [GUEST_MODEL, "gemini-3.6-flash", "gemini-3.8-flash"]
@@ -972,8 +980,8 @@ def _strip_bot_mention(text: str, context) -> str:
 
 GUEST_REJECT_AT: dict = {}
 GUEST_NOTICE = ("🔒 Lệnh quản trị chỉ dành cho chủ bot.\n"
-                "Bạn vẫn chat, hỏi code, tạo ảnh/sơ đồ miễn phí: nhắc @bot, "
-                "reply tin của bot hoặc dùng /ask.")
+                "Bạn vẫn chat, hỏi code, tạo ảnh/sơ đồ, nhờ đọc ảnh/video miễn phí: "
+                "nhắc @bot, reply tin của bot hoặc dùng /ask.")
 GUEST_OFF_NOTICE = "⛔ Bot này chỉ dành cho chủ bot."
 
 
@@ -4967,6 +4975,7 @@ def build_status(chat_id: int) -> str:
         f"• Tạo ảnh: {esc(image_provider_line())}\n"
         f"• Khách: chat {'bật' if GUEST_CHAT and GUEST_ACTIVE['chat'] else 'tắt'} · "
         f"ảnh {'bật' if GUEST_ACTIVE['media'] else 'tắt'} · "
+        f"đọc ảnh/video {'bật' if GUEST_ACTIVE['vision'] else 'tắt'} · "
         f"{len(GUEST_HIST)} ngữ cảnh · {len(GUEST_BANS)} bị chặn\n"
         f"• Giới hạn 1 yêu cầu: {to}\n"
         f"• Hội thoại: {len(load_history(chat_id)) // 2} lượt đã lưu\n"
@@ -6000,19 +6009,24 @@ GUEST_HELP_TEXT = (
     "Nhắc <code>@tên_bot</code>, reply tin của bot hoặc dùng <code>/ask</code>:\n"
     "• Hỏi đáp, giải thích, viết/sửa code…\n"
     "• <code>vẽ ảnh …</code>, <code>sơ đồ tư duy …</code>, <code>biểu đồ …</code>\n"
+    "• Gửi ảnh/video kèm câu hỏi — Gemini đọc miễn phí (trong nhóm: reply tin bot "
+    "hoặc ghi <code>@tên_bot</code> vào chú thích)\n"
     "• <code>/ask &lt;câu hỏi&gt;</code> — chắc chắn bot nhận được trong nhóm\n"
     "• <code>/model</code> — xem/đổi model trả lời (mặc định Gemini)\n"
     "• <code>/new</code> — xoá ngữ cảnh riêng của bạn\n"
-    "Giới hạn: 10 tin/phút và 1 ảnh/45 giây mỗi người. Lệnh quản trị chỉ dành cho chủ bot."
+    "Giới hạn: 10 tin/phút, 1 ảnh/45 giây, ảnh/video cách nhau 10 giây mỗi người. "
+    "Lệnh quản trị chỉ dành cho chủ bot."
 )
 GUEST_HIST: dict = {}
 GUEST_LOCKS = defaultdict(asyncio.Lock)
 GUEST_LAST: dict = {}
 GUEST_LAST_MEDIA: dict = {}
+GUEST_LAST_VISION: dict = {}
 GUEST_SEM = asyncio.Semaphore(GUEST_CONCURRENCY)
 GUEST_MEDIA_SEM = asyncio.Semaphore(GUEST_MEDIA_PARALLEL)
+GUEST_VISION_SEM = asyncio.Semaphore(GUEST_VISION_PARALLEL)
 GUEST_MODEL_BY_USER: dict = {}
-GUEST_ACTIVE = {"chat": GUEST_FEATURES, "media": GUEST_MEDIA}
+GUEST_ACTIVE = {"chat": GUEST_FEATURES, "media": GUEST_MEDIA, "vision": GUEST_VISION}
 GUEST_BANS: dict = {}
 GUEST_NOTICE_AT: dict = {}
 
@@ -6052,6 +6066,8 @@ GUEST_TEXT_LIMIT = _WindowLimit(GUEST_RATE, 60)
 GUEST_CHAT_LIMIT = _WindowLimit(GUEST_CHAT_RATE, 60)
 GUEST_MEDIA_LIMIT = _WindowLimit(GUEST_MEDIA_RATE, 3600)
 GUEST_MEDIA_CHAT_LIMIT = _WindowLimit(GUEST_MEDIA_CHAT_RATE, 3600)
+GUEST_VISION_LIMIT = _WindowLimit(GUEST_VISION_RATE, 3600)
+GUEST_VISION_CHAT_LIMIT = _WindowLimit(GUEST_VISION_CHAT_RATE, 3600)
 
 _GUEST_MINDMAP_RE = re.compile(r"(?i)\b(sơ đồ tư duy|sodo tu duy|mind\s?map|mindmap)\b")
 _GUEST_INFO_RE = re.compile(r"(?i)\b(infographic|đồ hoạ thông tin|do hoa thong tin)\b")
@@ -6286,6 +6302,140 @@ async def _guest_media_reply(msg, context, chat, user, text: str, kind: str = "i
     return True
 
 
+def _guest_vision_ready(kind: str) -> bool:
+    """Web2API đã vá đọc ảnh (image) hoặc video chưa."""
+    if web2api is None:
+        return False
+    try:
+        if not web2api.enabled():
+            return False
+        return bool(web2api.image_patch_ready() if kind == "image"
+                    else web2api.media_patch_ready())
+    except Exception:
+        return False
+
+
+def _guest_vision_args(kind: str, source: str, question: str) -> list:
+    """Lệnh aistv_watch.py chỉ dùng Web2API — không chạm key Gemini của chủ."""
+    ask = _vision_question(kind, question)
+    if kind == "image":
+        return ["image", source, "--engine", "web2api", "--json", "--question", ask]
+    return ["watch", source, "--engine", "web2api", "--detail", "balanced",
+            "--json", "--question", ask]
+
+
+async def _guest_vision_gate(msg, chat, user, label: str) -> bool:
+    """Kiểm tra giới hạn trước khi tải file; True = bị chặn (đã báo)."""
+    key = _guest_key(chat, user)
+    now = time.monotonic()
+    wait = GUEST_VISION_GAP - (now - GUEST_LAST_VISION.get(key, 0.0))
+    if wait > 0:
+        if _guest_notice(("vision-gap", key)):
+            await msg.reply_text(f"⏳ Mỗi {label} cách nhau {GUEST_VISION_GAP}s. "
+                                 f"Thử lại sau {int(wait) + 1}s nhé.")
+        return True
+    wait = GUEST_VISION_LIMIT.check(key)
+    if wait > 0:
+        if _guest_notice(("vision-hour", key)):
+            await msg.reply_text(f"⏳ Bạn đã dùng hết {GUEST_VISION_RATE} lượt đọc {label}/giờ. "
+                                 f"Còn khoảng {int(wait // 60) + 1} phút.")
+        return True
+    wait = GUEST_VISION_CHAT_LIMIT.check(chat.id)
+    if wait > 0:
+        if _guest_notice(("vision-chat", chat.id)):
+            await msg.reply_text("⏳ Nhóm đang gửi nhiều ảnh/video, thử lại sau ít phút nhé.")
+        return True
+    GUEST_LAST_VISION[key] = now
+    return False
+
+
+async def _guest_vision_reply(msg, chat, user, source: str, question: str, kind: str) -> None:
+    """Khách nhờ Gemini đọc ảnh/video qua Web2API (miễn phí, không dùng key chủ)."""
+    label = "ảnh" if kind == "image" else "video"
+    started = time.monotonic()
+    status = await msg.reply_text(f"👁️ <i>Đang đọc {label}…</i>", parse_mode=HTML)
+    acquired = False
+    try:
+        await asyncio.wait_for(GUEST_VISION_SEM.acquire(), timeout=20)
+        acquired = True
+        rc, out, err = await asyncio.to_thread(
+            _watch_cli, _guest_vision_args(kind, source, question), GUEST_VISION_TIMEOUT)
+        text, _model = _vision_parse(out) if rc == 0 else ("", "")
+        if not text:
+            lines = [x.strip() for x in (err or out or "").splitlines() if x.strip()]
+            detail = _redact_secrets(lines[-1] if lines else "lỗi không rõ")
+            raise RuntimeError(detail)
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        await send_rich(msg, _clip(text, 9000),
+                        f"<i>👁️ AI STV · {time.monotonic() - started:.1f}s</i>")
+        hist = _guest_hist(_guest_key(chat, user))
+        if GUEST_HISTORY:
+            hist += [{"role": "user", "content": _clip(f"[{label}] {question}".strip(), 600)},
+                     {"role": "assistant", "content": _clip(text, 3000)}]
+            del hist[:-GUEST_HISTORY * 2]
+    except asyncio.TimeoutError:
+        try:
+            await status.edit_text("⏳ Đang có người gửi ảnh/video, bạn thử lại sau ít phút nhé.",
+                                   parse_mode=HTML)
+        except Exception:
+            pass
+    except Exception as exc:
+        detail = oneline(_redact_secrets(str(exc)), 400)
+        log.warning("Khách đọc %s lỗi: %s", label, detail)
+        try:
+            await status.edit_text(
+                f"⚠️ Chưa đọc được {label}.\n<code>{esc(detail)}</code>", parse_mode=HTML)
+        except Exception:
+            pass
+    finally:
+        if acquired:
+            GUEST_VISION_SEM.release()
+
+
+async def _guest_media_read(update, context, kind: str, media, name: str, mime: str) -> None:
+    """Tải ảnh/video của khách vào thư mục tạm riêng, đọc xong xoá ngay."""
+    msg, chat, user = (update.effective_message, update.effective_chat,
+                       update.effective_user)
+    if not (msg and chat and user):
+        return
+    caption = (msg.caption or "").strip()
+    if chat.type != "private":
+        if not _addressed_to_bot(msg, context, caption):
+            return
+        caption = _strip_bot_mention(caption, context)
+    if _guest_banned(user.id):
+        return
+    label = "ảnh" if kind == "image" else "video"
+    if not GUEST_ACTIVE["vision"]:
+        await msg.reply_text(f"👁️ Đọc {label} đang tắt cho khách.")
+        return
+    if not _guest_vision_ready(kind):
+        await msg.reply_text(
+            f"⚠️ Chưa bật đọc {label} miễn phí. "
+            "Chủ bot gửi <code>/gemini restart</code> để bật.", parse_mode=HTML)
+        return
+    if kind == "video":
+        duration = int(getattr(media, "duration", 0) or 0)
+        if duration > GUEST_VISION_MAX_SEC:
+            await msg.reply_text(
+                f"⚠️ Video dài {duration // 60} phút; khách xem tối đa "
+                f"{GUEST_VISION_MAX_SEC // 60} phút.")
+            return
+    if await _guest_vision_gate(msg, chat, user, label):
+        return
+    tmp = Path(tempfile.mkdtemp(prefix="aistv_guest_vision_"))
+    try:
+        dest = await _download_telegram_file(msg, media, name, mime, folder=tmp)
+        if not dest:
+            return
+        await _guest_vision_reply(msg, chat, user, str(dest), caption, kind)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 async def _guest_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
@@ -6299,7 +6449,7 @@ async def _guest_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
 
 
 async def _guest_answer(msg, context, chat, user, text: str, direct: bool = False) -> None:
-    """Khách: Gemini miễn phí cho chat/code/ảnh/sơ đồ; không tool, không dữ liệu của chủ."""
+    """Khách: Gemini miễn phí cho chat/code/ảnh/sơ đồ/đọc media; không tool, không dữ liệu của chủ."""
     if not GUEST_ACTIVE["chat"] or _guest_banned(user.id):
         return
     if chat.type != "private" and not direct:
@@ -6963,7 +7113,8 @@ async def _tool_image_job(chat_id: int, prompt: str, style: str = "",
             pass
 
 
-async def _download_telegram_file(message, file_obj, name: str, mime: str = "") -> Optional[Path]:
+async def _download_telegram_file(message, file_obj, name: str, mime: str = "",
+                                  folder: Optional[Path] = None) -> Optional[Path]:
     if getattr(file_obj, "file_size", None) and file_obj.file_size > 20 * 1024 * 1024:
         await message.reply_text("⚠️ File quá lớn (giới hạn 20MB của Telegram Bot API).")
         return None
@@ -6973,17 +7124,26 @@ async def _download_telegram_file(message, file_obj, name: str, mime: str = "") 
         safe += mimetypes.guess_extension(mime) or ".jpg"
     elif mime.startswith("video/") and ext not in VIDEO_EXTS:
         safe += ".mp4"
-    dest = INBOX / f"{int(time.time())}_{safe}"
+    base = Path(folder) if folder else INBOX
+    base.mkdir(parents=True, exist_ok=True)
+    dest = base / f"{int(time.time())}_{safe}"
     await (await file_obj.get_file()).download_to_drive(dest)
     return dest
 
 
-@guard()
+@guard(allow_guest=True)
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    if update.effective_chat.type != "private" or not msg.photo:
+    if not msg.photo:
         return
+    chat, user = update.effective_chat, update.effective_user
     photo = msg.photo[-1]
+    if not authorized(user.id, chat.type):
+        await _guest_media_read(update, context, "image", photo,
+                                f"photo_{photo.file_unique_id}.jpg", "image/jpeg")
+        return
+    if chat.type != "private":
+        return
     dest = await _download_telegram_file(msg, photo, f"photo_{photo.file_unique_id}.jpg", "image/jpeg")
     if not dest:
         return
@@ -6998,16 +7158,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   quoted_msg=msg)
 
 
-@guard()
+@guard(allow_guest=True)
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    if update.effective_chat.type != "private":
-        return
     media = msg.video or msg.video_note or msg.animation
     if not media:
         return
+    chat, user = update.effective_chat, update.effective_user
     mime = getattr(media, "mime_type", "") or "video/mp4"
     name = getattr(media, "file_name", "") or f"video_{getattr(media, 'file_unique_id', int(time.time()))}.mp4"
+    if not authorized(user.id, chat.type):
+        await _guest_media_read(update, context, "video", media, name, mime)
+        return
+    if chat.type != "private":
+        return
     dest = await _download_telegram_file(msg, media, name, mime)
     if not dest:
         return
@@ -7023,17 +7187,26 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   quoted_msg=msg)
 
 
-@guard()
+@guard(allow_guest=True)
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    if update.effective_chat.type != "private" or not msg.document:
+    if not msg.document:
         return
+    chat, user = update.effective_chat, update.effective_user
     doc = msg.document
     mime = (doc.mime_type or "").lower()
     name = doc.file_name or f"file_{doc.file_unique_id}"
     ext = Path(name).suffix.lower()
     is_image = mime.startswith("image/") or ext in IMAGE_EXTS
     is_video = mime.startswith("video/") or ext in VIDEO_EXTS
+    if not authorized(user.id, chat.type):
+        if is_image:
+            await _guest_media_read(update, context, "image", doc, name, mime or "image/jpeg")
+        elif is_video:
+            await _guest_media_read(update, context, "video", doc, name, mime or "video/mp4")
+        return
+    if chat.type != "private":
+        return
     dest = await _download_telegram_file(msg, doc, name, mime)
     if not dest:
         return
@@ -8832,9 +9005,10 @@ async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         GUEST_ACTIVE["chat"] = action == "on"
         if not GUEST_CHAT:
             GUEST_ACTIVE["media"] = False
+            GUEST_ACTIVE["vision"] = False
         await msg.reply_text(
             f"👥 Khách: <b>{'BẬT' if GUEST_CHAT else 'TẮT'}</b>"
-            + ("" if GUEST_CHAT else " (ảnh/sơ đồ cũng tắt)"), parse_mode=HTML)
+            + ("" if GUEST_CHAT else " (ảnh/sơ đồ, đọc ảnh/video cũng tắt)"), parse_mode=HTML)
         return
     if action in ("images", "media", "anh", "ảnh", "image"):
         sub = args[1] if len(args) > 1 else ""
@@ -8844,6 +9018,16 @@ async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         GUEST_ACTIVE["media"] = sub == "on" and GUEST_ACTIVE["chat"]
         await msg.reply_text(
             f"🎨 Tạo ảnh cho khách: <b>{'BẬT' if GUEST_ACTIVE['media'] else 'TẮT'}</b>",
+            parse_mode=HTML)
+        return
+    if action in ("vision", "read", "see", "doc", "media-read"):
+        sub = args[1] if len(args) > 1 else ""
+        if sub not in ("on", "off"):
+            await msg.reply_text("Dùng: <code>/guest vision on|off</code>", parse_mode=HTML)
+            return
+        GUEST_ACTIVE["vision"] = sub == "on" and GUEST_ACTIVE["chat"]
+        await msg.reply_text(
+            f"👁️ Đọc ảnh/video cho khách: <b>{'BẬT' if GUEST_ACTIVE['vision'] else 'TẮT'}</b>",
             parse_mode=HTML)
         return
     if action == "ban":
@@ -8896,6 +9080,7 @@ async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action and action not in ("status", "st"):
         await msg.reply_text(
             "Lệnh: <code>/guest on|off</code> · <code>/guest images on|off</code> · "
+            "<code>/guest vision on|off</code> · "
             "<code>/guest ban &lt;id&gt; [phút]</code> · <code>/guest unban &lt;id&gt;</code> · "
             "<code>/guest bans</code>", parse_mode=HTML)
         return
@@ -8904,6 +9089,7 @@ async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👥 <b>Chế độ khách</b>\n"
         f"• Chat/code: {'BẬT' if GUEST_CHAT and GUEST_ACTIVE['chat'] else 'TẮT'}\n"
         f"• Tạo ảnh/sơ đồ: {'BẬT' if GUEST_ACTIVE['media'] else 'TẮT'}\n"
+        f"• Đọc ảnh/video: {'BẬT' if GUEST_ACTIVE['vision'] else 'TẮT'}\n"
         f"• Model mặc định: <code>{esc(GUEST_MODEL)}</code> "
         f"({len(GUEST_MODEL_OPTIONS)} model cho khách)\n"
         f"• Ngữ cảnh riêng đang giữ: {len(GUEST_HIST)} người\n"
@@ -9016,7 +9202,7 @@ COMMANDS = [
     ("push", "Đẩy code lên GitHub (đồng bộ sang Windows)"),
     ("restart", "Khởi động lại bot"),
     ("key", "Xem / đặt API key"),
-    ("gemini", "Gemini dự phòng — chat, ảnh, sơ đồ"),
+    ("gemini", "Gemini dự phòng — chat, ảnh, video, sơ đồ"),
     ("ask", "Hỏi trong nhóm không cần @mention"),
     ("guest", "Bật/tắt, chặn khách"),
     ("files", "File trong workspace"), ("get", "Tải file về"), ("help", "Hướng dẫn"),

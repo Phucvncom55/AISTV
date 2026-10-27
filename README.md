@@ -56,6 +56,9 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 | `AISTV_GUEST_MEDIA` | tuỳ chọn | `0` để khách không tạo ảnh/sơ đồ (mặc định bật) |
 | `AISTV_GUEST_RATE` | tuỳ chọn | Số câu chat mỗi phút của khách (mặc định `10`) |
 | `AISTV_GUEST_MEDIA_GAP` | tuỳ chọn | Giây tối thiểu giữa 2 ảnh của khách (mặc định `45`) |
+| `AISTV_GUEST_VISION` | tuỳ chọn | `0` để khách không nhờ đọc ảnh/video (mặc định bật) |
+| `AISTV_GUEST_VISION_RATE` | tuỳ chọn | Số lượt đọc ảnh/video mỗi giờ của khách (mặc định `20`) |
+| `AISTV_GUEST_VISION_SEC` | tuỳ chọn | Video dài tối đa khách được xem, tính bằng giây (mặc định `600`) |
 | `AISTV_GUEST_MODELS` | tuỳ chọn | Thêm model cho khách chọn bằng `/model`, cách nhau dấu phẩy (mặc định Gemini + Gemini Flash) |
 
 Đặt key ngay trong chat (tin nhắn chứa key tự xoá): `/key gemini AIza...`
@@ -74,7 +77,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 - **Email:** `/email inbox`, `/email read`, `/email send`, `/email setup`.
 - **File:** gửi file cho bot → lưu `workspace/inbox/` để agent đọc; `/files`, `/get <đường dẫn>`.
 - **Skills:** `/skills` xem, `/skill <tên> <yêu cầu>` ép dùng, `/skill add owner/repo/path` cài thêm. Có sẵn: debug, TDD, code review, PR, thiết kế codebase, spec/ticket, dạy học, viết lách, frontend design, MCP server…
-- **Chế độ khách (miễn phí):** người ngoài `ALLOWED_USER_IDS` vẫn chat, hỏi code, tạo ảnh và vẽ sơ đồ tư duy/infographic/biểu đồ bằng Gemini miễn phí — không tốn key của chủ bot. Trong nhóm, khách nhắc `@bot`, reply tin của bot hoặc dùng `/ask`; mỗi người một ngữ cảnh riêng, có giới hạn chống spam (10 câu/phút, 1 ảnh/45 giây, 6 ảnh/giờ). Chủ bot bật/tắt và chặn bằng `/guest`.
+- **Chế độ khách (miễn phí):** người ngoài `ALLOWED_USER_IDS` vẫn chat, hỏi code, tạo ảnh, vẽ sơ đồ tư duy/infographic/biểu đồ và nhờ Gemini **đọc ảnh/video** — tất cả qua Gemini miễn phí, không tốn key của chủ bot. Trong nhóm, khách nhắc `@bot`, reply tin của bot hoặc dùng `/ask`; ảnh/video thì reply tin bot hoặc ghi `@bot` vào chú thích. Mỗi người một ngữ cảnh riêng, có giới hạn chống spam (10 câu/phút, 1 ảnh/45 giây, ảnh/video cách nhau 10 giây, video tối đa 10 phút). Chủ bot bật/tắt và chặn bằng `/guest`.
 
 ## 4. Lệnh hay dùng
 
@@ -84,7 +87,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 | `/plan <yêu cầu>` | Chia bước và tự thực thi |
 | `/undo` `/push` | Hoàn tác · đẩy code lên GitHub |
 | `/model` `/models` | Xem / đổi model |
-| `/gemini` | Chủ bot: trạng thái, bật/tắt, làm mới Gemini dự phòng (chat, ảnh, sơ đồ) |
+| `/gemini` | Chủ bot: trạng thái, bật/tắt, làm mới Gemini dự phòng (chat, ảnh, video, sơ đồ) |
 | `/remember` `/memory` | Trí nhớ dài hạn |
 | `/remind` `/reminders` `/task` | Nhắc việc · việc định kỳ |
 | `/see` `/video` `/image` `/mindmap` | Ảnh · video · tạo ảnh · sơ đồ tư duy |
@@ -95,7 +98,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 | `/files` `/get` | Xem / tải file agent tạo |
 | `/allow` `/deny` | Cấp / thu quyền (chủ bot) |
 | `/ask <câu hỏi>` | Hỏi bot ngay cả trong nhóm, không cần @mention (khách dùng được) |
-| `/guest` | Chủ bot: bật/tắt khách, tắt ảnh, chặn/mở người spam (`ban`, `unban`, `bans`) |
+| `/guest` | Chủ bot: bật/tắt khách, tắt ảnh hoặc đọc ảnh/video, chặn/mở người spam (`ban`, `unban`, `bans`) |
 
 ## 5. Lưu ý
 
