@@ -53,6 +53,55 @@ class InputTest(unittest.TestCase):
         self.assertTrue(masked.startswith("ghp_"))
         self.assertNotIn("x" * 10, masked)
 
+    def test_validate_email(self):
+        self.assertEqual(vm.validate_email("  User.Name@Gmail.COM "), "user.name@gmail.com")
+        self.assertEqual(vm.validate_email("a@b.vn", suffix=".vn"), "a@b.vn")
+        for bad in ("", "abc", "a@b", "a b@c.com", "a@b.c0m!", "@b.com"):
+            with self.assertRaises(vm.VMError):
+                vm.validate_email(bad)
+        with self.assertRaises(vm.VMError):
+            vm.validate_email("a@b.vn", suffix=".com")
+
+    def test_code_helpers(self):
+        code = vm.new_code()
+        self.assertEqual(len(code), 6)
+        self.assertTrue(code.isdigit())
+        a = vm.code_digest(42, code)
+        self.assertEqual(a, vm.code_digest(42, code))
+        self.assertNotEqual(a, vm.code_digest(43, code))
+        self.assertEqual(len(a), 64)
+        self.assertNotIn(code, a)
+
+    def test_dispatch_inputs_include_recipient(self):
+        calls = []
+
+        def fake_api(method, path, pat, body=None, **kw):
+            calls.append((path, body))
+            return 204, {}
+
+        with mock.patch.object(vm, "_api", side_effect=fake_api):
+            vm.dispatch_workflow("someone", "ghp_" + "a" * 36, "windows-2022", 120,
+                                 ref="main", chat_id=123456, requested_by="Khách A")
+        inputs = calls[-1][1]["inputs"]
+        self.assertEqual(inputs["windows_version"], "windows-2022")
+        self.assertEqual(inputs["timeout_minutes"], "120")
+        self.assertEqual(inputs["telegram_chat_id"], "123456")
+        self.assertEqual(inputs["requested_by"], "Khách A")
+
+    def test_cancel_run(self):
+        seen = {}
+
+        def fake_api(method, path, pat, body=None, **kw):
+            seen["path"] = path
+            return 202, {}
+
+        with mock.patch.object(vm, "_api", side_effect=fake_api):
+            vm.cancel_run("someone", "ghp_" + "a" * 36, "987")
+        self.assertTrue(seen["path"].endswith("/actions/runs/987/cancel"))
+        with mock.patch.object(vm, "_api", return_value=(409, {})):
+            with self.assertRaises(vm.VMError):
+                vm.cancel_run("someone", "ghp_" + "a" * 36, 987)
+
 
 class SyncForkTest(unittest.TestCase):
     def _sync(self, status, body):

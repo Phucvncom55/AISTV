@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
+import re
+import secrets as _secrets
 import sys
 import time
 import urllib.error
@@ -82,6 +85,30 @@ def validate_credentials(pat: str, tailscale_authkey: str) -> tuple:
     if not key or any(ch.isspace() for ch in key):
         raise VMError("Tailscale auth key không hợp lệ (cần chuỗi tskey-…, không có dấu cách).")
     return pat, key
+
+
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+$")
+
+
+def validate_email(value: str, suffix: str = ".com") -> str:
+    """Chuẩn hoá email khách; chỉ nhận domain đúng hậu tố (mặc định .com)."""
+    email = (value or "").strip().lower()
+    if len(email) > 254 or not EMAIL_RE.match(email):
+        raise VMError("Email không hợp lệ — ví dụ: ten.ban@gmail.com")
+    suffix = (suffix or "").strip().lower()
+    if suffix and not email.endswith(suffix):
+        raise VMError(f"Chỉ chấp nhận email đuôi {suffix} (ví dụ ten.ban@gmail.com).")
+    return email
+
+
+def new_code() -> str:
+    """Mã xác minh 6 số."""
+    return f"{_secrets.randbelow(1_000_000):06d}"
+
+
+def code_digest(uid, code: str) -> str:
+    """Băm mã xác minh gắn với người dùng (không lưu mã thô trên cloud)."""
+    return hashlib.sha256(f"{uid}:{str(code or '').strip()}".encode("utf-8")).hexdigest()
 
 
 def _api(method: str, path: str, token: str, payload: Optional[dict] = None,
@@ -195,11 +222,20 @@ def set_secret(login: str, pat: str, name: str, value: str,
 
 
 def dispatch_workflow(login: str, pat: str, windows: str, minutes: int,
-                      ref: str = "main") -> None:
-    """Kích hoạt workflow_dispatch với tham số runner + thời gian chạy."""
+                      ref: str = "main", chat_id="", requested_by: str = "") -> None:
+    """Kích hoạt workflow_dispatch với tham số runner + thời gian chạy.
+
+    `chat_id` đi qua input của lần chạy (không phải secret) để mỗi máy ảo gửi
+    thông tin đăng nhập đúng người yêu cầu, kể cả khi nhiều người tạo cùng lúc.
+    """
+    inputs = {"windows_version": windows, "timeout_minutes": str(minutes)}
+    if str(chat_id or "").strip():
+        inputs["telegram_chat_id"] = str(chat_id).strip()
+    if str(requested_by or "").strip():
+        inputs["requested_by"] = str(requested_by).strip()[:64]
     code, body = _api(
         "POST", f"/repos/{login}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}/dispatches", pat,
-        {"ref": ref, "inputs": {"windows_version": windows, "timeout_minutes": str(minutes)}},
+        {"ref": ref, "inputs": inputs},
         timeout=30)
     if code in (201, 204):
         return
@@ -212,8 +248,8 @@ def dispatch_workflow(login: str, pat: str, windows: str, minutes: int,
     raise VMError(f"Kích hoạt workflow thất bại (HTTP {code}): {body.get('message', '')}")
 
 
-def latest_run_url(login: str, pat: str) -> str:
-    """URL của lần chạy mới nhất của workflow (rỗng nếu chưa thấy)."""
+def latest_run(login: str, pat: str) -> dict:
+    """Lần chạy mới nhất của workflow: {"id": int, "url": str} (0/"" nếu chưa thấy)."""
     for _ in range(10):
         time.sleep(3)
         code, body = _api("GET", f"/repos/{login}/{REPO_NAME}/actions/runs?per_page=5",
@@ -222,15 +258,45 @@ def latest_run_url(login: str, pat: str) -> str:
             continue
         for run in body.get("workflow_runs") or []:
             if str(run.get("path") or "").endswith(WORKFLOW_FILE):
-                return str(run.get("html_url") or "")
-    return ""
+                try:
+                    run_id = int(run.get("id") or 0)
+                except (TypeError, ValueError):
+                    run_id = 0
+                return {"id": run_id, "url": str(run.get("html_url") or "")}
+    return {"id": 0, "url": ""}
+
+
+def latest_run_url(login: str, pat: str) -> str:
+    """URL của lần chạy mới nhất (giữ cho code cũ)."""
+    return latest_run(login, pat)["url"]
+
+
+def cancel_run(login: str, pat: str, run_id) -> None:
+    """Huỷ một lần chạy → runner và máy ảo bị xoá."""
+    try:
+        run_id = int(run_id)
+    except (TypeError, ValueError):
+        raise VMError("Không xác định được lần chạy cần dừng.")
+    if run_id <= 0:
+        raise VMError("Không xác định được lần chạy cần dừng (thiếu run id).")
+    code, body = _api("POST", f"/repos/{login}/{REPO_NAME}/actions/runs/{run_id}/cancel",
+                      pat, {}, timeout=30)
+    if code in (202, 204):
+        return
+    if code == 404:
+        raise VMError("Không tìm thấy lần chạy (có thể đã kết thúc).")
+    if code == 409:
+        raise VMError("Máy ảo đã kết thúc nên không cần dừng.")
+    raise VMError(f"Dừng máy ảo thất bại (HTTP {code}): {body.get('message', '')}")
 
 
 def create_vm(pat: str, tailscale_authkey: str, telegram_bot_token: str = "",
-              telegram_chat_id="", windows_version: str = "", timeout_minutes=None) -> dict:
+              telegram_chat_id="", windows_version: str = "", timeout_minutes=None,
+              requested_by: str = "") -> dict:
     """Tạo máy ảo trên tài khoản của PAT; trả dict mô tả kết quả.
 
-    Thông tin đăng nhập KHÔNG đi qua hàm này — workflow tự gửi qua Telegram DM.
+    Thông tin đăng nhập KHÔNG đi qua hàm này — workflow tự gửi qua Telegram DM
+    tới đúng `telegram_chat_id` của lần chạy.
     """
     pat, key = validate_credentials(pat, tailscale_authkey)
     windows = normalize_windows(windows_version)
@@ -249,10 +315,9 @@ def create_vm(pat: str, tailscale_authkey: str, telegram_bot_token: str = "",
         raise VMError(f"Không lấy được public key của {login}/{REPO_NAME} (HTTP {code}).")
     set_secret(login, pat, "TAILSCALE_AUTHKEY", key, pk)
     set_secret(login, pat, "TELEGRAM_BOT_TOKEN", telegram_bot_token, pk)
-    set_secret(login, pat, "TELEGRAM_CHAT_ID", str(telegram_chat_id or ""), pk)
 
-    dispatch_workflow(login, pat, windows, minutes, ref)
-    run_url = latest_run_url(login, pat)
+    dispatch_workflow(login, pat, windows, minutes, ref, telegram_chat_id, requested_by)
+    run = latest_run(login, pat)
 
     return {
         "login": login,
@@ -261,7 +326,8 @@ def create_vm(pat: str, tailscale_authkey: str, telegram_bot_token: str = "",
         "sync": sync,
         "windows": windows,
         "minutes": minutes,
-        "run_url": run_url,
+        "run_id": run["id"],
+        "run_url": run["url"],
         "workflow_url": f"https://github.com/{login}/{REPO_NAME}/actions/workflows/{WORKFLOW_FILE}",
     }
 

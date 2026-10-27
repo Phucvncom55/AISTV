@@ -1460,23 +1460,27 @@ CREATE_VM_TOOL_JS = r'''import { tool } from "@opencode-ai/plugin"
 
 export default tool({
   description: [
-    "Create a Windows VM (GitHub Actions runner) for integration tests on the user's account:",
-    "the bot forks the AISTV repo if needed, stores the Tailscale key as a repo secret, and",
-    "dispatches the Windows integration-test workflow. The workflow connects to Tailscale",
-    "(tag:vm-user), opens RDP and sends the login details (IP, username, password) to the user",
-    "via private Telegram DM. Pass the GitHub PAT and Tailscale auth key the user gave you;",
-    "omit them to reuse credentials saved earlier. Never print the token/key back to the user",
-    "and never write them into files.",
+    "Create or stop a Windows VM (GitHub Actions runner) for the user's integration tests.",
+    "By default the bot uses the admin credentials already configured (GitHub token + saved",
+    "Tailscale key): the bot forks the AISTV repo if needed, stores the Tailscale key as a repo",
+    "secret, and dispatches the Windows integration-test workflow. The workflow connects to",
+    "Tailscale (tag:vm-user), opens RDP and sends the login details (IP, username, password,",
+    "Tailscale key and how to log in) via private Telegram DM to the person who asked — never",
+    "print credentials in the chat or in the workflow log. Pass github_token/tailscale_authkey",
+    "only if the user explicitly gives their own; otherwise omit them so the admin credentials",
+    "are reused. Use action=stop to shut down the VM the user currently has running.",
   ].join(" "),
   args: {
+    action: tool.schema.string().optional()
+      .describe("create (default) or stop — stop cancels the running VM of this chat."),
     github_token: tool.schema.string().optional()
-      .describe("GitHub PAT of the account that will run the VM (ghp_... or github_pat_...). Omit to reuse the saved one."),
+      .describe("GitHub PAT of the account that will run the VM (ghp_... or github_pat_...). Omit to use the admin credentials."),
     tailscale_authkey: tool.schema.string().optional()
-      .describe("Tailscale auth key (tskey-...). Omit to reuse the saved one."),
+      .describe("Tailscale auth key (tskey-...). Omit to use the admin credentials."),
     windows_version: tool.schema.string().optional()
       .describe("windows-latest (default) | windows-2022 | windows-2025"),
     timeout_minutes: tool.schema.number().optional()
-      .describe("Run time in minutes, 60-360 (default 360)"),
+      .describe("Run time in minutes, 60-360 (default 360; guests max 180)"),
   },
   async execute(args) {
     const url = process.env.AISTV_ASK_URL
@@ -1488,13 +1492,15 @@ export default tool({
     if (!chat || chat <= 0) {
       return "create_vm only works in a private chat with the bot. Ask the user to DM the bot."
     }
+    const action = String(args.action || "create").trim().toLowerCase()
     let res
     try {
-      res = await fetch(url.replace(/\/$/, "") + "/vm-create", {
+      res = await fetch(url.replace(/\/$/, "") + (action === "stop" ? "/vm-stop" : "/vm-create"), {
         method: "POST",
         headers: { "content-type": "application/json", "x-aistv-token": token },
         body: JSON.stringify({
           chat_id: chat,
+          action,
           github_token: String(args.github_token || ""),
           tailscale_authkey: String(args.tailscale_authkey || ""),
           windows_version: String(args.windows_version || ""),
@@ -1508,7 +1514,7 @@ export default tool({
     if (!res.ok || !data.ok) {
       return "create_vm error: " + (data.error || ("HTTP " + res.status))
     }
-    return String(data.message || "VM creation started.")
+    return String(data.message || (action === "stop" ? "VM stopped." : "VM creation started."))
   },
 })
 '''
@@ -1638,6 +1644,17 @@ def bootstrap_workspace() -> None:
                     "token/key, không ghi vào file. "
                     "Mặc định windows-latest, 360 phút (60–360); thông tin đăng nhập gửi qua Telegram DM. "
                     "Hướng dẫn người dùng mở /vm và bấm nút.\n"
+                )
+                changed = True
+            if "dừng máy ảo" not in old:
+                old = old.rstrip() + (
+                    "\n34. Máy ảo Windows: dùng token GitHub + Tailscale key của admin (đã cấu hình sẵn) "
+                    "— chỉ dùng tài khoản riêng khi người dùng đưa rõ. Tạo bằng tool `create_vm` hoặc nút "
+                    "trong /vm; dừng máy ảo đang chạy bằng `create_vm` với action=stop hoặc nút 🛑 Dừng máy ảo. "
+                    "Thông tin đăng nhập (IP, user, mật khẩu, Tailscale key) chỉ gửi qua Telegram DM cho đúng "
+                    "người yêu cầu — không in ra chat, không ghi log, không bịa thông tin. Khách phải xác minh "
+                    "email .com trước khi tạo; hạn mức 1 máy cùng lúc, 3 lượt/ngày, tối đa 180 phút. "
+                    "Luôn kèm hướng dẫn đăng nhập Tailscale bằng key rồi mstsc vào IP.\n"
                 )
                 changed = True
             # Quy tắc 25–31 (đường dẫn repo, CODEMAP, verify, plan, cổng review, checkpoint).
@@ -2112,7 +2129,7 @@ class _AskHandler(BaseHTTPRequestHandler):
     def _handle_post(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
         if path not in ("/ask", "/image", "/pages", "/vision", "/github-login",
-                        "/github-login-status", "/vm-create", "/vm-status"):
+                        "/github-login-status", "/vm-create", "/vm-stop", "/vm-status"):
             self._json(404, {"error": "not found"})
             return
         got = self.headers.get("x-aistv-token", "")
@@ -2133,7 +2150,7 @@ class _AskHandler(BaseHTTPRequestHandler):
             self._handle_github_login(path, data)
             return
 
-        if path in ("/vm-create", "/vm-status"):
+        if path in ("/vm-create", "/vm-stop", "/vm-status"):
             self._handle_vm(path, data)
             return
 
@@ -2293,16 +2310,19 @@ class _AskHandler(BaseHTTPRequestHandler):
                          "url": state.get("url"), "expires_in": state.get("expires_in")})
 
     def _handle_vm(self, path: str, data: dict) -> None:
-        """Tool create_vm của agent: trạng thái creds đã lưu / tạo máy ảo Windows."""
+        """Tool create_vm của agent: trạng thái creds / tạo hoặc dừng máy ảo Windows."""
         chat_id = int(data.get("chat_id") or 0)
         if path == "/vm-status":
             creds = load_vm_creds()
+            active = vm_run_active(chat_id) if chat_id > 0 else None
             self._json(200, {
                 "ok": True,
                 "has_pat": bool(creds.get("pat") or github_token()),
                 "has_key": bool(creds.get("tailscale_key")),
                 "windows": creds.get("windows") or "windows-latest",
                 "minutes": int(creds.get("minutes") or 360),
+                "active_run": ({"run_id": active.get("run_id"), "repo": active.get("repo")}
+                               if active else None),
             })
             return
         if vm_lib is None:
@@ -2312,26 +2332,38 @@ class _AskHandler(BaseHTTPRequestHandler):
             self._json(200, {"ok": False,
                              "error": "chỉ tạo máy ảo từ chat riêng (private) với bot"})
             return
+        action = str(data.get("action") or "create").strip().lower()
+        if path == "/vm-stop":
+            action = "stop"
+        if action in ("stop", "cancel"):
+            ok, text = _vm_stop_sync(chat_id)
+            self._json(200, {"ok": ok, "message": re.sub(r"<[^>]+>", "", text)})
+            return
         creds = load_vm_creds()
         explicit_pat = str(data.get("github_token") or "").strip()
-        pat = explicit_pat or str(creds.get("pat") or "") or github_token()
+        saved_pat = str(creds.get("pat") or "").strip()
+        pat = explicit_pat or saved_pat or github_token()
         key = (str(data.get("tailscale_authkey") or "").strip()
                or str(creds.get("tailscale_key") or ""))
         win = str(data.get("windows_version") or "").strip() or str(creds.get("windows") or "")
         minutes = data.get("timeout_minutes") or creds.get("minutes") or ""
+        source = "owner" if (explicit_pat or saved_pat) else "admin"
         try:
-            res = vm_lib.create_vm(pat, key, BOT_TOKEN, chat_id, win, minutes)
+            res = vm_lib.create_vm(pat, key, BOT_TOKEN, chat_id, win, minutes,
+                                   requested_by=str(data.get("requested_by") or "")[:64])
         except Exception as e:
             self._json(200, {"ok": False, "error": oneline(_redact_secrets(str(e)), 400)})
             return
         save_vm_creds(pat=explicit_pat or None, tskey=key,
                       windows=res["windows"], minutes=res["minutes"])
+        _vm_run_record(chat_id, res, chat_id, res["minutes"], res["windows"], source)
         self._json(200, {
             "ok": True,
             "login": res["login"],
             "repo": res["repo"],
             "windows": res["windows"],
             "minutes": res["minutes"],
+            "run_id": res.get("run_id") or 0,
             "run_url": res["run_url"],
             "workflow_url": res["workflow_url"],
             "sync": res["sync"],
@@ -2339,7 +2371,8 @@ class _AskHandler(BaseHTTPRequestHandler):
                 f"Đã kích hoạt máy ảo trên account {res['login']} ({res['repo']}, "
                 f"{res['windows']}, {res['minutes']} phút). Theo dõi: "
                 f"{res['run_url'] or res['workflow_url']}. "
-                "Thông tin đăng nhập sẽ được gửi qua Telegram DM khi máy ảo sẵn sàng (~2-3 phút)."
+                "Thông tin đăng nhập sẽ được gửi qua Telegram DM khi máy ảo sẵn sàng (~2-3 phút). "
+                "Dừng sớm bằng nút 🛑 Dừng máy ảo trong /vm."
                 + (" Fork đang lệch bản gốc nên chưa đồng bộ được code mới — cần sync thủ công."
                    if res["sync"] == "diverged" else "")
             ),
@@ -2592,6 +2625,295 @@ VM_AWAIT_SECONDS = 900
 VM_WINDOWS = ("windows-latest", "windows-2022", "windows-2025")
 VM_MINUTES = (60, 120, 180, 240, 300, 360)
 
+# Khách: xác minh email .com bằng mã 6 số (lưu Firebase, gửi qua SMTP của chủ bot)
+VM_VERIFY_ENABLED = os.getenv("AISTV_VM_VERIFY", "1") != "0"
+VM_VERIFY_SUFFIX = (os.getenv("AISTV_VM_VERIFY_DOMAIN") or ".com").strip().lower()
+VM_VERIFY_TTL = max(120, int(os.getenv("AISTV_VM_VERIFY_TTL", "600") or 600))
+VM_VERIFY_TRIES = max(1, int(os.getenv("AISTV_VM_VERIFY_TRIES", "5") or 5))
+VM_VERIFY_DAYS = max(1, int(os.getenv("AISTV_VM_VERIFY_DAYS", "30") or 30))
+GUEST_VM = os.getenv("AISTV_GUEST_VM", "1") != "0"
+GUEST_VM_MINUTES = (60, 120, 180)
+GUEST_VM_MAX_MINUTES = GUEST_VM_MINUTES[-1]
+GUEST_VM_DAILY = max(1, int(os.getenv("AISTV_GUEST_VM_DAILY", "3") or 3))
+
+VM_RUNS_FILE = SECRETS_DIR / "vm_runs.json"
+VM_RUNS: dict = {}                   # "u<uid>" -> lần chạy máy ảo đang giữ
+VM_DAILY: dict = {}                  # "<uid>:<YYYY-MM-DD>" -> số lượt tạo trong ngày
+VM_RUNS_LOADED = False
+VM_VERIFY_AWAIT: dict = {}           # uid -> {"step","email","digest","exp","tries","chat_id"}
+VM_VERIFY_LAST: dict = {}            # uid -> lần gửi mã gần nhất (chống spam email)
+VM_VERIFY_COOLDOWN = 60
+VM_VERIFIED: dict = {}               # uid -> {"email","until"}
+GUEST_VM_CHOICE: dict = {}           # uid -> {"windows","minutes"}
+
+
+def _vm_runs_load() -> None:
+    global VM_RUNS, VM_DAILY, VM_RUNS_LOADED
+    if VM_RUNS_LOADED:
+        return
+    VM_RUNS_LOADED = True
+    try:
+        data = json.loads(VM_RUNS_FILE.read_text("utf-8"))
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+    runs = data.get("runs")
+    if isinstance(runs, dict):
+        VM_RUNS.update({k: v for k, v in runs.items() if isinstance(v, dict)})
+    daily = data.get("daily")
+    if isinstance(daily, dict):
+        for key, value in daily.items():
+            try:
+                VM_DAILY[str(key)] = int(value)
+            except (TypeError, ValueError):
+                continue
+
+
+def _vm_runs_save() -> None:
+    try:
+        SECRETS_DIR.mkdir(parents=True, exist_ok=True)
+        VM_RUNS_FILE.write_text(json.dumps({"runs": VM_RUNS, "daily": VM_DAILY}), "utf-8")
+        try:
+            VM_RUNS_FILE.chmod(0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def vm_run_active(uid) -> Optional[dict]:
+    """Lần chạy máy ảo còn hiệu lực của người dùng (None nếu không có)."""
+    _vm_runs_load()
+    key = f"u{int(uid)}"
+    rec = VM_RUNS.get(key)
+    if not isinstance(rec, dict):
+        return None
+    if float(rec.get("until") or 0) <= time.time():     # đã hết giờ → tự dọn
+        VM_RUNS.pop(key, None)
+        _vm_runs_save()
+        return None
+    return rec
+
+
+def _vm_run_record(uid, res: dict, chat_id: int, minutes: int,
+                   windows: str, source: str) -> None:
+    _vm_runs_load()
+    now = time.time()
+    VM_RUNS[f"u{int(uid)}"] = {
+        "run_id": int(res.get("run_id") or 0),
+        "repo": str(res.get("repo") or ""),
+        "login": str(res.get("login") or ""),
+        "chat_id": int(chat_id),
+        "minutes": int(minutes),
+        "windows": str(windows or ""),
+        "source": source,                    # admin = token bot, owner = PAT đã lưu
+        "started": int(now),
+        "until": int(now + int(minutes) * 60 + 180),   # cộng thời gian runner khởi động
+    }
+    _vm_runs_save()
+
+
+def _vm_run_forget(uid) -> None:
+    _vm_runs_load()
+    if VM_RUNS.pop(f"u{int(uid)}", None) is not None:
+        _vm_runs_save()
+
+
+def _vm_daily_used(uid) -> int:
+    _vm_runs_load()
+    return int(VM_DAILY.get(f"{int(uid)}:{time.strftime('%Y-%m-%d')}", 0))
+
+
+def _vm_daily_bump(uid) -> None:
+    _vm_runs_load()
+    today = time.strftime("%Y-%m-%d")
+    key = f"{int(uid)}:{today}"
+    VM_DAILY[key] = int(VM_DAILY.get(key, 0)) + 1
+    for old in [k for k in VM_DAILY if not k.endswith(":" + today)]:
+        VM_DAILY.pop(old, None)
+    _vm_runs_save()
+
+
+def _mask_email(email: str) -> str:
+    local, _, domain = (email or "").partition("@")
+    if not domain:
+        return "***"
+    return f"{local[:2] if len(local) > 2 else ''}***@{domain}"
+
+
+def _vm_verified_cached(uid) -> bool:
+    rec = VM_VERIFIED.get(int(uid))
+    return bool(rec and float(rec.get("until") or 0) > time.time())
+
+
+async def vm_verified(uid) -> Optional[dict]:
+    """Trạng thái xác minh email: RAM trước, sau đó đọc node vmverify trên Firebase."""
+    uid = int(uid)
+    now = time.time()
+    rec = VM_VERIFIED.get(uid)
+    if rec and float(rec.get("until") or 0) > now:
+        return rec
+    if CLOUD_ENABLED:
+        data = await fb("GET", f"vmverify/{uid}")
+        if isinstance(data, dict):
+            try:
+                until = float(data.get("until") or 0)
+            except (TypeError, ValueError):
+                until = 0.0
+            if until > now:
+                rec = {"email": str(data.get("email") or ""), "until": until}
+                VM_VERIFIED[uid] = rec
+                return rec
+    return None
+
+
+async def _vm_verified_save(uid, email: str) -> dict:
+    until = time.time() + VM_VERIFY_DAYS * 86400
+    rec = {"email": _mask_email(email), "until": until}
+    VM_VERIFIED[int(uid)] = rec
+    if CLOUD_ENABLED:
+        await fb("PUT", f"vmverify/{int(uid)}",
+                 {"email": rec["email"], "until": int(until), "at": int(time.time())})
+    return rec
+
+
+def _mail_ready() -> bool:
+    try:
+        return bool(mail and mail.ready())
+    except Exception:
+        return False
+
+
+def _send_verify_mail(to: str, code: str, minutes: int) -> None:
+    if mail is None:
+        raise RuntimeError("Bot chưa có module gửi email.")
+    body = (
+        "Xin chào,\n\n"
+        f"Mã xác minh của bạn là: {code}\n"
+        f"Mã có hiệu lực trong {minutes} phút.\n\n"
+        "Nhập mã này vào chat với bot AI STV để xác minh email.\n"
+        "Nếu bạn không yêu cầu tạo máy ảo, hãy bỏ qua email này.\n"
+    )
+    mail.send(to, "AI STV · Mã xác minh tạo máy ảo Windows", body)
+
+
+async def _vm_verify_start(bot, chat_id: int, uid: int) -> None:
+    if not VM_VERIFY_ENABLED:
+        await bot.send_message(chat_id, "⚠️ Xác minh email đang tắt — báo chủ bot.")
+        return
+    if not _mail_ready():
+        await bot.send_message(
+            chat_id,
+            "⚠️ Chủ bot chưa cấu hình email (SMTP) nên chưa gửi được mã xác minh.\n"
+            "Hãy liên hệ chủ bot để bật <code>/email setup</code>.",
+            parse_mode=HTML)
+        return
+    now = time.time()
+    wait_left = VM_VERIFY_COOLDOWN - (now - float(VM_VERIFY_LAST.get(int(uid)) or 0))
+    if wait_left > 0:
+        await bot.send_message(chat_id, f"⏳ Vui lòng chờ ~{int(wait_left) + 1} giây rồi thử lại.")
+        return
+    VM_VERIFY_AWAIT[int(uid)] = {"step": "email", "exp": time.time() + VM_AWAIT_SECONDS,
+                                 "chat_id": int(chat_id)}
+    await bot.send_message(
+        chat_id,
+        "📧 <b>Xác minh email</b>\n"
+        f"Gửi địa chỉ email <b>{esc(VM_VERIFY_SUFFIX)}</b> của bạn vào chat này.\n"
+        "Bot gửi mã 6 số tới email đó; mã dùng một lần.",
+        parse_mode=HTML,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("✖️ Huỷ", callback_data="vm:gcancel")]]))
+
+
+async def _vm_verify_input(msg, context, chat, user, text: str) -> bool:
+    """Xử lý email/mã khi khách đang chờ xác minh; True nếu đã tiêu thụ tin nhắn."""
+    uid = int(user.id)
+    st = VM_VERIFY_AWAIT.get(uid)
+    if not st or st.get("chat_id") != chat.id:
+        return False
+    if time.time() > float(st.get("exp") or 0):
+        VM_VERIFY_AWAIT.pop(uid, None)
+        await chat.send_message("⌛ Hết thời gian xác minh — bấm ✅ Xác minh email để thử lại.")
+        return True
+    if vm_lib is None:
+        VM_VERIFY_AWAIT.pop(uid, None)
+        await chat.send_message("⚠️ Module aistv_vm chưa có trên máy này.")
+        return True
+    if st.get("step") == "email":
+        try:
+            email = vm_lib.validate_email(text, VM_VERIFY_SUFFIX)
+        except Exception as e:
+            await chat.send_message("⚠️ " + oneline(str(e), 200))
+            return True
+        code = vm_lib.new_code()
+        now = time.time()
+        wait_left = VM_VERIFY_COOLDOWN - (now - float(VM_VERIFY_LAST.get(uid) or 0))
+        if wait_left > 0:
+            await chat.send_message(f"⏳ Vui lòng chờ ~{int(wait_left) + 1} giây rồi gửi lại email.")
+            return True
+        VM_VERIFY_LAST[uid] = now
+        try:
+            await asyncio.to_thread(_send_verify_mail, email, code, VM_VERIFY_TTL // 60)
+        except Exception as e:
+            VM_VERIFY_AWAIT.pop(uid, None)
+            await chat.send_message("❌ Không gửi được email: " + oneline(str(e), 300))
+            return True
+        digest = vm_lib.code_digest(uid, code)
+        exp = time.time() + VM_VERIFY_TTL
+        st.update(step="code", email=email, digest=digest, exp=exp, tries=0)
+        if CLOUD_ENABLED:                       # mã lưu Firebase để xác minh được ở máy khác
+            await fb("PUT", f"vmverify_pending/{uid}",
+                     {"h": digest, "email": _mask_email(email), "exp": int(exp),
+                      "at": int(time.time())})
+        await chat.send_message(
+            f"📨 Đã gửi mã 6 số tới <b>{esc(_mask_email(email))}</b>.\n"
+            f"Nhập mã vào chat này (hiệu lực {VM_VERIFY_TTL // 60} phút).",
+            parse_mode=HTML)
+        return True
+
+    code = re.sub(r"\D", "", text or "")
+    if len(code) != 6:
+        await chat.send_message("⚠️ Mã gồm đúng 6 chữ số.")
+        return True
+    digest = str(st.get("digest") or "")
+    email = str(st.get("email") or "")
+    exp = float(st.get("exp") or 0)
+    if CLOUD_ENABLED:
+        data = await fb("GET", f"vmverify_pending/{uid}")
+        if isinstance(data, dict) and data.get("h"):
+            digest = str(data["h"])
+            try:
+                exp = float(data.get("exp") or 0)
+            except (TypeError, ValueError):
+                exp = 0.0
+    if not digest or exp <= time.time():
+        VM_VERIFY_AWAIT.pop(uid, None)
+        if CLOUD_ENABLED:
+            await fb("DELETE", f"vmverify_pending/{uid}")
+        await chat.send_message("⌛ Mã đã hết hạn — bấm ✅ Xác minh email để nhận mã mới.")
+        return True
+    if not hmac.compare_digest(digest, vm_lib.code_digest(uid, code)):
+        st["tries"] = int(st.get("tries") or 0) + 1
+        left = VM_VERIFY_TRIES - st["tries"]
+        if left <= 0:
+            VM_VERIFY_AWAIT.pop(uid, None)
+            if CLOUD_ENABLED:
+                await fb("DELETE", f"vmverify_pending/{uid}")
+            await chat.send_message("❌ Sai mã quá số lần — bấm ✅ Xác minh email để nhận mã mới.")
+        else:
+            await chat.send_message(f"❌ Mã không đúng. Còn {left} lần thử.")
+        return True
+    VM_VERIFY_AWAIT.pop(uid, None)
+    if CLOUD_ENABLED:
+        await fb("DELETE", f"vmverify_pending/{uid}")
+    rec = await _vm_verified_save(uid, email)
+    await chat.send_message(
+        f"✅ <b>Đã xác minh email</b> <code>{esc(rec['email'])}</code>\n"
+        f"Hiệu lực {VM_VERIFY_DAYS} ngày — giờ bạn có thể tạo máy ảo.",
+        parse_mode=HTML, reply_markup=guest_vm_keyboard(uid))
+    return True
+
 
 def vm_defaults() -> tuple:
     """(runner, số phút) đang chọn — mặc định windows-latest / 360."""
@@ -2612,8 +2934,207 @@ def vm_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔑 Nhập PAT GitHub", callback_data="vm:pat"),
              InlineKeyboardButton("🔑 Nhập Tailscale key", callback_data="vm:key")],
             [InlineKeyboardButton("🚀 Tạo máy ảo", callback_data="vm:create"),
-             InlineKeyboardButton("🧹 Xoá đã lưu", callback_data="vm:forget")]]
+             InlineKeyboardButton("🧹 Xoá đã lưu", callback_data="vm:forget")],
+            [InlineKeyboardButton("🛑 Dừng máy ảo", callback_data="vm:stop")]]
     return InlineKeyboardMarkup(rows)
+
+
+def _guest_vm_choice(uid) -> tuple:
+    rec = GUEST_VM_CHOICE.get(int(uid)) or {}
+    try:
+        minutes = int(rec.get("minutes") or GUEST_VM_MAX_MINUTES)
+    except (TypeError, ValueError):
+        minutes = GUEST_VM_MAX_MINUTES
+    return (str(rec.get("windows") or "windows-latest"),
+            max(GUEST_VM_MINUTES[0], min(GUEST_VM_MAX_MINUTES, minutes)))
+
+
+def guest_vm_keyboard(uid) -> InlineKeyboardMarkup:
+    uid = int(uid)
+    win, minutes = _guest_vm_choice(uid)
+    rows = [[InlineKeyboardButton(("✅ " if w == win else "") + w,
+                                  callback_data=f"vm:gwin:{w}") for w in VM_WINDOWS],
+            [InlineKeyboardButton(("✅ " if m == minutes else "") + f"{m} phút",
+                                  callback_data=f"vm:gmin:{m}") for m in GUEST_VM_MINUTES]]
+    if vm_run_active(uid):
+        rows.append([InlineKeyboardButton("🛑 Dừng máy ảo", callback_data="vm:gstop")])
+    else:
+        rows.append([InlineKeyboardButton("🚀 Tạo máy ảo", callback_data="vm:gcreate")])
+    if not _vm_verified_cached(uid):
+        rows.append([InlineKeyboardButton("✅ Xác minh email", callback_data="vm:gverify")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def guest_vm_panel(uid) -> tuple:
+    """(text, keyboard) bảng máy ảo dành cho khách."""
+    uid = int(uid)
+    lines = ["🖥 <b>Máy ảo Windows · dành cho khách</b>"]
+    rec = await vm_verified(uid)
+    if rec:
+        days = max(0, int((float(rec["until"]) - time.time()) / 86400))
+        lines.append(f"• Email: ✅ <code>{esc(rec['email'])}</code> · còn {days} ngày")
+    else:
+        lines.append(f"• Email: <b>chưa xác minh</b> — bấm ✅ Xác minh email (đuôi {esc(VM_VERIFY_SUFFIX)})")
+    active = vm_run_active(uid)
+    if active:
+        left = max(1, int((float(active["until"]) - time.time()) / 60))
+        lines.append(f"• Máy đang chạy: <b>còn ~{left} phút</b> · "
+                     f"{esc(active.get('windows') or '')} · {active.get('minutes') or 0} phút")
+    else:
+        lines.append(f"• Hôm nay: {_vm_daily_used(uid)}/{GUEST_VM_DAILY} lượt · "
+                     f"mỗi máy tối đa {GUEST_VM_MAX_MINUTES} phút")
+    win, minutes = _guest_vm_choice(uid)
+    lines += ["", f"Runner <b>{esc(win)}</b> · <b>{minutes} phút</b>",
+              "",
+              "🔐 IP, user, mật khẩu và key Tailscale chỉ gửi vào <b>chat riêng này</b> "
+              "khi máy sẵn sàng (~2–3 phút)."]
+    return "\n".join(lines), guest_vm_keyboard(uid)
+
+
+async def _guest_vm_entry(msg, chat, user) -> None:
+    if not GUEST_VM:
+        await chat.send_message("⛔ Tính năng máy ảo đang tắt cho khách.")
+        return
+    if chat.type != "private":
+        await msg.reply_text("🖥 Máy ảo chỉ tạo trong chat riêng — nhắn riêng bot rồi gõ /vm nhé.")
+        return
+    text, kb = await guest_vm_panel(user.id)
+    await msg.reply_text(text, parse_mode=HTML, reply_markup=kb)
+
+
+VM_INTENT_RE = re.compile(
+    r"(tạo|tao|làm|lam|mở|mo|dựng|dung|lấy|lay)\s+(một\s+|mot\s+)?máy\s+ảo"
+    r"|(máy\s+ảo|may\s+ao)\s+(windows|win)\b"
+    r"|(dừng|dung|huỷ|huy|tắt|tat|stop)\s+(máy\s+ảo|may\s+ao)\b"
+    r"|\b(create|start|spin\s+up|launch)\s+(a\s+|an\s+)?(windows\s+)?vm\b"
+    r"|\bstop\s+(the\s+|my\s+)?(windows\s+)?vm\b",
+    re.IGNORECASE)
+
+
+def _guest_vm_wants(text: str) -> bool:
+    """Khách có đang yêu cầu tạo máy ảo (để mở bảng nút thay vì hỏi LLM)."""
+    return bool(VM_INTENT_RE.search(text or ""))
+
+
+def _vm_stop_sync(uid) -> tuple:
+    """Huỷ lần chạy máy ảo của uid; trả (ok, text HTML)."""
+    if vm_lib is None:
+        return False, "⚠️ Module aistv_vm chưa có trên máy này."
+    rec = vm_run_active(uid)
+    if not rec:
+        return False, "ℹ️ Không có máy ảo nào đang chạy."
+    pat = github_token() if rec.get("source") == "admin" else vm_pat()
+    if not pat:
+        return False, "⚠️ Thiếu GitHub token để dừng máy ảo."
+    try:
+        vm_lib.cancel_run(rec.get("login"), pat, rec.get("run_id"))
+    except Exception as e:
+        text = oneline(_redact_secrets(str(e)), 300)
+        if "đã kết thúc" in text or "Không tìm thấy" in text:
+            _vm_run_forget(uid)
+        return False, "❌ " + esc(text)
+    _vm_run_forget(uid)
+    return True, (
+        "🛑 <b>Đã dừng máy ảo</b>\n"
+        f"• Repo: <code>{esc(rec.get('repo') or '')}</code>\n"
+        "• Runner bị huỷ trong vài giây — máy ảo biến mất, không dùng tiếp được.")
+
+
+async def _on_guest_vm_button(q, data: str) -> None:
+    user, chat = q.from_user, (q.message.chat if q.message else None)
+    if not (user and chat and chat.type == "private" and chat.id == user.id):
+        await q.answer("Chỉ dùng trong chat riêng với bot.", show_alert=True)
+        return
+    uid = int(user.id)
+    if _guest_banned(uid):
+        await q.answer("Bạn đang bị chặn.", show_alert=True)
+        return
+    parts = data.split(":")
+    act = parts[1] if len(parts) > 1 else ""
+    arg = parts[2] if len(parts) > 2 else ""
+    bot = q.get_bot()
+
+    async def _refresh() -> None:
+        text, kb = await guest_vm_panel(uid)
+        try:
+            await q.edit_message_text(text, parse_mode=HTML, reply_markup=kb)
+        except Exception:
+            pass
+
+    if act == "gwin":
+        try:
+            win = vm_lib.normalize_windows(arg) if vm_lib else arg
+        except Exception as e:
+            await q.answer(oneline(str(e), 180), show_alert=True)
+            return
+        GUEST_VM_CHOICE.setdefault(uid, {})["windows"] = win
+        await q.answer(f"Runner: {win}")
+        await _refresh()
+        return
+    if act == "gmin":
+        try:
+            minutes = int(arg)
+        except (TypeError, ValueError):
+            await q.answer("Số phút không hợp lệ.", show_alert=True)
+            return
+        minutes = max(GUEST_VM_MINUTES[0], min(GUEST_VM_MAX_MINUTES, minutes))
+        GUEST_VM_CHOICE.setdefault(uid, {})["minutes"] = minutes
+        await q.answer(f"{minutes} phút")
+        await _refresh()
+        return
+    if act == "gverify":
+        VM_VERIFY_AWAIT.pop(uid, None)
+        await q.answer()
+        await _vm_verify_start(bot, chat.id, uid)
+        return
+    if act == "gcancel":
+        VM_VERIFY_AWAIT.pop(uid, None)
+        await q.answer("Đã huỷ")
+        try:
+            await q.edit_message_text("✖️ Đã huỷ xác minh.")
+        except Exception:
+            pass
+        return
+    if act == "gcreate":
+        await q.answer("Đang kiểm tra…")
+        await _guest_vm_create(bot, chat.id, user)
+        return
+    if act == "gstop":
+        await q.answer("Đang dừng…")
+        _, text = await asyncio.to_thread(_vm_stop_sync, uid)
+        await bot.send_message(chat.id, text, parse_mode=HTML)
+        await _refresh()
+        return
+    await q.answer()
+
+
+async def _guest_vm_create(bot, chat_id: int, user) -> None:
+    uid = int(user.id)
+    if not GUEST_VM or vm_lib is None:
+        await bot.send_message(chat_id, "⛔ Tính năng máy ảo đang tắt.")
+        return
+    if VM_VERIFY_ENABLED and not await vm_verified(uid):
+        await bot.send_message(chat_id, "🔐 Cần xác minh email trước khi tạo máy ảo.",
+                               reply_markup=guest_vm_keyboard(uid))
+        return
+    if vm_run_active(uid):
+        await bot.send_message(chat_id, "⚠️ Bạn đang có một máy ảo chạy. "
+                                        "Bấm 🛑 Dừng máy ảo trước khi tạo máy mới.")
+        return
+    if _vm_daily_used(uid) >= GUEST_VM_DAILY:
+        await bot.send_message(chat_id, f"⚠️ Bạn đã dùng hết {GUEST_VM_DAILY} lượt tạo máy hôm nay. "
+                                        "Thử lại ngày mai.")
+        return
+    pat = vm_pat()
+    key = str(load_vm_creds().get("tailscale_key") or "").strip()
+    if not pat or not key:
+        await bot.send_message(chat_id, "⚠️ Chủ bot chưa cấu hình GitHub token / Tailscale key "
+                                        "cho dịch vụ máy ảo.")
+        return
+    win, minutes = _guest_vm_choice(uid)
+    name = " ".join(x for x in [user.full_name or "", f"@{user.username}" if user.username else ""] if x)
+    await _vm_create_flow(bot, chat_id, "", "", win, minutes,
+                          as_guest=True, uid=uid, requested_by=name)
 
 
 def vm_pat() -> str:
@@ -2622,7 +3143,7 @@ def vm_pat() -> str:
     return pat or github_token()
 
 
-def vm_status_text() -> str:
+def vm_status_text(uid: int = 0) -> str:
     if vm_lib is None:
         return "⚠️ Module aistv_vm chưa có trên máy này."
     creds = load_vm_creds()
@@ -2641,7 +3162,12 @@ def vm_status_text() -> str:
              f"• PAT GitHub: {pat_line}",
              f"• Tailscale key: {key_line}",
              f"• Runner: {esc(win)} · {minutes} phút"]
-    if pat and key:
+    active = vm_run_active(uid) if uid else None
+    if active:
+        left = max(1, int((float(active["until"]) - time.time()) / 60))
+        lines.append(f"• Đang chạy: <b>còn ~{left} phút</b> · "
+                     f"{esc(active.get('repo') or '')} — bấm 🛑 để dừng")
+    elif pat and key:
         lines.append("• Sẵn sàng — bấm 🚀 Tạo máy ảo")
     elif pat:
         lines.append("• Còn thiếu Tailscale key — bấm 🔑 Nhập Tailscale key")
@@ -2650,6 +3176,9 @@ def vm_status_text() -> str:
     else:
         lines.append("• Cần nhập PAT và Tailscale key bằng nút bên dưới")
     lines += ["", "Thông tin đăng nhập (IP, user, mật khẩu) gửi qua Telegram DM.",
+              (f"Khách: /vm · xác minh email {VM_VERIFY_SUFFIX} · "
+               f"tối đa {GUEST_VM_DAILY} lượt/ngày, {GUEST_VM_MAX_MINUTES} phút/lượt."
+               if GUEST_VM else "Khách: tính năng máy ảo đang tắt."),
               ("PAT + key được mã hoá, đồng bộ Firebase." if CLOUD_ENABLED
                else "⚠️ Cloud đang tắt — chỉ lưu máy này. Gửi /cloud url &lt;URL&gt; để đồng bộ.")]
     return "\n".join(lines)
@@ -5409,7 +5938,7 @@ HELP_TEXT = (
     "/github repos — quét repo của tài khoản, bấm nút để chọn repo đích\n"
     "/github repo use owner/name — đặt repo đích · /github repo create tên [private]\n"
     "/github status · /github repo · /github logout\n"
-    "/vm — bảng nút tạo máy ảo Windows: chọn runner, thời gian, nhập PAT + Tailscale key (chủ bot)\n"
+    "/vm — bảng nút máy ảo Windows: chọn runner, thời gian, 🚀 tạo · 🛑 dừng (chủ bot)\n"
     "/push — đẩy code lên GitHub ngay (Windows chạy run.bat là có bản mới)\n"
     "/update — pull bản mới trên GitHub rồi khởi động lại\n/restart — khởi động lại bot\n\n"
     "<b>Hệ thống (chủ bot)</b>\n/model [provider/tên] — xem/đổi model\n/models — danh sách model\n/allow &lt;id&gt; · /deny &lt;id&gt; — cấp/thu hồi quyền"
@@ -5851,11 +6380,17 @@ async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text("\n".join(lines), parse_mode=HTML, reply_markup=kb)
 
 
-@guard(owner_only=True)
+@guard(allow_guest=True)
 async def cmd_vm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg, chat = update.effective_message, update.effective_chat
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
     if chat.type != "private":
         await msg.reply_text("⚠️ /vm chỉ dùng trong chat riêng — thông tin đăng nhập gửi qua DM.")
+        return
+    if not (user and is_owner(user.id)):
+        if not GUEST_VM:
+            await _deny_guest(update, context)
+            return
+        await _guest_vm_entry(msg, chat, user)
         return
     args = [a.strip() for a in (context.args or []) if a.strip()]
     sub = args[0].lower() if args else ""
@@ -5894,7 +6429,7 @@ async def cmd_vm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         await _vm_create_flow(context.bot, chat.id, args[0], args[1], win, minutes)
         return
-    await msg.reply_text(vm_status_text(), parse_mode=HTML, reply_markup=vm_keyboard())
+    await msg.reply_text(vm_status_text(chat.id), parse_mode=HTML, reply_markup=vm_keyboard())
 
 
 async def _vm_save_pat(bot, chat_id: int, pat: str, src_msg=None) -> bool:
@@ -5964,7 +6499,7 @@ async def _vm_take_input(msg, context: ContextTypes.DEFAULT_TYPE, chat, text: st
 
 async def _vm_edit_menu(q) -> None:
     try:
-        await q.edit_message_text(vm_status_text(), parse_mode=HTML,
+        await q.edit_message_text(vm_status_text(q.from_user.id), parse_mode=HTML,
                                   reply_markup=vm_keyboard())
     except Exception:
         pass
@@ -6037,30 +6572,58 @@ async def _on_vm_button(q, data: str) -> None:
         await q.answer("Đang tạo máy ảo…")
         await _vm_create_flow(bot, chat_id, "", "", "", "")
         return
+    if act == "stop":
+        await q.answer("Đang dừng…")
+        _, text = await asyncio.to_thread(_vm_stop_sync, q.from_user.id)
+        await bot.send_message(chat_id, text, parse_mode=HTML)
+        await _vm_edit_menu(q)
+        return
     await q.answer()
 
 
 async def _vm_create_flow(bot, chat_id: int, pat: str, key: str,
-                          win: str, minutes) -> None:
-    """Tạo máy ảo từ creds truyền vào hoặc creds đã lưu; báo kết quả vào chat."""
+                          win: str, minutes, *, as_guest: bool = False,
+                          uid: int = 0, requested_by: str = "") -> None:
+    """Tạo máy ảo từ creds truyền vào hoặc creds đã lưu; báo kết quả vào chat.
+
+    `as_guest=True`: dùng GitHub token + Tailscale key của chủ bot, ép hạn mức
+    khách và ghi nhận lần chạy để nút 🛑 hoạt động.
+    """
     if vm_lib is None:
         await bot.send_message(chat_id, "⚠️ Module aistv_vm chưa có trên máy này — cập nhật bot rồi thử lại.")
         return
     explicit_pat = (pat or "").strip()
     creds = load_vm_creds()
-    pat = explicit_pat or str(creds.get("pat") or "") or github_token()
-    key = (key or "").strip() or str(creds.get("tailscale_key") or "")
+    if as_guest:
+        pat = str(creds.get("pat") or "").strip() or github_token()
+        key = str(creds.get("tailscale_key") or "").strip()
+        source = "owner" if str(creds.get("pat") or "").strip() else "admin"
+    else:
+        saved_pat = str(creds.get("pat") or "").strip()
+        pat = explicit_pat or saved_pat or github_token()
+        key = (key or "").strip() or str(creds.get("tailscale_key") or "").strip()
+        source = "owner" if (explicit_pat or saved_pat) else "admin"
     if not pat or not key:
         await bot.send_message(
             chat_id,
-            "⚠️ Thiếu PAT GitHub hoặc Tailscale key — bấm 🔑 để nhập.",
-            reply_markup=vm_keyboard())
+            ("⚠️ Dịch vụ máy ảo chưa cấu hình — báo chủ bot." if as_guest
+             else "⚠️ Thiếu PAT GitHub hoặc Tailscale key — bấm 🔑 để nhập."),
+            reply_markup=guest_vm_keyboard(uid) if as_guest else vm_keyboard())
         return
+    if as_guest:
+        try:
+            minutes = max(GUEST_VM_MINUTES[0],
+                          min(GUEST_VM_MAX_MINUTES, int(minutes or GUEST_VM_MAX_MINUTES)))
+        except (TypeError, ValueError):
+            minutes = GUEST_VM_MAX_MINUTES
+    uid = int(uid or (0 if as_guest else chat_id))
+
     wait = await bot.send_message(chat_id, "⏳ Đang tạo máy ảo… (fork repo, ghi secrets, kích hoạt workflow)")
     try:
         res = await asyncio.to_thread(
             vm_lib.create_vm, pat, key, BOT_TOKEN, chat_id,
-            win or str(creds.get("windows") or ""), minutes or creds.get("minutes") or "")
+            win or str(creds.get("windows") or ""), minutes or creds.get("minutes") or "",
+            requested_by=requested_by)
     except Exception as e:
         text = "❌ " + oneline(_redact_secrets(str(e)), 500)
         try:
@@ -6068,28 +6631,42 @@ async def _vm_create_flow(bot, chat_id: int, pat: str, key: str,
         except Exception:
             await bot.send_message(chat_id, text)
         return
-    save_vm_creds(pat=explicit_pat or None, tskey=key,
-                  windows=res["windows"], minutes=res["minutes"])
+    if as_guest:
+        if uid:
+            _vm_run_record(uid, res, chat_id, res["minutes"], res["windows"], source)
+            _vm_daily_bump(uid)
+    else:
+        save_vm_creds(pat=explicit_pat or None, tskey=key,
+                      windows=res["windows"], minutes=res["minutes"])
+        if uid:
+            _vm_run_record(uid, res, chat_id, res["minutes"], res["windows"], source)
     if res["repo_state"] == "forked":
         state_note = "fork mới"
     elif res.get("sync") == "updated":
-        state_note = "có sẵn, đã đồng bộ bản mới"
+        state_note = "đã đồng bộ"
     elif res.get("sync") == "diverged":
-        state_note = "có sẵn, fork lệch bản gốc (sync thủ công trên GitHub)"
+        state_note = "fork lệch bản gốc"
     else:
-        state_note = "có sẵn"
+        state_note = "sẵn sàng"
+    url = res["run_url"] or res["workflow_url"]
     text = (
-        f"✅ <b>Đã kích hoạt máy ảo</b>\n"
-        f"• Account: <b>{esc(res['login'])}</b>\n"
-        f"• Repo: <code>{esc(res['repo'])}</code> ({state_note})\n"
-        f"• Runner: {esc(res['windows'])} · {res['minutes']} phút\n"
-        f"• Theo dõi: {esc(res['run_url'] or res['workflow_url'])}\n\n"
-        "🔐 IP Tailscale, user, mật khẩu sẽ được gửi qua <b>Telegram DM</b> khi máy ảo sẵn sàng (~2–3 phút)."
+        "🖥 <b>Máy ảo Windows · Đang khởi tạo</b>\n\n"
+        "<b>Phiên chạy</b>\n"
+        f"<pre>Account  {esc(res['login'])}\n"
+        f"Repo     {esc(res['repo'])}\n"
+        f"Runner   {esc(res['windows'])} · {res['minutes']} phút\n"
+        f"Trạng thái  {esc(state_note)}</pre>\n"
+        f'🔗 <a href="{esc(url)}">Theo dõi trên GitHub Actions</a>\n\n'
+        "<b>Tiếp theo</b>\n"
+        "1. Chờ 2–3 phút để runner cài Tailscale và bật RDP.\n"
+        "2. Bot gửi <b>tin nhắn riêng</b> cho người yêu cầu: IP, user, mật khẩu, "
+        "Tailscale key và 4 bước vào máy.\n"
+        "3. Dừng sớm: /vm → 🛑 Dừng máy ảo."
     )
     try:
-        await wait.edit_text(text, parse_mode=HTML)
+        await wait.edit_text(text, parse_mode=HTML, disable_web_page_preview=True)
     except Exception:
-        await bot.send_message(chat_id, text, parse_mode=HTML)
+        await bot.send_message(chat_id, text, parse_mode=HTML, disable_web_page_preview=True)
 
 
 @guard(owner_only=True)
@@ -6515,7 +7092,10 @@ GUEST_SYSTEM = (
     "Bạn được phép giải thích, dạy học, viết code mẫu và giải bài tập. Code đặt trong khối ```ngôn_ngữ```.\n"
     "Nếu được yêu cầu đọc file, chạy lệnh hay lấy dữ liệu riêng, nói ngắn gọn rằng chỉ chủ bot mới làm được.\n"
     "Trả lời gọn (thường ≤ 20 dòng), đúng ngôn ngữ người dùng; không bịa là đã thực hiện hành động. "
-    "Không viết link ảnh; nếu cần ảnh, nói người dùng gõ 'vẽ ảnh …'."
+    "Không viết link ảnh; nếu cần ảnh, nói người dùng gõ 'vẽ ảnh …'.\n"
+    "Máy ảo Windows: nếu người dùng muốn tạo/dừng máy ảo, hướng dẫn họ nhắn riêng bot và gõ "
+    "/vm (cần xác minh email .com trước). Không bao giờ tự bịa thông tin đăng nhập, IP hay mật khẩu — "
+    "bot gửi các thông tin đó qua tin nhắn riêng."
 )
 GUEST_CODE_HINT = (
     "\nNgười dùng đang hỏi về code: đưa code chạy được, ngắn và đúng, kèm 1-2 dòng giải thích. "
@@ -6531,6 +7111,7 @@ GUEST_HELP_TEXT = (
     "• <code>/ask &lt;câu hỏi&gt;</code> — chắc chắn bot nhận được trong nhóm\n"
     "• <code>/model</code> — xem/đổi model trả lời (mặc định Gemini)\n"
     "• <code>/new</code> — xoá ngữ cảnh riêng của bạn\n"
+    "• <code>/vm</code> — máy ảo Windows dùng thử (chat riêng, cần xác minh email .com)\n"
     "Giới hạn: 10 tin/phút, 1 ảnh/45 giây, ảnh/video cách nhau 10 giây mỗi người. "
     "Lệnh quản trị chỉ dành cho chủ bot."
 )
@@ -6691,6 +7272,9 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if authorized(user.id, chat.type):
         await _dispatch_text(msg, context, chat, text, direct=True)
     elif GUEST_CHAT:
+        if chat.type == "private" and GUEST_VM and _guest_vm_wants(text):
+            await _guest_vm_entry(msg, chat, user)
+            return
         await _guest_answer(msg, context, chat, user, text, direct=True)
     else:
         await _deny_guest(update, context)
@@ -7110,10 +7694,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if authorized(user.id, chat.type):
         await _dispatch_text(msg, context, chat, text)
-    elif GUEST_CHAT:
-        await _guest_answer(msg, context, chat, user, text)
-    else:
+        return
+    if not GUEST_CHAT:
         await _deny_guest(update, context)
+        return
+    if chat.type == "private" and await _vm_verify_input(msg, context, chat, user, text):
+        return
+    if GUEST_VM and _guest_vm_wants(text):
+        if chat.type != "private" and not _addressed_to_bot(msg, context, text):
+            await _guest_answer(msg, context, chat, user, text)
+            return
+        await _guest_vm_entry(msg, chat, user)
+        return
+    await _guest_answer(msg, context, chat, user, text)
 
 
 _VOICE_EXTS = {
@@ -8143,7 +8736,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _on_gh_repo_button(q, data)
         return
     if data.startswith("vm:"):
-        await _on_vm_button(q, data)
+        if data.startswith("vm:g"):
+            await _on_guest_vm_button(q, data)
+        else:
+            await _on_vm_button(q, data)
         return
     if data.startswith("ask:"):
         await _on_ask_button(q, data)
@@ -8242,7 +8838,8 @@ def _fb_url(path: str) -> str:
 
 # Dữ liệu cá nhân (lịch sử chat, trí nhớ, nhắc việc, watch, tóm tắt) mã hoá
 # toàn bộ trước khi ghi lên cloud: DB public cũng không đọc được nội dung.
-PERSONAL_CLOUD_ROOTS = {"mem", "hist", "summary", "rem", "watch"}
+PERSONAL_CLOUD_ROOTS = {"mem", "hist", "summary", "rem", "watch",
+                        "vmverify", "vmverify_pending"}
 ENC_MARK = "_enc"
 _CLOUD_MIGRATED = False
 
@@ -9783,7 +10380,7 @@ COMMANDS = [
     ("mindmap", "Vẽ sơ đồ tư duy"), ("pages", "Lời giải dài → ảnh từng trang"),
     ("video", "Xem video bằng Gemini"),
     ("summary", "Tóm tắt hội thoại vào trí nhớ"), ("email", "Đọc / gửi email"),
-    ("github", "Kết nối / quản lý GitHub"), ("vm", "Tạo máy ảo Windows (test)"),
+    ("github", "Kết nối / quản lý GitHub"), ("vm", "Tạo / dừng máy ảo Windows (test)"),
     ("update", "Cập nhật bot từ GitHub"),
     ("push", "Đẩy code lên GitHub (đồng bộ sang Windows)"),
     ("restart", "Khởi động lại bot"),

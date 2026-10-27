@@ -3,8 +3,11 @@
 # Secrets cần cấu hình trên Repository (Settings > Secrets and variables > Actions):
 #   TAILSCALE_AUTHKEY  : Tailscale pre-authenticated key (REUSABLE), gắn sẵn tag:vm-user
 #   TELEGRAM_BOT_TOKEN : Token của bot Telegram dùng để gửi DM riêng tư
-#   TELEGRAM_CHAT_ID   : Chat ID của chủ nhân (nhận thông tin đăng nhập qua DM)
+#   TELEGRAM_CHAT_ID   : (tuỳ chọn) chat ID mặc định khi bấm "Run workflow" tay
 # GH_PAT không cần trong workflow này - nó do hệ thống bot/Telegram quản lý riêng.
+#
+# Người nhận DM: input `telegram_chat_id` (bot truyền vào mỗi lần tạo máy) → đúng
+# người yêu cầu kể cả khi nhiều người tạo máy cùng lúc; nếu trống thì dùng secret.
 #
 # LƯU Ý ENCODING: các bước dùng `shell: powershell` (Windows PowerShell 5.1) phải là
 # ASCII thuần. Runner ghi script ra file .ps1 UTF-8 không BOM; PowerShell 5.1 đọc theo
@@ -31,6 +34,16 @@ on:
         required: true
         default: 360
         type: number
+      telegram_chat_id:
+        description: 'Chat ID nhận thông tin đăng nhập (bot truyền vào; trống = dùng secret)'
+        required: false
+        default: ''
+        type: string
+      requested_by:
+        description: 'Tên người yêu cầu (hiển thị trong tin nhắn DM)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   integration-test:
@@ -43,7 +56,9 @@ jobs:
       TIMEOUT_MINUTES: ${{ github.event.inputs.timeout_minutes || 360 }}
       TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # Người nhận DM của lần chạy này: input do bot truyền, fallback về secret
+      TG_TARGET: ${{ github.event.inputs.telegram_chat_id || secrets.TELEGRAM_CHAT_ID }}
+      REQ_BY: ${{ github.event.inputs.requested_by }}
 
     steps:
       - name: Checkout repository
@@ -56,8 +71,8 @@ jobs:
           if (-not $env:TAILSCALE_AUTHKEY) {
             throw 'TAILSCALE_AUTHKEY is missing. Add it in Settings > Secrets and variables > Actions (value starts with tskey-).'
           }
-          if (-not $env:TELEGRAM_BOT_TOKEN -or -not $env:TELEGRAM_CHAT_ID) {
-            Write-Host 'WARNING: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set - login details will NOT be delivered.'
+          if (-not $env:TELEGRAM_BOT_TOKEN -or -not $env:TG_TARGET) {
+            Write-Host 'WARNING: Telegram recipient/token not set - login details will NOT be delivered.'
           }
           Write-Host 'Secrets OK.'
 
@@ -148,12 +163,15 @@ jobs:
           Write-Host "Tailscale connected: $tsIp"
 
       - name: Send Private Credentials via Telegram Bot
-        if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
+        if: ${{ env.TG_TARGET != '' && env.TELEGRAM_BOT_TOKEN != '' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           function Escape-Html([string]$s) {
             return $s.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;')
+          }
+          function OneLine([string]$s) {
+            return (($s -replace "[\r\n]+", ' ').Trim())
           }
 
           $timeoutMin = [int]$env:TIMEOUT_MINUTES
@@ -161,29 +179,50 @@ jobs:
           if ($timeoutMin -gt 360) { $timeoutMin = 360 }
           $deadline = (Get-Date).ToUniversalTime().AddMinutes($timeoutMin).ToString('yyyy-MM-dd HH:mm') + ' UTC'
 
-          $lines = @(
-            '<b>AI STV — Windows Integration Test sẵn sàng</b>',
-            ('Hostname: <code>' + (Escape-Html $env:TS_HOST) + '</code>'),
-            ('Tailscale IP: <code>' + (Escape-Html $env:TS_IP) + '</code>'),
-            ('Tailscale DNS: <code>' + (Escape-Html $env:TS_DNS) + '</code>'),
-            ('Username: <code>' + (Escape-Html $env:VM_USER) + '</code>'),
-            ('Password: <code>' + (Escape-Html $env:VM_PASS) + '</code>'),
-            ('Session Key: <code>' + (Escape-Html $env:TAILSCALE_AUTHKEY) + '</code>'),
-            ('RDP: <code>mstsc /v:' + (Escape-Html $env:TS_IP) + '</code>'),
-            ('Thời gian sống: ' + $timeoutMin + ' phút (đến ' + $deadline + ')')
-          )
+          $lines = [System.Collections.Generic.List[string]]::new()
+          $lines.Add('🖥 <b>AI STV · Máy ảo Windows đã sẵn sàng</b>')
+          if ($env:REQ_BY) {
+            $lines.Add('👤 Yêu cầu bởi: <b>' + (Escape-Html (OneLine $env:REQ_BY)) + '</b>')
+          }
+          $lines.Add('')
+          $lines.Add('<b>1 · Thông tin kết nối</b>')
+          $lines.Add('<pre>' + (@(
+              'Máy      : ' + $env:TS_HOST,
+              'Tailnet  : ' + $env:TS_DNS,
+              'IP       : ' + $env:TS_IP,
+              'User     : ' + $env:VM_USER,
+              'Password : ' + $env:VM_PASS
+            ) -join "`n") + '</pre>')
+          $lines.Add('⏱ Hạn dùng: <b>' + $timeoutMin + ' phút</b> (đến ' + $deadline + ')')
+          $lines.Add('')
+          $lines.Add('<b>2 · Cách vào máy</b>')
+          $lines.Add('1) Cài Tailscale cho Windows: https://tailscale.com/download/windows')
+          $lines.Add('2) Mở PowerShell và đăng nhập tailnet bằng key của máy này:')
+          $lines.Add('<pre>tailscale up --authkey=' + (Escape-Html $env:TAILSCALE_AUTHKEY) + ' --accept-routes</pre>')
+          $lines.Add('3) Mở Remote Desktop (mstsc) và kết nối:')
+          $lines.Add('<pre>mstsc /v:' + (Escape-Html $env:TS_IP) + '</pre>')
+          $lines.Add('4) Đăng nhập bằng <b>User</b> và <b>Password</b> ở mục 1.')
+          $lines.Add('')
+          $lines.Add('<b>3 · Lưu ý</b>')
+          $lines.Add('• Key Tailscale chỉ dùng cho máy này — không chia sẻ ra ngoài.')
+          $lines.Add('• Máy tự huỷ sau ' + $timeoutMin + ' phút; dừng sớm: /vm → 🛑 Dừng máy ảo.')
           $text = $lines -join "`n"
 
-          $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $text; parse_mode = 'HTML' } | ConvertTo-Json -Compress
+          $body = @{
+            chat_id = $env:TG_TARGET
+            text = $text
+            parse_mode = 'HTML'
+            disable_web_page_preview = $true
+          } | ConvertTo-Json -Compress
           Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$($env:TELEGRAM_BOT_TOKEN)/sendMessage" -ContentType 'application/json; charset=utf-8' -Body $body | Out-Null
-          Write-Host 'Đã gửi thông tin kết nối qua Telegram DM (chỉ chủ nhân xem được).'
+          Write-Host 'Đã gửi thông tin kết nối qua Telegram DM (chỉ người yêu cầu xem được).'
 
       - name: Skip Telegram Notification (secrets missing)
-        if: ${{ env.TELEGRAM_BOT_TOKEN == '' || env.TELEGRAM_CHAT_ID == '' }}
+        if: ${{ env.TG_TARGET == '' || env.TELEGRAM_BOT_TOKEN == '' }}
         shell: powershell
         run: |
-          Write-Host 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set in Repository Secrets.'
-          Write-Host 'Login details will NOT be sent. Configure both secrets to receive a private DM.'
+          Write-Host 'Telegram recipient (telegram_chat_id / TELEGRAM_CHAT_ID) or token is missing.'
+          Write-Host 'Login details will NOT be sent. Configure both to receive a private DM.'
 
       - name: Keep-Alive Integration Test Loop
         shell: powershell
