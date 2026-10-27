@@ -41,7 +41,8 @@ trả **200**. Exit code `1` = vẫn còn mở.
 - Rotate ngay các token từng lộ trong DB: GitHub PAT, Telegram bot token, Tailscale key.
 - URL cũ đã bị xoá khỏi toàn bộ git history (commit cũ vẫn có thể còn trên GitHub theo SHA;
   rules khóa mới là lớp bảo vệ thật, không phải ẩn URL).
-- Dữ liệu cá nhân (`hist`, `mem`, `summary`, `rem`, `watch`) được mã hoá toàn bộ trước khi ghi
+- Dữ liệu cá nhân (`hist`, `mem`, `summary`, `rem`, `watch`, `vmverify`, `vmverify_pending`)
+  được mã hoá toàn bộ trước khi ghi
   lên cloud, khoá dẫn xuất từ bot token. Đổi bot token thì dữ liệu cũ không giải mã được nữa.
   Node thô kiểu cũ được tự mã hoá lại một lần khi bot khởi động (`AISTV_CLOUD_ENCRYPT_MIGRATE=0` để tắt).
 - Cập nhật/khởi động lại bot ở **mọi máy** trước khi dùng chung cloud: bản cũ không giải mã được
