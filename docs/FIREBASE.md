@@ -44,4 +44,6 @@ trả **200**. Exit code `1` = vẫn còn mở.
 - Dữ liệu cá nhân (`hist`, `mem`, `summary`, `rem`, `watch`) được mã hoá toàn bộ trước khi ghi
   lên cloud, khoá dẫn xuất từ bot token. Đổi bot token thì dữ liệu cũ không giải mã được nữa.
   Node thô kiểu cũ được tự mã hoá lại một lần khi bot khởi động (`AISTV_CLOUD_ENCRYPT_MIGRATE=0` để tắt).
+- Cập nhật/khởi động lại bot ở **mọi máy** trước khi dùng chung cloud: bản cũ không giải mã được
+  dữ liệu mới và có thể ghi đè bằng bản thô. Chạy một máy tại một thời điểm là an toàn nhất.
 - Không muốn dùng cloud nữa: đặt `AISTV_CLOUD=0` (mất đồng bộ trí nhớ giữa các máy).
