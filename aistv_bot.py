@@ -7293,6 +7293,26 @@ async def rem_save(push: bool = True) -> None:
         await fb("PUT", "rem", REMINDERS)
 
 
+def _prune_reminders(records: dict, now_ts: float | None = None) -> dict:
+    """Lọc nhắc việc: bỏ mục hỏng, đánh dấu quá hạn, bỏ mục quá cũ (>30 ngày)."""
+    now_ts = time.time() if now_ts is None else now_ts
+    out = {k: v for k, v in (records or {}).items()
+           if isinstance(v, dict) and v.get("when")}
+    for key, rec in list(out.items()):
+        try:
+            when = float(rec.get("when"))
+        except (TypeError, ValueError):
+            out.pop(key, None)
+            continue
+        if rec.get("repeat") == "daily" or when >= now_ts - 2 * 86400:
+            continue
+        if now_ts - when > 30 * 86400:
+            out.pop(key, None)              # quá cũ: bỏ hẳn
+        else:
+            rec["expired"] = True           # quá hạn: báo một lần rồi xoá
+    return out
+
+
 async def rem_restore() -> None:
     data = await fb("GET", "rem") if CLOUD_ENABLED else None
     cloud_ok = isinstance(data, dict) or not CLOUD_ENABLED
@@ -7301,16 +7321,7 @@ async def rem_restore() -> None:
     for k, v in _load_json(REMIND_FILE).items():
         data.setdefault(k, v)
     REMINDERS.clear()
-    REMINDERS.update({k: v for k, v in data.items() if isinstance(v, dict) and v.get("when")})
-    now_ts = time.time()
-    stale = [k for k, v in REMINDERS.items()
-             if float(v.get("when", 0)) < now_ts - 2 * 86400 and v.get("repeat") != "daily"]
-    for k in stale:
-        rec = REMINDERS[k]
-        if now_ts - float(rec.get("when", 0)) > 30 * 86400:
-            REMINDERS.pop(k, None)              # quá cũ: bỏ hẳn
-        else:
-            rec["expired"] = True               # quá hạn: báo một lần rồi xoá
+    REMINDERS.update(_prune_reminders(data))
     await rem_save(push=cloud_ok)          # cloud lỗi thì chỉ ghi cục bộ, tránh xoá dữ liệu cloud
 
 
