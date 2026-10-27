@@ -593,6 +593,24 @@ PROVIDERS = {
 }
 
 
+GUEST_ORDER = ["web2api", "pollinations"]   # khách: chỉ nguồn miễn phí của chủ bot
+
+
+def provider_order(wanted: str = "", model: str = "") -> list:
+    """Danh sách provider sẽ thử. 'guest' = web2api trước, pollinations dự phòng."""
+    wanted = (wanted or "").strip().lower()
+    if wanted == "guest":
+        return [name for name in GUEST_ORDER
+                if name in PROVIDERS and PROVIDERS[name][1]()]
+    if wanted not in ("", "auto"):
+        return [wanted]
+    order = [name for name, (_, ready) in PROVIDERS.items() if ready()]
+    if model and _cf_model_key(model) and "web2api" in order:
+        # Người dùng chỉ định model Cloudflare (flux-2-dev, schnell…) → bỏ Web2API.
+        order.remove("web2api")
+    return order
+
+
 def generate(prompt: str, style: str = "", aspect: str = "1:1", ref: str = "",
              provider: str = "", out: str = "", size: str = "",
              kind: str = "image", model: str = "") -> dict:
@@ -602,20 +620,16 @@ def generate(prompt: str, style: str = "", aspect: str = "1:1", ref: str = "",
     style_key = resolve_style(style) if style else ""
     full = build_prompt(prompt, style_key, kind)
     wanted = (provider or secret("AISTV_IMAGE_PROVIDER") or "auto").strip().lower()
-    if wanted in ("", "auto"):
-        order = [name for name, (_, ready) in PROVIDERS.items() if ready()]
-        if model and _cf_model_key(model) and "web2api" in order:
-            # Người dùng chỉ định model Cloudflare (flux-2-dev, schnell…) → bỏ Web2API.
-            order.remove("web2api")
-        if not order:
-            raise ImageError(
-                "Chưa có nguồn tạo ảnh nào. Chọn 1 cách:\n"
-                "• Bật billing cho Gemini API (dùng đúng model Gemini), hoặc\n"
-                "• Thêm CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (free tier), hoặc\n"
-                "• Thêm TOGETHER_API_KEY (FLUX.1-schnell-Free), hoặc\n"
-                "• Thêm HF_TOKEN.")
-    else:
-        order = [wanted]
+    order = provider_order(wanted, model)
+    if not order:
+        if wanted == "guest":
+            raise ImageError("Chưa có nguồn tạo ảnh miễn phí nào sẵn sàng.")
+        raise ImageError(
+            "Chưa có nguồn tạo ảnh nào. Chọn 1 cách:\n"
+            "• Bật billing cho Gemini API (dùng đúng model Gemini), hoặc\n"
+            "• Thêm CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (free tier), hoặc\n"
+            "• Thêm TOGETHER_API_KEY (FLUX.1-schnell-Free), hoặc\n"
+            "• Thêm HF_TOKEN.")
 
     errors = []
     for name in order:
@@ -728,9 +742,23 @@ def _cf_text(prompt: str, max_tokens: int = 1600, temperature: float = 0.45) -> 
     raise ImageError(last or "Cloudflare text không trả lời")
 
 
+def _web2api_text(prompt: str) -> str:
+    """Dàn ý qua Gemini Web (cookie) — không cần API key, dùng cho khách."""
+    if web2api is None or not _web2api_ready():
+        raise ImageError("Web2API chưa sẵn sàng")
+    if not web2api.ensure_server(quiet=True):
+        raise ImageError("server Web2API chưa chạy")
+    text, err = web2api.chat([{"role": "user", "content": prompt}],
+                             web2api.default_model(), timeout=120)
+    if not (text or "").strip():
+        raise ImageError(err or "Web2API không trả lời")
+    return text
+
+
 def _outline_json(prompt_text: str, cleaner, subject: str) -> dict:
     errors = []
-    for name, fn in (("gemini", _gemini_text), ("cloudflare", _cf_text)):
+    for name, fn in (("gemini", _gemini_text), ("cloudflare", _cf_text),
+                     ("web2api", _web2api_text)):
         try:
             return cleaner(subject, _extract_json(fn(prompt_text)))
         except Exception as e:
@@ -1866,7 +1894,7 @@ def main():
     ap.add_argument("--ref", default="", help="ảnh tham chiếu (chỉ Gemini)")
     ap.add_argument("--size", default="", help="1K / 2K / 4K (Gemini 3)")
     ap.add_argument("--model", default="", help="flux-2-dev | flux-2-klein-9b | flux-1-schnell | ...")
-    ap.add_argument("--provider", default="", help="web2api | cloudflare | gemini | together | hf | auto")
+    ap.add_argument("--provider", default="", help="web2api | cloudflare | gemini | together | hf | guest | auto")
     ap.add_argument("--out", default="", help="đường dẫn file kết quả")
     ap.add_argument("--json", action="store_true", help="in JSON")
     ap.add_argument("--list-styles", action="store_true", help="liệt kê phong cách")

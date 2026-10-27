@@ -287,6 +287,21 @@ GUEST_TIMEOUT = max(30, int(os.getenv("AISTV_GUEST_TIMEOUT", "180") or 180))
 GUEST_HISTORY = max(0, int(os.getenv("AISTV_GUEST_HISTORY", "6") or 6))   # số lượt nhớ riêng của khách
 GUEST_MIN_GAP = max(0.0, float(os.getenv("AISTV_GUEST_GAP", "1") or 1))   # giây giữa 2 tin của 1 khách
 GUEST_CONCURRENCY = max(1, int(os.getenv("AISTV_GUEST_PARALLEL", "3") or 3))
+# Khách dùng miễn phí các khả năng của Web2API: chat, hỏi code, tạo ảnh, sơ đồ.
+GUEST_FEATURES = os.getenv("AISTV_GUEST_FEATURES", "1") != "0"   # 0 = chỉ chat chữ
+GUEST_MEDIA = os.getenv("AISTV_GUEST_MEDIA", "1") != "0"         # 0 = tắt tạo ảnh/sơ đồ cho khách
+GUEST_RATE = max(1, int(os.getenv("AISTV_GUEST_RATE", "10") or 10))          # tin/phút/người
+GUEST_CHAT_RATE = max(1, int(os.getenv("AISTV_GUEST_CHAT_RATE", "40") or 40))  # lượt/phút/nhóm
+GUEST_MEDIA_GAP = max(5, int(os.getenv("AISTV_GUEST_MEDIA_GAP", "45") or 45))  # giây giữa 2 ảnh/người
+GUEST_MEDIA_RATE = max(1, int(os.getenv("AISTV_GUEST_MEDIA_RATE", "6") or 6))  # ảnh/giờ/người
+GUEST_MEDIA_CHAT_RATE = max(1, int(os.getenv("AISTV_GUEST_MEDIA_CHAT", "20") or 20))
+GUEST_MEDIA_PARALLEL = max(1, int(os.getenv("AISTV_GUEST_MEDIA_PARALLEL", "1") or 1))
+GUEST_MEDIA_TIMEOUT = max(60, int(os.getenv("AISTV_GUEST_MEDIA_TIMEOUT", "180") or 180))
+GUEST_HIST_USERS = max(20, int(os.getenv("AISTV_GUEST_HIST_USERS", "200") or 200))
+GUEST_MODEL_OPTIONS = list(dict.fromkeys(
+    [GUEST_MODEL, "gemini-3.6-flash", "gemini-3.8-flash"]
+    + [m.strip() for m in (os.getenv("AISTV_GUEST_MODELS") or "").split(",")
+       if m.strip()]))
 VISION_HANDOFF = os.getenv("AISTV_VISION_HANDOFF", "1") != "0"
                                                       # 1 = Gemini đọc media → DeepSeek (model chính) trả lời
 VISION_FOLLOWUPS = max(0, int(os.getenv("AISTV_VISION_FOLLOWUPS", "2") or 2))
@@ -956,8 +971,9 @@ def _strip_bot_mention(text: str, context) -> str:
 
 
 GUEST_REJECT_AT: dict = {}
-GUEST_NOTICE = ("🔒 Lệnh, ảnh và video chỉ dành cho chủ bot.\n"
-                "Bạn vẫn có thể nhắn tin chữ để trò chuyện với trợ lý.")
+GUEST_NOTICE = ("🔒 Lệnh quản trị chỉ dành cho chủ bot.\n"
+                "Bạn vẫn chat, hỏi code, tạo ảnh/sơ đồ miễn phí: nhắc @bot, "
+                "reply tin của bot hoặc dùng /ask.")
 GUEST_OFF_NOTICE = "⛔ Bot này chỉ dành cho chủ bot."
 
 
@@ -985,7 +1001,7 @@ async def _deny_guest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         pass
 
 
-def guard(owner_only: bool = False):
+def guard(owner_only: bool = False, allow_guest: bool = False):
     def deco(fn):
         @functools.wraps(fn)
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -993,6 +1009,8 @@ def guard(owner_only: bool = False):
             if not (user and chat and msg):
                 return
             if not authorized(user.id, chat.type):
+                if allow_guest and GUEST_CHAT:
+                    return await fn(update, context)
                 await _deny_guest(update, context)
                 return
             if owner_only and not is_owner(user.id):
@@ -4944,6 +4962,9 @@ def build_status(chat_id: int) -> str:
         f"{' · thảo luận 2 chiều' if VISION_HANDOFF else ' · trả lời trực tiếp'}\n"
         f"• Dự phòng Web2API: {esc(web2api_line())}\n"
         f"• Tạo ảnh: {esc(image_provider_line())}\n"
+        f"• Khách: chat {'bật' if GUEST_CHAT and GUEST_ACTIVE['chat'] else 'tắt'} · "
+        f"ảnh {'bật' if GUEST_ACTIVE['media'] else 'tắt'} · "
+        f"{len(GUEST_HIST)} ngữ cảnh · {len(GUEST_BANS)} bị chặn\n"
         f"• Giới hạn 1 yêu cầu: {to}\n"
         f"• Hội thoại: {len(load_history(chat_id)) // 2} lượt đã lưu\n"
         f"• Trí nhớ dài hạn: {len(memory_items())} mục"
@@ -5111,20 +5132,36 @@ HELP_TEXT = (
 )
 
 
-@guard()
+@guard(allow_guest=True)
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(welcome_text(), parse_mode=HTML, reply_markup=MENU_KB)
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if not authorized(user.id, chat.type):
+        body = GUEST_HELP_TEXT
+        if chat.type == "private":
+            body += f"\n\nID của bạn: <code>{user.id}</code>"
+        await msg.reply_text(body, parse_mode=HTML)
+        return
+    await msg.reply_text(welcome_text(), parse_mode=HTML, reply_markup=MENU_KB)
 
 
-@guard()
+@guard(allow_guest=True)
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(HELP_TEXT, parse_mode=HTML)
+    user, chat, msg = update.effective_user, update.effective_chat, update.effective_message
+    if not authorized(user.id, chat.type):
+        await msg.reply_text(GUEST_HELP_TEXT, parse_mode=HTML)
+        return
+    await msg.reply_text(HELP_TEXT, parse_mode=HTML)
 
 
-@guard()
+@guard(allow_guest=True)
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    archive_history(update.effective_chat.id)
-    await update.effective_message.reply_text("🧹 <b>Đã bắt đầu cuộc trò chuyện mới.</b> Trí nhớ dài hạn vẫn được giữ.", parse_mode=HTML)
+    user, chat, msg = update.effective_user, update.effective_chat, update.effective_message
+    if not authorized(user.id, chat.type):
+        GUEST_HIST.pop(_guest_key(chat, user), None)
+        await msg.reply_text("🧹 Đã xoá ngữ cảnh riêng của bạn.", parse_mode=HTML)
+        return
+    archive_history(chat.id)
+    await msg.reply_text("🧹 <b>Đã bắt đầu cuộc trò chuyện mới.</b> Trí nhớ dài hạn vẫn được giữ.", parse_mode=HTML)
 
 
 @guard()
@@ -5148,9 +5185,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(build_status(update.effective_chat.id), parse_mode=HTML)
 
 
-@guard()
+@guard(allow_guest=True)
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
+    if not authorized(user.id, chat.type):
+        await _guest_model_command(update, context)
+        return
     if not context.args:
         await msg.reply_text(f"🧠 Model hiện tại: <code>{esc(STATE['model'])}</code>\nĐổi: <code>/model provider/tên</code> (xem /models)", parse_mode=HTML)
         return
@@ -5940,16 +5980,307 @@ async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 GUEST_SYSTEM = (
-    "Bạn là trợ lý AI trong một bot Telegram và đang trả lời một người KHÔNG phải chủ bot.\n"
-    "Bạn chỉ trò chuyện bằng văn bản: không có công cụ, không chạy lệnh, không đọc/ghi tệp, "
-    "không truy cập web, không xem ảnh/video, không tạo ảnh, không đọc dữ liệu hay lịch sử của chủ bot.\n"
-    "Nếu được yêu cầu những việc đó, nói ngắn gọn rằng chỉ chủ bot mới làm được.\n"
-    "Trả lời gọn (thường ≤ 20 dòng), đúng ngôn ngữ người dùng; không bịa là đã thực hiện hành động."
+    "Bạn là trợ lý AI trong bot Telegram, đang trả lời một người KHÔNG phải chủ bot.\n"
+    "Bạn chỉ trả lời bằng văn bản: không có công cụ, không chạy lệnh, không đọc/ghi tệp, "
+    "không truy cập web/URL, không xem ảnh/video, không tạo ảnh, không đọc dữ liệu hay lịch sử của chủ bot.\n"
+    "Bạn được phép giải thích, dạy học, viết code mẫu và giải bài tập. Code đặt trong khối ```ngôn_ngữ```.\n"
+    "Nếu được yêu cầu đọc file, chạy lệnh hay lấy dữ liệu riêng, nói ngắn gọn rằng chỉ chủ bot mới làm được.\n"
+    "Trả lời gọn (thường ≤ 20 dòng), đúng ngôn ngữ người dùng; không bịa là đã thực hiện hành động. "
+    "Không viết link ảnh; nếu cần ảnh, nói người dùng gõ 'vẽ ảnh …'."
+)
+GUEST_CODE_HINT = (
+    "\nNgười dùng đang hỏi về code: đưa code chạy được, ngắn và đúng, kèm 1-2 dòng giải thích. "
+    "Không bịa API không tồn tại; nếu thiếu thông tin thì hỏi lại 1 câu."
+)
+GUEST_HELP_TEXT = (
+    "🤖 <b>AI STV — trợ lý miễn phí trong nhóm</b>\n"
+    "Nhắc <code>@tên_bot</code>, reply tin của bot hoặc dùng <code>/ask</code>:\n"
+    "• Hỏi đáp, giải thích, viết/sửa code…\n"
+    "• <code>vẽ ảnh …</code>, <code>sơ đồ tư duy …</code>, <code>biểu đồ …</code>\n"
+    "• <code>/ask &lt;câu hỏi&gt;</code> — chắc chắn bot nhận được trong nhóm\n"
+    "• <code>/model</code> — xem/đổi model trả lời (mặc định Web2API)\n"
+    "• <code>/new</code> — xoá ngữ cảnh riêng của bạn\n"
+    "Giới hạn: 10 tin/phút và 1 ảnh/45 giây mỗi người. Lệnh quản trị chỉ dành cho chủ bot."
 )
 GUEST_HIST: dict = {}
 GUEST_LOCKS = defaultdict(asyncio.Lock)
 GUEST_LAST: dict = {}
+GUEST_LAST_MEDIA: dict = {}
 GUEST_SEM = asyncio.Semaphore(GUEST_CONCURRENCY)
+GUEST_MEDIA_SEM = asyncio.Semaphore(GUEST_MEDIA_PARALLEL)
+GUEST_MODEL_BY_USER: dict = {}
+GUEST_ACTIVE = {"chat": GUEST_FEATURES, "media": GUEST_MEDIA}
+GUEST_BANS: dict = {}
+GUEST_NOTICE_AT: dict = {}
+
+
+class _WindowLimit:
+    """Giới hạn số lần trong một cửa sổ thời gian, tách riêng theo từng khoá."""
+
+    def __init__(self, count: int, window: float):
+        self.count = max(1, int(count))
+        self.window = float(window)
+        self.events: dict = {}
+
+    def check(self, key, now: float = None) -> float:
+        """Trả 0 nếu được phép; ngược lại trả số giây cần chờ."""
+        now = time.monotonic() if now is None else now
+        self._prune(now)
+        items = [t for t in self.events.get(key, ()) if now - t < self.window]
+        if len(items) >= self.count:
+            self.events[key] = items
+            return max(0.0, self.window - (now - items[0]))
+        items.append(now)
+        self.events[key] = items
+        return 0.0
+
+    def _prune(self, now: float) -> None:
+        if len(self.events) < 512:
+            return
+        for key, items in list(self.events.items()):
+            alive = [t for t in items if now - t < self.window]
+            if alive:
+                self.events[key] = alive
+            else:
+                self.events.pop(key, None)
+
+
+GUEST_TEXT_LIMIT = _WindowLimit(GUEST_RATE, 60)
+GUEST_CHAT_LIMIT = _WindowLimit(GUEST_CHAT_RATE, 60)
+GUEST_MEDIA_LIMIT = _WindowLimit(GUEST_MEDIA_RATE, 3600)
+GUEST_MEDIA_CHAT_LIMIT = _WindowLimit(GUEST_MEDIA_CHAT_RATE, 3600)
+
+_GUEST_MINDMAP_RE = re.compile(r"(?i)\b(sơ đồ tư duy|sodo tu duy|mind\s?map|mindmap)\b")
+_GUEST_INFO_RE = re.compile(r"(?i)\b(infographic|đồ hoạ thông tin|do hoa thong tin)\b")
+_GUEST_CHART_RE = re.compile(r"(?i)\b(biểu đồ|bieu do|chart)\b")
+_GUEST_IMAGE_RE = re.compile(
+    r"(?i)(^|\b)(vẽ|draw|paint|sketch|generate|create|make|tạo|sinh|thiết kế)\b"
+    r".{0,60}\b(ảnh|hình|image|picture|photo|logo|poster|banner|avatar|icon)\b")
+_GUEST_CODE_RE = re.compile(
+    r"(?i)\b(code|coding|lập trình|lap trinh|thuật toán|thuat toan|python|javascript|"
+    r"typescript|java|kotlin|swift|php|sql|html|css|react|node(?:js)?|api|script|"
+    r"function|hàm|class|bug|debug|sửa lỗi|sua loi)\b")
+_GUEST_SUBJECT_RE = re.compile(
+    r"(?i)^\s*(hãy\s+|giúp (tôi|mình)\s+)?(vẽ|tạo|thiết kế|làm|draw|create|make|generate)\s+"
+    r"(cho (tôi|mình)\s+)?(một\s+|1\s+)?"
+    r"(sơ đồ tư duy|mind\s?map|infographic|biểu đồ|chart|ảnh|hình|image|picture|photo)?\s*"
+    r"(về|of|about|:)?\s*")
+
+
+def guest_intent(text: str) -> str:
+    """Phân loại yêu cầu của khách: mindmap/infographic/chart/image/code/chat."""
+    value = (text or "").strip()
+    if not value:
+        return "chat"
+    if _GUEST_MINDMAP_RE.search(value):
+        return "mindmap"
+    if _GUEST_INFO_RE.search(value):
+        return "infographic"
+    if _GUEST_CHART_RE.search(value):
+        return "chart"
+    if re.match(r"(?i)^\s*(vẽ|draw|paint|sketch)\b", value) or _GUEST_IMAGE_RE.search(value):
+        return "image"
+    if _GUEST_CODE_RE.search(value):
+        return "code"
+    return "chat"
+
+
+def _guest_subject(text: str) -> str:
+    value = (text or "").strip()
+    value = re.sub(r"(?i)^\s*(mind\s?map|sơ đồ tư duy|infographic|biểu đồ|chart)\s*"
+                   r"(về|of|about|:|-)?\s*", "", value)
+    value = _GUEST_SUBJECT_RE.sub("", value).strip(" :,-")
+    return (value or (text or "").strip())[:800]
+
+
+def _guest_key(chat, user) -> tuple:
+    return (chat.id, user.id)
+
+
+def _guest_banned(user_id: int) -> bool:
+    until = GUEST_BANS.get(user_id)
+    if until is None:
+        return False
+    if until and until < time.time():
+        GUEST_BANS.pop(user_id, None)
+        return False
+    return True
+
+
+def _guest_model(user_id: int) -> str:
+    return GUEST_MODEL_BY_USER.get(user_id) or GUEST_MODEL
+
+
+async def _guest_model_command(update, context) -> None:
+    msg, user = update.effective_message, update.effective_user
+    args = [str(a).strip() for a in (context.args or []) if str(a).strip()]
+    current = _guest_model(user.id)
+    if not args:
+        rows = "\n".join(
+            f"{i}. <code>{esc(m)}</code>" + ("  ← đang dùng" if m == current else "")
+            for i, m in enumerate(GUEST_MODEL_OPTIONS, 1))
+        await msg.reply_text(
+            f"🧠 Model của bạn: <code>{esc(current)}</code>\n{rows}\n"
+            "Đổi bằng <code>/model &lt;số&gt;</code> hoặc <code>/model &lt;tên&gt;</code>.",
+            parse_mode=HTML)
+        return
+    choice = args[0]
+    model = ""
+    if choice.isdigit():
+        idx = int(choice)
+        if 1 <= idx <= len(GUEST_MODEL_OPTIONS):
+            model = GUEST_MODEL_OPTIONS[idx - 1]
+    elif choice in GUEST_MODEL_OPTIONS:
+        model = choice
+    if not model:
+        await msg.reply_text(
+            "Model đó chưa mở cho khách. Xem danh sách bằng /model; "
+            "chủ bot thêm model bằng biến AISTV_GUEST_MODELS.", parse_mode=HTML)
+        return
+    GUEST_MODEL_BY_USER[user.id] = model
+    await msg.reply_text(f"✅ Model của bạn: <code>{esc(model)}</code>", parse_mode=HTML)
+
+
+async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ask: trong nhóm luôn được bot nhận, không cần @mention (khách chat miễn phí)."""
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    text = " ".join(str(a) for a in (context.args or [])).strip()
+    if not text and msg.reply_to_message:
+        text = (msg.reply_to_message.text or msg.reply_to_message.caption or "").strip()
+    if not text:
+        await msg.reply_text(
+            "Dùng: <code>/ask &lt;câu hỏi&gt;</code> hoặc reply một tin rồi gõ /ask.",
+            parse_mode=HTML)
+        return
+    if authorized(user.id, chat.type):
+        await _dispatch_text(msg, context, chat, text, direct=True)
+    elif GUEST_CHAT:
+        await _guest_answer(msg, context, chat, user, text, direct=True)
+    else:
+        await _deny_guest(update, context)
+
+
+def _guest_hist(key) -> list:
+    hist = GUEST_HIST.get(key)
+    if hist is None:
+        if len(GUEST_HIST) >= GUEST_HIST_USERS:
+            GUEST_HIST.pop(next(iter(GUEST_HIST)), None)
+        hist = GUEST_HIST.setdefault(key, [])
+    return hist
+
+
+def _guest_notice(key, gap: float = 25.0) -> bool:
+    """Chỉ gửi 1 tin nhắc trong `gap` giây cho mỗi khoá (chống spam thông báo)."""
+    now = time.monotonic()
+    if now - GUEST_NOTICE_AT.get(key, 0.0) < gap:
+        return False
+    GUEST_NOTICE_AT[key] = now
+    return True
+
+
+def _thread_kw(msg) -> dict:
+    kw = {}
+    if getattr(msg, "is_topic_message", False) and getattr(msg, "message_thread_id", None):
+        kw["message_thread_id"] = msg.message_thread_id
+    return kw
+
+
+def _strip_image_links(text: str, urls: list) -> str:
+    out = text or ""
+    for url in urls:
+        out = re.sub(r"!\[[^\]]*\]\(\s*" + re.escape(url) + r"\s*\)", "", out)
+        out = re.sub(r"(?i)https?://" + re.escape(url.split("://", 1)[-1]), "", out)
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
+async def _guest_send_url_images(msg, chat, urls: list) -> int:
+    """Tải ảnh Gemini trả về trong câu trả lời và gửi thành ảnh thật (không gửi link trần)."""
+    sent = 0
+    if BOT_OBJ is None:
+        return 0
+    for url in (urls or [])[:2]:
+        raw, mime, err = await asyncio.to_thread(web2api.download_image, url)
+        if not raw:
+            log.info("Ảnh Gemini không tải được: %s", oneline(_redact_secrets(str(err)), 160))
+            continue
+        try:
+            import aistv_image as _img
+            path = await asyncio.to_thread(_img._save, raw, mime)
+            ready = await asyncio.to_thread(_photo_for_telegram, path)
+            with open(ready, "rb") as fh:
+                await BOT_OBJ.send_photo(
+                    chat.id, photo=fh, caption="🖼 <i>Ảnh từ Gemini</i>",
+                    parse_mode=HTML, reply_to_message_id=msg.message_id, **_thread_kw(msg))
+            sent += 1
+        except Exception as exc:
+            log.warning("Gửi ảnh Gemini lỗi: %s", oneline(_redact_secrets(str(exc)), 160))
+    return sent
+
+
+async def _guest_media_reply(msg, context, chat, user, text: str, kind: str = "image",
+                             prompt: str = "", style: str = "", aspect: str = "1:1") -> bool:
+    """Khách tạo ảnh / sơ đồ qua nguồn miễn phí (Web2API, dự phòng Pollinations)."""
+    if not GUEST_ACTIVE["media"]:
+        await msg.reply_text("🎨 Tạo ảnh đang tắt cho khách. Chủ bot có thể bật lại bằng /guest images on.")
+        return True
+    key = _guest_key(chat, user)
+    now = time.monotonic()
+    wait = GUEST_MEDIA_GAP - (now - GUEST_LAST_MEDIA.get(key, 0.0))
+    if wait > 0:
+        if _guest_notice(("media", key)):
+            await msg.reply_text(f"⏳ Mỗi người tạo ảnh cách nhau {GUEST_MEDIA_GAP}s. "
+                                 f"Thử lại sau {int(wait) + 1}s nhé.")
+        return True
+    wait = GUEST_MEDIA_LIMIT.check(key)
+    if wait > 0:
+        if _guest_notice(("media-hour", key)):
+            await msg.reply_text(f"⏳ Bạn đã dùng hết {GUEST_MEDIA_RATE} ảnh/giờ. "
+                                 f"Còn khoảng {int(wait // 60) + 1} phút.")
+        return True
+    wait = GUEST_MEDIA_CHAT_LIMIT.check(chat.id)
+    if wait > 0:
+        if _guest_notice(("media-chat", chat.id)):
+            await msg.reply_text("⏳ Nhóm tạo ảnh hơi nhiều, thử lại sau ít phút nhé.")
+        return True
+    GUEST_LAST_MEDIA[key] = now
+
+    label = {"mindmap": "sơ đồ tư duy", "infographic": "infographic",
+             "chart": "biểu đồ"}.get(kind, "ảnh")
+    topic = (prompt or _guest_subject(text))[:800]
+    if not topic:
+        await msg.reply_text("Bạn muốn tạo ảnh/sơ đồ về gì?")
+        return True
+    status = await msg.reply_text(f"🎨 <i>Đang tạo {label}…</i>", parse_mode=HTML)
+    acquired = False
+    try:
+        await asyncio.wait_for(GUEST_MEDIA_SEM.acquire(), timeout=15)
+        acquired = True
+        data = await generate_image_job(topic, style, aspect, kind, provider="guest",
+                                        timeout=GUEST_MEDIA_TIMEOUT)
+        await send_generated_image(chat.id, data, reply_to=msg.message_id, **_thread_kw(msg))
+        try:
+            await status.delete()
+        except Exception:
+            pass
+    except asyncio.TimeoutError:
+        try:
+            await status.edit_text("⏳ Đang có người tạo ảnh, bạn thử lại sau ít phút nhé.",
+                                   parse_mode="HTML")
+        except Exception:
+            pass
+    except Exception as exc:
+        detail = oneline(_redact_secrets(str(exc)), 300)
+        log.warning("Tạo %s cho khách lỗi: %s", label, detail)
+        try:
+            await status.edit_text(
+                f"⚠️ Chưa tạo được {label}.\n<code>{esc(detail)}</code>", parse_mode="HTML")
+        except Exception:
+            pass
+    finally:
+        if acquired:
+            GUEST_MEDIA_SEM.release()
+    return True
 
 
 async def _guest_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
@@ -5964,9 +6295,11 @@ async def _guest_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
             pass
 
 
-async def _guest_answer(msg, context, chat, user, text: str) -> None:
-    """Khách (không phải chủ bot): chỉ trả lời bằng chữ qua Web2API, không tool, không lịch sử của chủ."""
-    if chat.type != "private":
+async def _guest_answer(msg, context, chat, user, text: str, direct: bool = False) -> None:
+    """Khách: Web2API miễn phí cho chat/code/ảnh/sơ đồ; không tool, không dữ liệu của chủ."""
+    if not GUEST_ACTIVE["chat"] or _guest_banned(user.id):
+        return
+    if chat.type != "private" and not direct:
         if not _addressed_to_bot(msg, context, text):
             return
         text = _strip_bot_mention(text, context)
@@ -5976,7 +6309,23 @@ async def _guest_answer(msg, context, chat, user, text: str) -> None:
     if web2api is None:
         await msg.reply_text("⚠️ Trợ lý chữ đang không sẵn sàng.")
         return
-    key = (chat.id, user.id)
+    key = _guest_key(chat, user)
+    wait = GUEST_TEXT_LIMIT.check(key)
+    if wait > 0:
+        if _guest_notice(("rate", key)):
+            await msg.reply_text(f"⏳ Bạn gửi hơi nhanh — thử lại sau {int(wait) + 1}s nhé.")
+        return
+    wait = GUEST_CHAT_LIMIT.check(chat.id)
+    if wait > 0:
+        if _guest_notice(("rate-chat", chat.id)):
+            await msg.reply_text("⏳ Nhóm đang gửi nhiều yêu cầu, chờ một chút nhé.")
+        return
+
+    intent = guest_intent(text)
+    if intent in ("image", "mindmap", "infographic", "chart"):
+        await _guest_media_reply(msg, context, chat, user, text, kind=intent)
+        return
+
     wait = GUEST_MIN_GAP - (time.monotonic() - GUEST_LAST.get(key, 0.0))
     if wait > 0:
         await asyncio.sleep(min(wait, GUEST_MIN_GAP))   # giữ nhịp, không bỏ tin của khách
@@ -5987,22 +6336,31 @@ async def _guest_answer(msg, context, chat, user, text: str) -> None:
         return
 
     text = _clip(text, 4000)
+    model = _guest_model(user.id)
     started = time.monotonic()
     status = await msg.reply_text("💬 <i>Đang trả lời…</i>", parse_mode=HTML)
     stop = asyncio.Event()
     typing = asyncio.create_task(_guest_typing(context.bot, chat.id, stop))
     answer, err = "", ""
+    acquired = False
     try:
-        async with lock, GUEST_SEM:
-            ready = await asyncio.to_thread(web2api.ensure_server)
-            if not ready:
-                err = "Web2API chưa sẵn sàng"
-            else:
-                messages = [{"role": "system", "content": GUEST_SYSTEM}]
-                messages += GUEST_HIST.get(key, [])
-                messages.append({"role": "user", "content": text})
-                answer, err = await asyncio.to_thread(
-                    web2api.chat, messages, GUEST_MODEL, GUEST_TIMEOUT)
+        async with lock:
+            try:
+                await asyncio.wait_for(GUEST_SEM.acquire(), timeout=min(45, GUEST_TIMEOUT))
+                acquired = True
+                ready = await asyncio.to_thread(web2api.ensure_server)
+                if not ready:
+                    err = "Web2API chưa sẵn sàng"
+                else:
+                    system = GUEST_SYSTEM + (GUEST_CODE_HINT if intent == "code" else "")
+                    messages = [{"role": "system", "content": system}]
+                    messages += _guest_hist(key)
+                    messages.append({"role": "user", "content": text})
+                    answer, err = await asyncio.to_thread(
+                        web2api.chat, messages, model, GUEST_TIMEOUT)
+            finally:
+                if acquired:
+                    GUEST_SEM.release()
     except Exception as exc:
         err = f"{type(exc).__name__}: {exc}"
     finally:
@@ -6021,16 +6379,23 @@ async def _guest_answer(msg, context, chat, user, text: str) -> None:
         await status.delete()
     except Exception:
         pass
-    hist = GUEST_HIST.setdefault(key, [])
+    urls = web2api.extract_image_urls(answer)
+    if urls:
+        answer = _strip_image_links(answer, urls)
+        sent = await _guest_send_url_images(msg, chat, urls)
+        if not answer and not sent:
+            answer = "⚠️ Ảnh Gemini trả về không tải được (link có thể đã hết hạn)."
+    hist = _guest_hist(key)
     if GUEST_HISTORY:
         hist += [{"role": "user", "content": _clip(text, 2000)},
                  {"role": "assistant", "content": _clip(answer, 4000)}]
         del hist[:-GUEST_HISTORY * 2]
-    footer = f"<i>💬 AI STV · {time.monotonic() - started:.1f}s</i>"
-    await send_rich(msg, answer, footer)
+    if answer:
+        footer = f"<i>💬 AI STV · {time.monotonic() - started:.1f}s</i>"
+        await send_rich(msg, answer, footer)
 
 
-async def _dispatch_text(msg, context, chat, text: str):
+async def _dispatch_text(msg, context, chat, text: str, direct: bool = False):
     """Dùng chung cho tin nhắn gõ tay và tin nhắn thoại đã chép lời (chỉ chủ bot)."""
     text = (text or "").strip()
     if not text:
@@ -6051,7 +6416,7 @@ async def _dispatch_text(msg, context, chat, text: str):
             except Exception:
                 pass
             return
-    if chat.type != "private":                       # trong nhóm: chỉ trả lời khi được nhắc tên / reply
+    if chat.type != "private" and not direct:        # trong nhóm: chỉ trả lời khi được nhắc tên / reply
         if not _addressed_to_bot(msg, context, text):
             return
         text = _strip_bot_mention(text, context)
@@ -6356,7 +6721,8 @@ async def gemini_media_reply(message, context, chat_id: int, source, question: s
 
 # ── Tạo ảnh / sơ đồ tư duy ───────────────────────────────────────────
 async def generate_image_job(prompt: str, style: str = "", aspect: str = "1:1",
-                             kind: str = "image", ref: str = "", model: str = "") -> dict:
+                             kind: str = "image", ref: str = "", model: str = "",
+                             provider: str = "", timeout: int = 0) -> dict:
     if kind == "mindmap":
         args = ["--mindmap", prompt]
     elif kind == "infographic":
@@ -6374,8 +6740,10 @@ async def generate_image_job(prompt: str, style: str = "", aspect: str = "1:1",
             args += ["--ref", ref]
         if model:
             args += ["--model", model]
+    if provider:
+        args += ["--provider", provider]
     args.append("--json")
-    timeout = int(os.getenv("AISTV_GEN_IMAGE_TIMEOUT", "300"))
+    timeout = timeout or int(os.getenv("AISTV_GEN_IMAGE_TIMEOUT", "300"))
     rc, out, err = await asyncio.to_thread(_image_cli, args, timeout)
     data = {}
     for line in reversed([x.strip() for x in (out or "").splitlines() if x.strip()]):
@@ -6427,18 +6795,24 @@ def _image_caption(data: dict) -> str:
     return "\n".join(bits)[:1000] or "🎨 Ảnh đã tạo"
 
 
-async def send_generated_image(chat_id: int, data: dict) -> None:
+async def send_generated_image(chat_id: int, data: dict, reply_to: int = None,
+                               message_thread_id: int = None) -> None:
     path = Path(str(data.get("path") or ""))
     if not path.is_file():
         raise RuntimeError("file ảnh không còn tồn tại")
     ready = await asyncio.to_thread(_photo_for_telegram, path)
     caption = _image_caption(data)
+    kw = {}
+    if reply_to:
+        kw["reply_to_message_id"] = reply_to
+    if message_thread_id:
+        kw["message_thread_id"] = message_thread_id
     try:
         with open(ready, "rb") as f:
-            await BOT_OBJ.send_photo(chat_id, photo=f, caption=caption, parse_mode="HTML")
+            await BOT_OBJ.send_photo(chat_id, photo=f, caption=caption, parse_mode="HTML", **kw)
     except Exception:
         with open(ready, "rb") as f:
-            await BOT_OBJ.send_document(chat_id, document=f, caption=caption, parse_mode="HTML")
+            await BOT_OBJ.send_document(chat_id, document=f, caption=caption, parse_mode="HTML", **kw)
 
 
 # ── Lời giải dài → các trang ảnh A4 có số trang ─────────────────────
@@ -6470,10 +6844,16 @@ def render_pages_ready(md: str, title: str = "") -> dict:
 
 
 async def _send_page_images(chat_id: int, paths: list, title: str,
-                            as_document: bool = False) -> None:
+                            as_document: bool = False, reply_to: int = None,
+                            message_thread_id: int = None) -> None:
     from telegram import InputMediaDocument, InputMediaPhoto
     total = len(paths)
     head = esc(_clip(title, 160))
+    kw = {}
+    if reply_to:
+        kw["reply_to_message_id"] = reply_to
+    if message_thread_id:
+        kw["message_thread_id"] = message_thread_id
     for start in range(0, total, 10):
         chunk = paths[start:start + 10]
         handles, media = [], []
@@ -6488,7 +6868,7 @@ async def _send_page_images(chat_id: int, paths: list, title: str,
                 cls = InputMediaDocument if as_document else InputMediaPhoto
                 extra = {"filename": path.name} if as_document else {}
                 media.append(cls(fh, caption=caption, parse_mode=HTML, **extra))
-            await BOT_OBJ.send_media_group(chat_id, media)
+            await BOT_OBJ.send_media_group(chat_id, media, **kw)
         except Exception as e:
             log.warning("Gửi nhóm trang lỗi (%s) — gửi từng ảnh", oneline(str(e), 160))
             for fh in handles:
@@ -6504,10 +6884,10 @@ async def _send_page_images(chat_id: int, paths: list, title: str,
                     with path.open("rb") as fh:
                         if as_document:
                             await BOT_OBJ.send_document(chat_id, document=fh, filename=path.name,
-                                                        caption=caption, parse_mode=HTML)
+                                                        caption=caption, parse_mode=HTML, **kw)
                         else:
                             await BOT_OBJ.send_photo(chat_id, photo=fh, caption=caption,
-                                                     parse_mode=HTML)
+                                                     parse_mode=HTML, **kw)
                 except Exception as e2:
                     log.warning("Gửi trang %s lỗi: %s", idx, oneline(str(e2), 160))
         finally:
@@ -6518,7 +6898,8 @@ async def _send_page_images(chat_id: int, paths: list, title: str,
                     pass
 
 
-async def _tool_pages_job(chat_id: int, md: str, title: str = "", fmt: str = "photo") -> dict:
+async def _tool_pages_job(chat_id: int, md: str, title: str = "", fmt: str = "photo",
+                          reply_to: int = None, message_thread_id: int = None) -> dict:
     if BOT_OBJ is None:
         return {"ok": False, "error": "bot chưa sẵn sàng"}
     try:
@@ -6532,7 +6913,8 @@ async def _tool_pages_job(chat_id: int, md: str, title: str = "", fmt: str = "ph
         return {"ok": False, "error": "không dựng được trang nào"}
     try:
         await _send_page_images(chat_id, paths, str(result.get("title") or title),
-                                fmt == "document")
+                                fmt == "document", reply_to=reply_to,
+                                message_thread_id=message_thread_id)
     except Exception as e:
         log.warning("Gửi trang ảnh lỗi: %s", oneline(str(e), 200))
         return {"ok": False, "error": oneline(str(e), 300)}
@@ -6761,7 +7143,7 @@ def _parse_image_args(args):
 
 
 async def _image_generate_reply(update, prompt: str, style: str = "", aspect: str = "1:1",
-                                kind: str = "image", model: str = ""):
+                                kind: str = "image", model: str = "", provider: str = ""):
     msg = update.effective_message
     chat_id = update.effective_chat.id
     ref = ""
@@ -6776,8 +7158,9 @@ async def _image_generate_reply(update, prompt: str, style: str = "", aspect: st
              "chart": "biểu đồ"}.get(kind, "ảnh")
     status = await msg.reply_text(f"🎨 <i>Đang tạo {label}…</i>", parse_mode=HTML)
     try:
-        data = await generate_image_job(prompt, style, aspect, kind, ref, model)
-        await send_generated_image(chat_id, data)
+        data = await generate_image_job(prompt, style, aspect, kind, ref, model,
+                                        provider=provider)
+        await send_generated_image(chat_id, data, reply_to=msg.message_id, **_thread_kw(msg))
         try:
             await status.delete()
         except Exception:
@@ -6791,11 +7174,24 @@ async def _image_generate_reply(update, prompt: str, style: str = "", aspect: st
             pass
 
 
-@guard()
+@guard(allow_guest=True)
 async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mặc định tạo ảnh; nếu tham số đầu là file/URL ảnh thì đọc ảnh (như cũ)."""
-    msg = update.effective_message
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
     args = list(context.args or [])
+    if not authorized(user.id, chat.type):
+        if not GUEST_CHAT:
+            await _deny_guest(update, context)
+            return
+        prompt, style, aspect, kind, _model = _parse_image_args(args)
+        if not prompt:
+            await msg.reply_text(
+                "Dùng: <code>/image vẽ một con mèo</code> · "
+                "<code>/image --mindmap Kế hoạch học Python</code>", parse_mode=HTML)
+            return
+        await _guest_media_reply(msg, context, chat, user, prompt, kind=kind,
+                                 prompt=prompt, style=style, aspect=aspect)
+        return
     first = str(args[0]).strip() if args else ""
     if first and not first.startswith("-"):
         if re.match(r"^https?://", first, re.I) or Path(_resolve_media_source(first)).is_file():
@@ -6813,12 +7209,19 @@ async def cmd_see(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _cmd_gemini_media(update, context, "image")
 
 
-@guard()
+@guard(allow_guest=True)
 async def cmd_mindmap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, user, chat = update.effective_message, update.effective_user, update.effective_chat
     topic = " ".join(context.args or []).strip()
     if not topic:
-        await update.effective_message.reply_text(
+        await msg.reply_text(
             "Dùng: <code>/mindmap Kế hoạch học Python</code>", parse_mode=HTML)
+        return
+    if not authorized(user.id, chat.type):
+        if not GUEST_CHAT:
+            await _deny_guest(update, context)
+            return
+        await _guest_media_reply(msg, context, chat, user, topic, kind="mindmap", prompt=topic)
         return
     await _image_generate_reply(update, topic, "", "1:1", "mindmap")
 
@@ -6844,7 +7247,9 @@ async def cmd_pages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     status = await msg.reply_text("📄 <i>Đang dựng thành ảnh từng trang…</i>", parse_mode=HTML)
     title = oneline(next((ln.strip("#*_•- ") for ln in text.splitlines() if ln.strip()), ""), 70)
-    res = await _tool_pages_job(msg.chat_id, text, title, "photo")
+    res = await _tool_pages_job(msg.chat_id, text, title, "photo",
+                                reply_to=msg.message_id, message_thread_id=_thread_kw(msg).get(
+                                    "message_thread_id"))
     try:
         await status.delete()
     except Exception:
@@ -8401,6 +8806,99 @@ async def _web2api_loop():
         await asyncio.sleep(10)
 
 
+@guard(owner_only=True)
+async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bật/tắt và chặn khách khi nhóm spam (chỉ chủ bot)."""
+    global GUEST_CHAT
+    msg = update.effective_message
+    args = [str(a).strip().lower() for a in (context.args or []) if str(a).strip()]
+    action = args[0] if args else ""
+    if action in ("on", "off") and len(args) == 1:
+        GUEST_CHAT = action == "on"
+        GUEST_ACTIVE["chat"] = action == "on"
+        if not GUEST_CHAT:
+            GUEST_ACTIVE["media"] = False
+        await msg.reply_text(
+            f"👥 Khách: <b>{'BẬT' if GUEST_CHAT else 'TẮT'}</b>"
+            + ("" if GUEST_CHAT else " (ảnh/sơ đồ cũng tắt)"), parse_mode=HTML)
+        return
+    if action in ("images", "media", "anh", "ảnh", "image"):
+        sub = args[1] if len(args) > 1 else ""
+        if sub not in ("on", "off"):
+            await msg.reply_text("Dùng: <code>/guest images on|off</code>", parse_mode=HTML)
+            return
+        GUEST_ACTIVE["media"] = sub == "on" and GUEST_ACTIVE["chat"]
+        await msg.reply_text(
+            f"🎨 Tạo ảnh cho khách: <b>{'BẬT' if GUEST_ACTIVE['media'] else 'TẮT'}</b>",
+            parse_mode=HTML)
+        return
+    if action == "ban":
+        try:
+            uid = int(args[1])
+        except (IndexError, ValueError):
+            await msg.reply_text("Dùng: <code>/guest ban &lt;user_id&gt; [phút]</code>",
+                                 parse_mode=HTML)
+            return
+        if uid == owner_id():
+            await msg.reply_text("⚠️ Không chặn chủ bot.")
+            return
+        try:
+            minutes = int(args[2]) if len(args) > 2 else 60
+        except ValueError:
+            minutes = 60
+        GUEST_BANS[uid] = 0.0 if minutes <= 0 else time.time() + minutes * 60
+        for key in [k for k in GUEST_HIST if k[1] == uid]:
+            GUEST_HIST.pop(key, None)
+        GUEST_MODEL_BY_USER.pop(uid, None)
+        await msg.reply_text(
+            f"🚫 Đã chặn khách <code>{uid}</code>"
+            + (" vĩnh viễn (tới khi restart)." if minutes <= 0 else f" trong {minutes} phút."),
+            parse_mode=HTML)
+        return
+    if action == "unban":
+        try:
+            uid = int(args[1])
+        except (IndexError, ValueError):
+            await msg.reply_text("Dùng: <code>/guest unban &lt;user_id&gt;</code>", parse_mode=HTML)
+            return
+        GUEST_BANS.pop(uid, None)
+        await msg.reply_text(f"✅ Đã bỏ chặn <code>{uid}</code>.", parse_mode=HTML)
+        return
+    if action == "bans":
+        if not GUEST_BANS:
+            await msg.reply_text("Không có ai bị chặn.")
+            return
+        now = time.time()
+        rows = []
+        for uid, until in list(GUEST_BANS.items()):
+            if until and until < now:
+                GUEST_BANS.pop(uid, None)
+                continue
+            rows.append(f"• <code>{uid}</code> — "
+                        + ("vĩnh viễn" if not until else f"còn {int((until - now) // 60) + 1} phút"))
+        await msg.reply_text("🚫 <b>Đang chặn</b>\n" + ("\n".join(rows) or "Không có ai."),
+                             parse_mode=HTML)
+        return
+    if action and action not in ("status", "st"):
+        await msg.reply_text(
+            "Lệnh: <code>/guest on|off</code> · <code>/guest images on|off</code> · "
+            "<code>/guest ban &lt;id&gt; [phút]</code> · <code>/guest unban &lt;id&gt;</code> · "
+            "<code>/guest bans</code>", parse_mode=HTML)
+        return
+    active_bans = [u for u, t in GUEST_BANS.items() if not t or t > time.time()]
+    await msg.reply_text(
+        "👥 <b>Chế độ khách</b>\n"
+        f"• Chat/code: {'BẬT' if GUEST_CHAT and GUEST_ACTIVE['chat'] else 'TẮT'}\n"
+        f"• Tạo ảnh/sơ đồ: {'BẬT' if GUEST_ACTIVE['media'] else 'TẮT'}\n"
+        f"• Model mặc định: <code>{esc(GUEST_MODEL)}</code> "
+        f"({len(GUEST_MODEL_OPTIONS)} model cho khách)\n"
+        f"• Ngữ cảnh riêng đang giữ: {len(GUEST_HIST)} người\n"
+        f"• Đang chặn: {len(active_bans)}\n\n"
+        f"Giới hạn: {GUEST_RATE} tin/phút · 1 ảnh/{GUEST_MEDIA_GAP}s · "
+        f"{GUEST_MEDIA_RATE} ảnh/giờ mỗi người.",
+        parse_mode=HTML)
+
+
 @guard()
 async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quản lý server Gemini Web2API dự phòng (chỉ chủ bot)."""
@@ -8505,6 +9003,8 @@ COMMANDS = [
     ("restart", "Khởi động lại bot"),
     ("key", "Xem / đặt API key"),
     ("web2api", "Dự phòng Gemini Web2API"),
+    ("ask", "Hỏi trong nhóm không cần @mention"),
+    ("guest", "Bật/tắt, chặn khách"),
     ("files", "File trong workspace"), ("get", "Tải file về"), ("help", "Hướng dẫn"),
 ]
 
@@ -8784,7 +9284,9 @@ def main() -> None:
                       (["restart"], cmd_restart),
                       (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny),
                       (["key", "keys"], cmd_key),
-                      (["web2api", "w2a"], cmd_web2api)]:
+                      (["web2api", "w2a"], cmd_web2api),
+                      (["ask"], cmd_ask),
+                      (["guest", "khach"], cmd_guest)]:
         app.add_handler(CommandHandler(names, fn))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.PHOTO & filters.UpdateType.MESSAGE, handle_photo))

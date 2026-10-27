@@ -1428,6 +1428,88 @@ def _image_mime(raw: bytes) -> str:
 _IMAGE_VERB_RE = re.compile(
     r"(?i)^\s*(create|generate|draw|make|paint|render)\s+(an?\s+)?(image|picture|photo)")
 
+_IMAGE_HOSTS = ("googleusercontent.com", "gstatic.com", "googleapis.com", "ggpht.com")
+_IMAGE_EXT_RE = re.compile(r"\.(?:png|jpe?g|webp|gif|avif)$", re.I)
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*(https?://[^)\s]+)\s*\)")
+_URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
+
+
+def normalize_image_url(url: str) -> str:
+    """Đưa link ảnh về https và bỏ phần bao ngoài markdown."""
+    value = (url or "").strip().strip("<>\"'")
+    if value.startswith("//"):
+        value = "https:" + value
+    if value.lower().startswith("http://"):
+        value = "https://" + value[7:]
+    return value
+
+
+def _is_image_url(url: str) -> bool:
+    try:
+        parts = urllib.parse.urlsplit(normalize_image_url(url))
+    except Exception:
+        return False
+    if parts.scheme != "https" or not parts.hostname:
+        return False
+    host = parts.hostname.lower()
+    if not any(host == h or host.endswith("." + h) for h in _IMAGE_HOSTS):
+        return False
+    return bool(_IMAGE_EXT_RE.search(parts.path)
+                or "/image_generation_content/" in parts.path
+                or "googleusercontent" in host)
+
+
+def extract_image_urls(text: str, limit: int = 3) -> list:
+    """Tìm link ảnh Gemini chèn trong câu trả lời (markdown hoặc URL trần)."""
+    found = []
+    for match in _MD_IMAGE_RE.finditer(text or ""):
+        url = normalize_image_url(match.group(1))
+        if _is_image_url(url) and url not in found:
+            found.append(url)
+    for match in _URL_RE.finditer(text or ""):
+        url = normalize_image_url(match.group(0).rstrip(".,;:!?"))
+        if _is_image_url(url) and url not in found:
+            found.append(url)
+    return found[:max(0, limit)]
+
+
+def download_image(url: str, timeout: float = 120, allow_any: bool = False) -> tuple:
+    """Tải ảnh từ link Google (kèm cookie Gemini Web) → (bytes, mime, lỗi)."""
+    url = normalize_image_url(url)
+    if not url.lower().startswith("https://") or not urllib.parse.urlsplit(url).hostname:
+        return None, "", "link ảnh không hợp lệ"
+    if not allow_any and not _is_image_url(url):
+        return None, "", "link không phải ảnh Google hợp lệ"
+    headers = {
+        "User-Agent": UA,
+        "Referer": "https://gemini.google.com/",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+    }
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if any(host == h or host.endswith("." + h)
+           for h in ("google.com", "googleusercontent.com", "gstatic.com")):
+        cookie = cookie_header()
+        if cookie:
+            headers["Cookie"] = cookie
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(MAX_IMAGE_BYTES + 1)
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+    except urllib.error.HTTPError as exc:
+        return None, "", f"HTTP {exc.code} khi tải ảnh"
+    except Exception as exc:
+        return None, "", f"không tải được ảnh: {type(exc).__name__}"
+    if len(raw) > MAX_IMAGE_BYTES:
+        return None, "", "ảnh vượt quá 15 MB"
+    if raw[:1] == b"<" or "text/html" in ctype:
+        return None, "", "link không trả về ảnh (có thể đã hết hạn)"
+    head = raw[:16]
+    if not (head.startswith(b"\x89PNG") or head.startswith(b"\xff\xd8\xff")
+            or (head[:4] == b"RIFF" and raw[8:12] == b"WEBP")):
+        return None, "", "dữ liệu tải về không phải ảnh"
+    return raw, _image_mime(raw), None
+
 
 def generate_image(prompt: str, model: str = "", timeout: float = 240,
                    response_format: str = "b64_json") -> tuple:
@@ -1468,17 +1550,11 @@ def generate_image(prompt: str, model: str = "", timeout: float = 240,
         except Exception:
             return None, "", "ảnh base64 không hợp lệ"
     elif item.get("url"):
-        url = str(item["url"])
-        if not url.startswith(("http://", "https://")):
-            return None, "", "URL ảnh không hợp lệ"
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=min(timeout, 120)) as resp:
-                raw = resp.read(MAX_IMAGE_BYTES + 1)
-        except Exception as exc:
-            return None, "", f"không tải được ảnh: {exc}"
-        if len(raw) > MAX_IMAGE_BYTES:
-            return None, "", "ảnh vượt quá 15 MB"
+        raw, mime, err = download_image(str(item["url"]), timeout=min(timeout, 120),
+                                        allow_any=True)
+        if not raw:
+            return None, "", err or "không tải được ảnh"
+        return raw, mime or "image/png", None
     if not raw:
         return None, "", "server không trả dữ liệu ảnh"
     return raw, _image_mime(raw), None
