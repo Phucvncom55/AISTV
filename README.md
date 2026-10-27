@@ -1,724 +1,95 @@
 # AI STV — Bot Telegram × OpenCode
 
-Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace, trả kết quả về chat. Có trí nhớ dài hạn, nhật ký theo ngày, skills, gửi/nhận file, lịch sử hội thoại bền vững và **lướt YouTube, Facebook, TikTok, xem video + đọc ảnh bằng Gemini, đọc tài liệu GitHub** (tìm, đọc nội dung, tải video).
+Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace rồi trả kết quả về chat.
+Có trí nhớ dài hạn, nhắc việc, skills, gửi/nhận file, và đọc được ảnh, video, YouTube, Facebook, TikTok.
 
-**Model:** **DeepSeek v4.1** là model chính (trả lời, viết code, dùng tool). **Gemini 3.8 Flash** là mắt + tai: đọc ảnh (vật thể, OCR, biểu đồ) và xem video dưới 45 phút; sau đó hai model thảo luận (DeepSeek có thể hỏi lại Gemini bằng tool `ask_gemini`) và DeepSeek viết câu trả lời cuối cùng.
+**Model:** DeepSeek v4.1 (chính) + Gemini 3.8 Flash (đọc ảnh, xem video).
+Chạy trên Colab, VPS, Linux/macOS và Windows — chỉ cần Python 3.10+ và mạng.
 
-Chạy được trên **Colab, VPS, Linux/macOS và Windows (cmd/PowerShell)** — chỉ cần Python 3.10+ và mạng.
+## 1. Chạy bot
 
-## ⚡ 3 bước
+Lấy token: nhắn [@BotFather](https://t.me/BotFather) → `/newbot` → token dạng `123456:ABC…`.
+Lấy user id của bạn: nhắn [@userinfobot](https://t.me/userinfobot).
 
-1. `bash push.sh` → quét repo của tài khoản GitHub, cho **chọn repo có sẵn** hoặc tạo mới, rồi push.
-2. Thêm `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`) vào 🔑 Secrets của Colab. Muốn bot đọc ảnh/video bằng Gemini thì thêm `GEMINI_API_KEY` (lấy tại [AI Studio](https://aistudio.google.com/apikey)).
-3. Dán lệnh này vào ô Colab:
+**Google Colab** — thêm `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS` vào 🔑 Secrets (bật Notebook access), rồi Run:
 
 ```python
 !bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=3)
 ```
 
-## 1. Tạo bot Telegram
-
-1. Nhắn [@BotFather](https://t.me/BotFather) → `/newbot` → lấy **token** dạng `123456:ABC…`.
-2. (Nên làm) Nhắn [@userinfobot](https://t.me/userinfobot) để lấy **user id** của bạn → khoá bot.
-
-## 2. Đưa code lên GitHub
-
-```bash
-cd AISTV
-bash push.sh                     # quét repo của tài khoản → chọn hoặc tạo mới
-bash push.sh owner/repo public   # hoặc chỉ định đúng repo
-```
-
-`push.sh` lấy token theo thứ tự: `GITHUB_TOKEN` / `GH_TOKEN` → `.secrets/github_token`
-(bot lưu sau `/github login`) → `gh auth token` nếu có. **Không cần cài `gh`.**
-
-> Trên Windows, dùng lệnh git ở dưới hoặc `/github` trong bot (repo chưa có `push.ps1`).
-
-Trong bot Telegram (chủ bot):
-
-```text
-/github login                  # kết nối bằng mã, token lưu lâu dài
-/github repos                  # quét repo của tài khoản, bấm nút chọn repo đích
-/github repo use owner/name    # đặt repo đích bằng chữ
-/github repo create ten private  # tạo repo mới rồi tự push code
-/plan xây tính năng X           # chia bước, tự chạy, tự kiểm chứng, tự sửa
-/undo                           # hoàn tác thay đổi chưa commit gần nhất
-/push                           # đẩy code vừa sửa lên GitHub ngay
-```
-
-Agent sửa code trong repo xong, bot **không tự push** (mặc định `AISTV_AUTO_PUSH=0`): bot gửi
-diff kèm nút **⬆️ Push** / **↩️ Hoàn tác** để bạn duyệt. Trước mỗi lượt sửa, bot tự tạo
-**checkpoint**, nên bấm ↩️ là repo về đúng trạng thái trước đó. Máy nào muốn tự push như bản cũ
-thì đặt `AISTV_AUTO_PUSH=1`.
-Agent cũng có tool `github_login`: thiếu quyền GitHub thì tự xin mã
-`https://github.com/login/device`, gửi vào chat, **chờ bạn xác nhận rồi chạy tiếp**.
-
-Đổi token sang tài khoản khác: `/github token <PAT>` — nếu repo đang dùng không
-truy cập được, bot tự quét repo của tài khoản mới và hiện bảng chọn.
-
-Không có token? Tạo repo trống trên GitHub rồi:
-
-```bash
-cd AISTV
-git init -b main && git add -A
-git commit -m "AI STV — bot Telegram chạy OpenCode"
-git remote add origin https://github.com/Phucvncom55/AISTV.git
-git push -u origin main
-```
-
-> **Không commit `.env`** (đã nằm trong `.gitignore`). Repo public là an toàn vì token chỉ nằm trên máy chạy.
-
-## 3. Chạy bot bằng MỘT lệnh
-
-`bootstrap.sh` luôn cập nhật repo rồi mới chạy `run.sh` bên trong, nên **không bị kẹt bản cũ do cache GitHub**:
+**Linux / macOS / VPS** — một lệnh:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=3)
 ```
 
-Muốn dùng repo khác, truyền link GitHub trực tiếp:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=3) https://github.com/Phucvncom55/AISTV
-```
-
-Lần đầu script sẽ: tải repo → đồng bộ token/API key → tạo `.venv` → cài thư viện → cài OpenCode → chạy bot.
-Mỗi lần khởi động, bot tự kiểm tra bản OpenCode mới trên npm và **nâng tại chỗ, giữ nguyên phiên**
-(dữ liệu `~/.local/share/opencode` không bị xoá) — tắt bằng `AISTV_OPENCODE_UPDATE=0`.
-Nguồn token: biến môi trường → `.env` của repo → `config.env` dùng chung → repo private
-`Phucvncom55/AISTV-secrets` (qua `gh auth`, `AISTV_CONFIG_TOKEN` hoặc Colab Secrets) → chỉ hỏi
-trực tiếp khi tất cả đều chưa có.
-
-### Chạy trên Google Colab
-
-1. Dán link repo của bạn vào ô dưới (thay `Phucvncom55/AISTV`), **hoặc** dùng
-   `bash <(curl -fsSL .../bootstrap.sh) https://github.com/Phucvncom55/AISTV`.
-2. Mở 🔑 **Secrets** (cột trái) → thêm `TELEGRAM_BOT_TOKEN` (và `ALLOWED_USER_IDS`),
-   bật **Notebook access**. Tuỳ chọn: thêm `AISTV_CONFIG_TOKEN` (PAT đọc repo
-   `AISTV-secrets`) để tự lấy toàn bộ token/API key còn lại.
-3. Dán vào một ô code rồi Run:
-
-```python
-!bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=3)
-```
-
-Script tự: clone/cập nhật repo → đồng bộ config từ Colab Secrets / GitHub → chọn Python (venv → hệ thống → uv) → cài thư viện → cài OpenCode → chạy bot.
-Không có token ở bất kỳ nguồn nào thì script báo rõ cách thêm, không cài lan man.
-
-> Chưa có `gh` lẫn `AISTV_CONFIG_TOKEN`? Script in mã `XXXX-XXXX` + `https://github.com/login/device`
-> ngay trong ô Colab; bạn nhập mã trên điện thoại/máy khác, script tự chạy tiếp và lưu token vào
-> Drive `config.env` — các phiên sau không cần làm lại.
-
-### Chạy trên Windows (cmd / PowerShell)
-
-**Cách nhanh — dán 1 dòng vào cmd (không cần PowerShell):**
+**Windows (cmd)** — dán một dòng:
 
 ```bat
 curl -fsSL -o "%TEMP%\aistv.bat" "https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.bat?v=1" && call "%TEMP%\aistv.bat"
 ```
 
-Hoặc trong thư mục repo: nhấp đôi `run.bat` (dùng `bootstrap.bat` nếu muốn tự cập nhật code trước).
-
-`run.bat` / `bootstrap.bat` viết bằng **cmd thuần**, tự tải/cập nhật repo, tạo `.venv`,
-cài thư viện, **tự lấy token từ GitHub** (nếu máy đã đăng nhập `gh` hoặc có `AISTV_CONFIG_TOKEN`)
-rồi chạy bot — không phụ thuộc PowerShell 5.1/7, chỉ hỏi token khi thật sự chưa có.
-Bản PowerShell (`bootstrap.ps1`, `run.ps1`) dùng **cùng logic đồng bộ** với `run.bat` và `run.sh`.
-
-**Cần có sẵn:**
-
-- Python 3.10+: `winget install --id Python.Python.3.12 -e` (nhớ chọn *Add python.exe to PATH*)
-- Git: `winget install --id Git.Git -e`
-- OpenCode: script tự cài (npm nếu có, không thì tải binary OpenCode 2 từ gói npm)
-
-Script tự tạo `.venv`, cài thư viện, tự đồng bộ token/API key từ `.env`, `config.env`
-hoặc repo private trên GitHub, rồi chạy bot. Chỉ hỏi token khi cả ba nguồn đều chưa có.
-Dữ liệu vẫn ở `%USERPROFILE%\stv_agent` (đổi bằng `STV_HOME`).
-
-> OpenCode khuyến nghị WSL2 để đầy đủ tính năng; bản Windows native (cmd/PowerShell) vẫn chạy được.
-> Nếu dùng WSL thì làm theo hướng dẫn Linux ở trên.
-
-### Token bot: tự đồng bộ, không phải nhập lại
-
-Có **3 nơi** lưu bí mật, đều bị `.gitignore` nên không bị push:
-
-| Nơi lưu | Khi nào dùng |
-|---|---|
-| `.env` cạnh `aistv_bot.py` | riêng cho bản clone đó (ưu tiên cao nhất trong các file) |
-| `~/.config/aistv/config.env` (`%USERPROFILE%\.config\aistv\config.env` trên Windows) | **dùng chung** — clone lại repo, đổi `AISTV_DIR` vẫn còn. Trên Colab: `MyDrive/aistv/config.env` |
-| repo private `Phucvncom55/AISTV-secrets` | **nguồn chuẩn** để mọi máy đồng bộ; cần `gh` đã đăng nhập, `AISTV_CONFIG_TOKEN` hoặc `AISTV_ENV_URL` |
-
-Thứ tự đọc: biến môi trường → `.env` của repo → `config.env` dùng chung → tải từ GitHub/URL.
-Nếu GitHub có key mới hơn, `aistv_config.py sync` cập nhật lại `.env` + `config.env` (trừ biến
-môi trường đang được đặt tay).
-
-```dotenv
-TELEGRAM_BOT_TOKEN=123456:ABC...
-ALLOWED_USER_IDS=123456789
-GEMINI_API_KEY=...
-```
-
-- **Mọi đường chạy dùng chung một bộ đồng bộ** `aistv_config.py`: `run.bat` (cmd),
-  `run.ps1` (PowerShell), `run.sh` (Colab/Linux/macOS) và cả `aistv_bot.py`.
-  Sửa `config.env` trên GitHub là máy nào chạy cũng thấy — không còn cảnh cmd hỏi token
-  dù token đã có trên GitHub.
-- Chỉ **hỏi token khi** cả biến môi trường, `.env`, `config.env` và GitHub/URL đều không có;
-  token nhập tay được lưu vào cả hai file.
-- Token GitHub để tải repo private lấy theo thứ tự: `AISTV_CONFIG_TOKEN` → `GH_TOKEN` /
-  `GITHUB_TOKEN` / `AISTV_GITHUB_TOKEN` → `gh auth token` → Colab Secrets.
-  Không cần cài `gh` nếu đã có PAT.
-- Trên Colab: thêm `TELEGRAM_BOT_TOKEN` và (tuỳ chọn) `AISTV_CONFIG_TOKEN` vào 🔑 **Secrets**,
-  bật *Notebook access*. Lần đầu `run.sh` lưu các giá trị vào Drive `config.env`; các phiên sau
-  không cần quyền đọc Secrets nữa.
-- Prompt có **giới hạn thời gian** (`AISTV_PROMPT_TIMEOUT`, mặc định 180s) — không bao giờ treo chờ vô hạn.
-- Kiểm tra nguồn cấu hình (không in bí mật): `python aistv_config.py doctor`.
-- Tắt tự đồng bộ: `AISTV_CONFIG_SYNC=0`. Tắt tải repo private: `AISTV_CONFIG_REPO=0`.
-- Khi bot khởi động, token/API key đang có được tự thêm vào `config.env` dùng chung
-  (chỉ thêm, không ghi đè giá trị cũ) và các key còn lại khôi phục từ cloud.
-
-### Chủ bot: chỉ cần `ALLOWED_USER_IDS`
-
-Không còn bước "xác nhận chủ bot" khi khởi động — bot kiểm tra **user id Telegram** ở mọi tin
-nhắn. Chỉ cần `ALLOWED_USER_IDS` có trong `config.env` (repo private lo sẵn), bot chạy là dùng
-được ngay, không hỏi gì.
-
-- Lấy id: nhắn `@userinfobot` trên Telegram, hoặc nhắn cho bot lần đầu — bot trả về id của bạn.
-- Nhiều người: `ALLOWED_USER_IDS=123456789,987654321`.
-- Nếu để trống, người nhắn tin riêng đầu tiên sẽ thành chủ bot (tiện cho lần chạy đầu).
-- Cấp/thu quyền thêm trong chat: `/allow <id>`, `/deny <id>` (chủ bot).
-
-### Người khác chat: chỉ chữ qua AI STV
-
-Người **không** có trong `ALLOWED_USER_IDS` (và không được `/allow`) vẫn nhắn được với bot,
-nhưng chỉ ở chế độ khách:
-
-- Tin nhắn chữ được trả lời **thuần bằng AI STV** (Gemini nội bộ): không qua OpenCode,
-  không có công cụ, không đọc được file/lịch sử của chủ bot. Mỗi khách có ngữ cảnh ngắn riêng
-  (mặc định 6 lượt, chỉ trong RAM).
-- **Lệnh, nút bấm, ảnh, video, file, tin nhắn thoại đều bị từ chối** — kể cả trong nhóm.
-  Gửi ảnh/video không được xem, không được tạo ảnh.
-- Trong nhóm, khách phải `@tên_bot` hoặc reply vào tin của bot thì mới được trả lời.
-- Khách không bao giờ chạm vào luồng `ask_user` của agent.
-- Tắt hoàn toàn chat khách: `AISTV_GUEST_CHAT=0`. Đổi model/thời gian chờ:
-  `AISTV_GUEST_MODEL`, `AISTV_GUEST_TIMEOUT`.
-
-### Gemini key: không bắt nhập khi chạy
-
-Gemini là **tuỳ chọn** — thiếu key thì bot vẫn chạy, chỉ mất phần đọc ảnh/xem video không phụ đề. `run.sh` **không hỏi** key nữa; có 3 cách thêm:
+Lần đầu script tự clone repo, tạo `.venv`, cài thư viện + OpenCode, hỏi token nếu chưa có rồi chạy bot.
+Các lần sau chỉ cần:
 
 ```bash
-# 1. Ngay trong chat Telegram (nhanh nhất, tin nhắn chứa key tự bị xoá)
-/key gemini AIza...
-
-# 2. Một dòng lệnh trên máy chủ
-echo 'GEMINI_API_KEY=AIza...' >> ~/.config/aistv/config.env
-
-# 3. Truyền lúc chạy — script tự lưu lại
-GEMINI_API_KEY=AIza... bash run.sh
+cd ~/AISTV && bash run.sh           # Colab / Linux / macOS
+# chạy nền: nohup bash run.sh > aistv.log 2>&1 &
 ```
-
-Muốn buộc script hỏi trong terminal: `AISTV_ASK_GEMINI=1 bash run.sh`.
-
-Trên Colab, nếu đã mount Drive (`/content/drive/MyDrive`), `run.sh` tự dùng `MyDrive/aistv/config.env` → token + key sống qua các phiên, không phải nhập lại. Đổi bằng `AISTV_CONFIG_DIR=/duong/dan/khac`.
-
-### Chạy 1 lệnh, không nhập gì (config trong repo private)
-
-**GitHub Actions secrets không dùng được** cho `bash <(curl ...)`: chúng chỉ tồn tại bên trong runner của Actions, script chạy trên VPS/Colab không đọc được.
-
-Cách chạy được: để `config.env` trong một **repo private**, cho runner tải về bằng PAT chỉ-đọc.
-`run.sh`, `run.bat`, `run.ps1` và `aistv_bot.py` đều dùng **cùng một logic** (`aistv_config.py`):
-
-```bash
-AISTV_CONFIG_TOKEN=github_pat_xxx \
-  bash <(curl -fsSL 'https://raw.githubusercontent.com/Phucvncom55/AISTV/main/bootstrap.sh?v=9')
-```
-
-- Repo private đã có sẵn: **`Phucvncom55/AISTV-secrets`** — chứa token bot, Gemini, Groq/OpenAI,
-  Cloudflare, email… Sửa `config.env` trên web GitHub là **mọi máy** (Windows cmd, PowerShell,
-  Colab, VPS) nhận thay đổi ở lần chạy sau.
-- **Máy đã đăng nhập `gh` thì không cần PAT**: cả `run.bat` và `run.sh` tự dùng `gh auth token`.
-  Windows chỉ cần dán lệnh `bootstrap.bat` ở trên — không hỏi token nếu repo private đã có.
-- **Chưa có `gh` lẫn PAT**: nếu máy đã có `config.env`/`.env` với token bot thì script
-  **không hỏi đăng nhập** (chỉ đồng bộ repo private khi đã có sẵn token). Máy mới trắng thì
-  runner tự mở **device login** — in mã `XXXX-XXXX` và `https://github.com/login/device`,
-  chờ bạn nhập (tối đa `AISTV_DEVICE_TIMEOUT`, mặc định 600s) rồi lưu token vào `config.env`
-  và `.env` của repo, chạy tiếp, không phải nhập lại lần sau.
-  Tắt bằng `AISTV_DEVICE_LOGIN=0`.
-- Token đã lưu bởi `/github login` trong bot (`<STV_HOME>/.secrets/github_token`, kể cả
-  `/content/drive/MyDrive/stv_agent/.secrets/github_token` trên Colab) cũng được dùng để đọc
-  repo private — đăng nhập một lần là cả hai phía dùng chung.
-- PAT (nếu muốn tự cấp): *Settings → Developer settings → Fine-grained tokens* → chỉ chọn repo
-  `AISTV-secrets`, quyền **Contents: Read-only**.
-- Lưu lệnh trên vào ghi chú/alias → các lần sau chạy là bot lên, không hỏi gì.
-  Chỉ PAT nằm trong lệnh, không phải token bot.
-- Nếu để config ở nơi khác: `AISTV_ENV_URL=https://.../config.env` (tải trực tiếp, không cần token).
-
-Đổi lại: lệnh có chứa PAT. Ai đọc được lệnh thì đọc được đúng repo đó — nên đặt *Contents: Read-only* và chỉ chọn 1 repo.
-
-### Chạy lại / VPS
-
-```bash
-cd ~/AISTV && bash run.sh          # đã có .env thì chạy thẳng
-```
-
-Windows:
 
 ```bat
 cd /d "%USERPROFILE%\AISTV"
 run.bat
 ```
 
-Muốn chạy nền trên VPS:
+Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~/stv_agent` — cập nhật code không mất.
 
-```bash
-cd ~/AISTV && nohup bash run.sh > aistv.log 2>&1 &
-```
+## 2. Cấu hình tối thiểu
 
-Nếu bot báo `Database is not empty and has no session table` (thường kèm `/models` trống):
-máy còn binary OpenCode **v1** ở `~/.opencode/bin/opencode` trong khi dữ liệu phiên đã là **v2**.
-Khi đó **mọi model chạy qua OpenCode** đều trả `Unexpected server error`, bot chuyển sang Web2API
-chat-only (không có tool) — trông như "model hỏng" dù model vẫn ổn. Bot tự ưu tiên binary v2;
-nếu vẫn lỗi thì cài lại bản v2 rồi xoá bản cũ:
-
-```bash
-curl -fsSL https://opencode.ai/v2/install | bash   # /install (không có /v2) chỉ cài bản 1.x
-rm -rf ~/.opencode           # bản v1 cũ (dữ liệu phiên v2 giữ nguyên)
-# hoặc ghim đường dẫn tuyệt đối (lấy bằng `command -v opencode`) vào .env:
-# OPENCODE_BIN=/usr/local/bin/opencode
-```
-
-## 4. Dùng bot
-
-| Lệnh | Tác dụng |
-|---|---|
-| `/start` `/help` | Giới thiệu, hướng dẫn |
-| `/new` | Cuộc trò chuyện mới (giữ trí nhớ dài hạn) |
-| `/stop` | Huỷ tác vụ đang chạy (kể cả kế hoạch nhiều bước) |
-| `/plan <yêu cầu lớn>` | Chia 2–8 bước, tự chạy từng bước, tự kiểm chứng và tự sửa trước khi báo cáo |
-| `/plan` `/plan list` `/plan cancel` | Xem kế hoạch gần nhất / danh sách / huỷ |
-| `/undo` | Hoàn tác thay đổi chưa commit gần nhất (quay về checkpoint trước lượt sửa) |
-| `/status` | Trạng thái bot, model, thời gian chạy |
-| `/model` `/models` | Xem / đổi model OpenCode |
-| `/remember` `/memory` `/forget` | Trí nhớ dài hạn |
-| `/skills` `/skill <tên> <yêu cầu>` | Kỹ năng chuyên biệt |
-| `/skill add <github-url\|owner/repo/path>` | Cài skill chuẩn Agent Skills (chủ bot); thêm `--force`, `--name`, `--ref`, `--allow-restricted` |
-| `/files` `/get <đường dẫn>` | Liệt kê / tải file agent tạo |
-| `/allow <id>` `/deny <id>` | Cấp / thu hồi quyền (chủ bot) |
-| `/push` | Commit + push code đang có trong repo lên GitHub (chủ bot) — Windows `run.bat` nhận ngay |
-| `/key [gemini\|groq\|openai\|jina] [giá trị]` | Xem / đặt API key ngay trong chat (chủ bot); tin nhắn chứa key tự xoá |
-
-**Chủ động & trí nhớ**
-
-| Lệnh | Tác dụng |
-|---|---|
-| `/remind +30m uống nước` | Hẹn nhắc việc (`+2h`, `20:30`, `mai 8:00`, `25/12 20:00`, `daily 8:00`) |
-| `/task daily 9:00 kiểm tra repo` | Để **agent tự chạy** yêu cầu theo lịch rồi gửi kết quả |
-| `/reminders` · `/unremind <mã\|all>` | Xem / xoá nhắc việc |
-| `/watch git owner/repo [nhánh]` | Báo khi repo có commit mới |
-| `/watch log <file> [regex]` | Báo dòng lỗi mới trong log (bot tự theo dõi log của nó) |
-| `/watch file <đường dẫn>` | Báo khi file/thư mục thay đổi |
-| `/cloud [sync]` | Trạng thái trí nhớ đám mây / đẩy ngay lên Firebase |
-| `/summary` | Cô đọng hội thoại hiện tại vào `MEMORY.md` |
-| `/email` | Trạng thái kết nối email |
-| `/email test` | Kiểm tra đăng nhập IMAP |
-| `/email inbox [n]` · `/email unread [n]` | Xem hộp thư / thư chưa đọc |
-| `/email read <số\|uid>` | Đọc nội dung một thư |
-| `/email send a@b.c \| Tiêu đề \| Nội dung` | Gửi thư |
-| `/email setup <email> <app-password>` | Lưu cấu hình (chủ bot) |
-| `/email reset` | Xoá cấu hình đã lưu |
-
-- **Trí nhớ đám mây (Firebase RTDB):** `MEMORY.md`, lịch sử chat, nhắc việc và watch được lưu trên cloud nên **restart bot / Colab reset vẫn còn**. Mỗi bot dùng namespace riêng `AISTV_CLOUD_NS/<bot id>`.
-- **Bí mật đồng bộ, không phải đăng nhập lại:** Gemini/Groq/OpenAI/Jina key, GitHub token, email, `ALLOWED_USER_IDS`, cấu hình model… được **mã hoá** (PBKDF2-HMAC-SHA256 từ token bot + HMAC-SHA256 + keystream) rồi lưu ở `aistv/<bot id>/secrets`. Chạy bot ở terminal/máy khác chỉ cần đúng bot token là tự khôi phục. Đổi bot token thì blob cũ không giải mã được và bot tự bỏ qua. Đồng bộ ngay: `/cloud sync`.
-- **Tự tóm tắt:** sau ~20 lượt hỏi–đáp, bot tự cô đọng phần cũ thành gạch đầu dòng trong `MEMORY.md` rồi cắt bớt lịch sử (giữ ngữ cảnh gần).
-- **Nhắc việc/việc định kỳ** sống qua restart; việc định kỳ dùng đúng model và workspace hiện tại.
-
-**Kế hoạch dài, kiểm chứng và hoàn tác (mới):**
-
-- `/plan <yêu cầu>` → model lập kế hoạch JSON (2–8 bước, mỗi bước có định nghĩa "xong"), bot hiện
-  preview kèm nút **▶️ Thực thi**. Khi chạy, bot lần lượt giao từng bước cho agent, **tự chạy
-  `scripts/verify.py`** sau mỗi bước, FAIL thì đưa log lỗi lại cho agent sửa (tối đa 2 lần/bước).
-  Báo cáo cuối có trạng thái từng bước, verify PASS/FAIL, diff và nút Push/Undo.
-- **Checkpoint tự động:** trước mỗi lượt agent sửa repo (và trước khi chạy kế hoạch), bot lưu
-  patch các file đang sửa + tar các file mới vào `$STV_HOME/checkpoints/` (giữ 20 bản gần nhất).
-  `/undo` hoặc nút ↩️ đưa repo về đúng mốc đó; file ignored như `.env` không bị đụng.
-- **Cổng duyệt:** mặc định không tự commit/push. Agent sửa xong, bot gửi diff + nút **⬆️ Push**,
-  **↩️ Hoàn tác**, **📄 Xem thay đổi**. Chỉ chủ bot bấm được.
-- Kế hoạch lưu ở `$STV_HOME/plans/<id>.json` nên restart bot vẫn xem/chạy tiếp được (`/plan list`).
-
-**Skills (Agent Skills):** bot dùng chuẩn [Agent Skills](https://agentskills.io) — mỗi skill là thư mục có `SKILL.md` (YAML frontmatter `name`, `description`) cùng `scripts/`, `references/`, `assets/` tuỳ chọn. Bot đọc được định dạng [Cursor Agent Skills](https://cursor.com/docs/skills) ở `workspace/skills/`, `workspace/.agents/skills/` và `workspace/.cursor/skills/` (thư mục lồng nhau cũng được; `paths`/`icon`/`color` chưa hỗ trợ). Bot tự đọc danh sách mô tả và chọn skill phù hợp; `/skill <tên> <yêu cầu>` ép dùng một skill, `/skill <tên>` xem thông tin. Skill có `disable-model-invocation: true` chỉ chạy khi gọi bằng `/skill`, không tự gợi ý.
-
-- **Đã cài sẵn** một bộ chọn lọc từ [mattpocock/skills](https://github.com/mattpocock/skills) (MIT) và [anthropics/skills](https://github.com/anthropics/skills) (Apache-2.0): debug, TDD, thiết kế codebase, domain model, PR, prototype, spec/ticket, retro, phản biện kế hoạch, viết lách, dạy học, tạo skill, frontend design, web artifact/testing, MCP server, algorithmic art, theme… Xem `/skills` và `seed/skills/THIRD_PARTY.md`.
-- **Cài thêm** ngay trong chat (chủ bot):
-  ```text
-  /skill add mattpocock/skills/skills/engineering/tdd
-  /skill add anthropics/skills/skills/skill-creator
-  /skill add https://github.com/owner/repo/tree/main/path/to/skill
-  /skill add owner/repo --ref v1.2.0 --force
-  ```
-  Hỗ trợ `owner/repo`, `owner/repo/path`, URL GitHub (`tree`/`blob`), raw `SKILL.md`, hoặc zip. Nếu trỏ vào repo/thư mục có nhiều skill, bot cài tất cả (tối đa 40). Mặc định **không ghi đè** skill đã có; `--force` để thay.
-- **CLI** (dùng khi không mở Telegram):
-  ```bash
-  python3 aistv_skills.py install mattpocock/skills/skills/engineering/tdd
-  python3 aistv_skills.py install anthropics/skills/skills/skill-creator --force
-  python3 aistv_skills.py list
-  ```
-  Mặc định cài vào `$STV_HOME/workspace/skills` (hoặc `~/stv_agent/workspace/skills`).
-- **Giới hạn & an toàn:** chỉ tải file, không chạy script khi cài; chặn path traversal/symlink; giới hạn dung lượng. Chỉ cài skill từ nguồn tin cậy — nội dung skill là hướng dẫn cho agent, không được phép ghi đè quy tắc bảo mật hay đọc `.secrets`.
-- **Giấy phép:** các skill tài liệu `docx`, `pdf`, `pptx`, `xlsx` của Anthropic dùng giấy phép source-available riêng, **không được nhúng sẵn** trong repo này. Installer mặc định chặn 4 skill này; chỉ dùng `--allow-restricted` sau khi bạn tự đọc và tuân thủ điều khoản. Các skill Anthropic còn lại là Apache-2.0, giữ nguyên `LICENSE.txt`. `doc-coauthoring` (thiếu `LICENSE.txt`) và `canvas-design` (font nặng) cũng không nhúng sẵn; cài riêng nếu cần.
-
-**Email (IMAP/SMTP):** thêm 2 Colab Secret `AISTV_EMAIL_ADDRESS` + `AISTV_EMAIL_PASSWORD` (mật khẩu ứng dụng) rồi bật Notebook access; hoặc `/email setup <email> <app-password>`. Gmail cần bật 2FA và tạo App Password 16 ký tự. Agent cũng gọi được `aistv_email.py` để đọc/gửi thư trong lúc làm việc; mật khẩu không bao giờ bị in ra.
-
-**YouTube (tìm / thông tin / transcript):** agent tự dùng khi bạn gửi link hoặc nhờ tìm video, không cần lệnh riêng. Có thể gọi trực tiếp:
-
-```bash
-python3 /root/AISTV/aistv_youtube.py search "từ khoá" -n 5
-python3 /root/AISTV/aistv_youtube.py info "URL"
-python3 /root/AISTV/aistv_youtube.py transcript "URL" --timestamps
-```
-
-Lấy tiêu đề, kênh, thời lượng, lượt xem, mô tả, chương và phụ đề (ưu tiên tiếng Việt, fallback tiếng Anh). Chỉ tải metadata + phụ đề, không tải video.
-
-**Gemini 3.8 Flash — mắt + tai cho ảnh/video (miễn phí):** thêm `GEMINI_API_KEY` vào `.env` hoặc Colab Secrets. Gemini đọc ảnh (nhận diện vật thể, OCR chữ, phân tích biểu đồ) và xem video **dưới 45 phút** (hình ảnh + âm thanh, context 1M token); model dự phòng `gemini-3.7-flash` → `gemini-3.5-flash`. Hạn mức miễn phí tham khảo: **10 RPM, 1500 RPD**; bot tự giữ nhịp và báo khi chạm giới hạn, không treo.
-
-**Luồng 2 model (mặc định):** DeepSeek v4.1 vẫn là **model chính** trả lời người dùng. Khi bạn gửi ảnh/video, Gemini đọc trước và trả về báo cáo thị giác; DeepSeek đối chiếu, phản biện, có thể hỏi lại Gemini bằng tool `ask_gemini` (tối đa `AISTV_VISION_FOLLOWUPS` lần), rồi mới trả lời. Muốn Gemini trả lời trực tiếp như bản cũ: `AISTV_VISION_HANDOFF=0`.
-
-```bash
-python3 /root/AISTV/aistv_watch.py doctor
-python3 /root/AISTV/aistv_watch.py doctor --json
-```
-
-Gửi **ảnh** cho bot kèm câu hỏi → Gemini mô tả, đọc chữ (OCR), phân tích chi tiết; gửi **video** hoặc link YouTube → Gemini xem cả hình ảnh + âm thanh và trả về báo cáo kèm mốc thời gian, sau đó DeepSeek tổng hợp và trả lời. Có thể gọi trực tiếp:
-
-```bash
-python3 /root/AISTV/aistv_watch.py image "inbox/anh.jpg" --question "Ảnh này có gì?"
-python3 /root/AISTV/aistv_watch.py image "https://.../anh.png" --question "Đọc chữ trong ảnh"
-python3 /root/AISTV/aistv_watch.py info "URL"
-python3 /root/AISTV/aistv_watch.py watch "URL" --question "Tóm tắt video" --detail balanced
-python3 /root/AISTV/aistv_watch.py watch "inbox/video.mp4" --question "..." --detail balanced
-python3 /root/AISTV/aistv_watch.py transcript "URL" --timestamps
-python3 /root/AISTV/aistv_watch.py frames "URL" --max-frames 24 --at "1:23,4:56"
-```
-
-Hoặc dùng lệnh trong chat: `/see <url|đường dẫn> [câu hỏi]` và `/video <url|đường dẫn> [câu hỏi]`.
-
-**Tạo ảnh & sơ đồ tư duy:** `/image <mô tả>` tạo ảnh và gửi thẳng vào chat; thêm `--style anime|3d|watercolor|oil|pixel|minimal|comic|sketch|cyberpunk|poster|logo|infographic|cartoon|fantasy` và `--aspect 16:9`. Reply vào một ảnh rồi gõ `/image --style anime ...` để vẽ lại theo ảnh đó (Gemini). Agent cũng tự gọi tool `generate_image` khi bạn nhờ vẽ/tạo ảnh, poster, logo, infographic hoặc khi một hình ảnh/sơ đồ giúp giải thích rõ hơn.
-
-- `/mindmap <chủ đề>` (hoặc `/image --mindmap <chủ đề>`) → Gemini lập dàn ý, bot vẽ sơ đồ tư duy bằng **Pillow**: chữ tiếng Việt sắc nét, không lỗi font, không cần API ảnh.
-- Nguồn tạo ảnh (tự chọn theo key có sẵn): **Gemini** (`gemini-3.1-flash-image`; API free tier hiện cấp **0 lượt** nên cần bật billing), **Cloudflare Workers AI** (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`, có free tier), **Together AI** (`TOGETHER_API_KEY`, model `FLUX.1-schnell-Free`) hoặc **Hugging Face** (`HF_TOKEN`).
-- Gọi trực tiếp:
-
-```bash
-python3 /root/AISTV/aistv_image.py "mèo phi hành gia" --style anime --aspect 16:9 --json
-python3 /root/AISTV/aistv_image.py --mindmap "Kế hoạch học Python" --json
-python3 /root/AISTV/aistv_image.py --list-styles
-```
-
-Ảnh lưu ở `~/stv_agent/generated/` và được gửi dạng photo (ảnh > 9MB tự thu nhỏ).
-
-**Tin nhắn thoại (nói thay vì gõ):** gửi voice message (hoặc file âm thanh) cho bot → chép lời
-ngay, bot hiện `🎙️ Nghe được: …` rồi xử lý y như tin nhắn chữ (kể cả khi agent đang hỏi lại).
-Mặc định ưu tiên **Web2API** (Gemini Web, không tốn request API trả phí) rồi mới đến Gemini API /
-Whisper local. Gemini Web chép lời tốt với MP3/WAV; voice OGG/Opus của Telegram, FLAC, M4A… được
-ffmpeg đổi sang MP3 trước khi gửi (máy chưa có ffmpeg thì `pip install imageio-ffmpeg`).
-Giới hạn 20MB/lần của Telegram Bot API.
-
-```bash
-python3 /root/AISTV/aistv_watch.py voice "inbox/voice.ogg" --json
-python3 /root/AISTV/aistv_watch.py voice "inbox/ghi-am.m4a" -l vi
-```
-
-**Watch (xem video bằng hình ảnh + âm thanh):** agent tự dùng khi bạn gửi link hoặc file video và hỏi nội dung. Tải video, lấy phụ đề (hoặc Whisper dự phòng), cắt frames theo cảnh/mốc thời gian rồi tạo `report.md` + `report.json` để agent đọc. Có `GEMINI_API_KEY` thì Gemini 3.8 Flash xem toàn bộ video **dưới 45 phút** (hình ảnh + âm thanh) và trả về báo cáo kèm mốc thời gian; DeepSeek v4.1 đối chiếu, hỏi lại nếu cần (`ask_gemini`) rồi trả lời. Video gửi trực tiếp qua Telegram tối đa **20MB**; video dài/nặng hơn hãy gửi bằng link (YouTube, Drive, URL công khai). Không có key thì agent đọc từng frame bằng công cụ Read và kết hợp transcript. `--start/--end` giới hạn đoạn, `--resolution 1024` để đọc chữ, `--ocr` cho video quay màn hình. Video riêng tư cần `--cookies`; không tải video/audio lên chat.
-
-**Facebook (bài công khai / video / reel):** agent tự dùng khi bạn gửi link Facebook hoặc nhờ tìm. Có thể gọi trực tiếp:
-
-```bash
-python3 /root/AISTV/aistv_facebook.py info "URL"
-python3 /root/AISTV/aistv_facebook.py read "URL" --comments
-python3 /root/AISTV/aistv_facebook.py download "URL" -q sd
-python3 /root/AISTV/aistv_facebook.py search "từ khoá" -n 8
-```
-
-Đọc được bài viết công khai, tiêu đề/mô tả video, reel, watch; tải video về workspace (bot tự gửi nếu ≤ 45MB). Trang cá nhân, nhóm kín và feed cần đăng nhập nên không xem được.
-
-**TikTok (thông tin / tải video / tìm kiếm / TikTok Lite):** agent tự dùng khi bạn gửi link TikTok hoặc nhờ tìm. Có thể gọi trực tiếp:
-
-```bash
-python3 /root/AISTV/aistv_tiktok.py info "URL"
-python3 /root/AISTV/aistv_tiktok.py download "URL" -q hd
-python3 /root/AISTV/aistv_tiktok.py download "URL" --audio -o .
-python3 /root/AISTV/aistv_tiktok.py search "từ khoá" -n 8
-python3 /root/AISTV/aistv_tiktok.py resolve "URL"
-```
-
-Lấy tiêu đề, tác giả, thời lượng, lượt xem/thích/bình luận/chia sẻ/lưu, nhạc nền; tải video **không watermark** (mặc định bản nét nhất, `-q h264` cho máy cũ) hoặc tách âm thanh MP3. Hỗ trợ link thường, link rút gọn `vt.`/`vm.` và **TikTok Lite** (`lite.tiktok.com/t/...`); link Lite dạng mời/nhận thưởng sẽ báo rõ là không phải video. Video công khai; video riêng tư/giới hạn vùng có thể cần cookie `TIKTOK_COOKIES`. Bài ảnh/slideshow chưa hỗ trợ tải. Gói `curl_cffi` (đã có trong `requirements.txt`) giúp TikTok không chặn IP máy chủ.
-
-Gửi file cho bot → lưu vào `workspace/inbox/` để agent đọc.
-
-**GitHub docs (đọc tài liệu / mã nguồn):** agent dùng token `/github login` sẵn có để đọc repo, README, thư mục `docs/`, tìm trong tài liệu hoặc mã nguồn — không cần clone. Có thể gọi trực tiếp:
-
-```bash
-python3 /root/AISTV/aistv_github_docs.py info owner/repo
-python3 /root/AISTV/aistv_github_docs.py docs owner/repo -n 40
-python3 /root/AISTV/aistv_github_docs.py read owner/repo docs/install.md --section "Quick Start"
-python3 /root/AISTV/aistv_github_docs.py search owner/repo "rate limit"
-python3 /root/AISTV/aistv_github_docs.py code owner/repo "def handler"
-python3 /root/AISTV/aistv_github_docs.py find "vector database" -n 5
-python3 /root/AISTV/aistv_github_docs.py releases owner/repo -n 5
-```
-
-Đọc được repo công khai và private (nếu token có quyền), hỗ trợ `--ref` để xem đúng tag/nhánh, `--outline`/`--section`/`--lines` cho tài liệu dài và `--json` cho dữ liệu có cấu trúc. Skill `github-docs` hướng dẫn agent chọn đúng tệp, trích nguồn và tránh đổ cả tài liệu vào chat.
-
-**Reply / trích dẫn tin nhắn:** trả lời (reply) một tin nhắn rồi nhắn yêu cầu — agent hiểu các cụm như "cái này", "đoạn trên", "sửa chỗ đó" là chỉ tin nhắn vừa reply. Nếu bôi đen một phần trước khi reply, agent ưu tiên đúng phần được trích dẫn. Reply một tin rồi gõ `/remember` (không kèm nội dung) sẽ lưu chính tin đó vào trí nhớ dài hạn. Ngữ cảnh trích dẫn cũng được ghi vào lịch sử hội thoại kèm nhãn `↪︎ trả lời “…”`.
-
-**Tiến độ kiểu terminal:** trong lúc chạy, tin nhắn "Đang làm việc" tự cập nhật ~3 giây/lần (giãn nhịp để tránh giới hạn tần suất của Telegram; hiệu ứng "đang nhập" vẫn nhấp nháy đều) trong một **trích dẫn thu gọn/mở rộng** (`blockquote expandable`); lệnh và code nằm trong khối mã nên dễ đọc trên điện thoại. Mỗi dòng tool kèm thời gian chạy (vd `⚙️ Chạy lệnh npm test · 35s`), dòng cũ rơi khỏi đỉnh khi đầy. Nút **⛔ Dừng** (hoặc `/stop`) huỷ tác vụ ngay. `/think off` ẩn suy nghĩ; `/activity on` hiện thêm output chi tiết.
-
-## 5. Biến môi trường
-
-| Biến | Mặc định | Ý nghĩa |
+| Biến | Bắt buộc | Ý nghĩa |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | — | Token từ BotFather (bắt buộc) |
-| `ALLOWED_USER_IDS` | trống | Danh sách user id được phép, cách nhau `,` |
-| `AISTV_CONFIG_DIR` | `~/.config/aistv` | Nơi lưu `config.env` dùng chung + hạn mức Gemini |
-| `AISTV_PROMPT_TIMEOUT` | `180` | Số giây chờ nhập token/key (chống treo) |
-| `AISTV_ASK_GEMINI` | `0` | `1` = hỏi Gemini key trong terminal; mặc định không hỏi |
-| `AISTV_CONFIG_REPO` | `Phucvncom55/AISTV-secrets` | `user/repo` private chứa `config.env`; `0` = tắt |
-| `AISTV_CONFIG_TOKEN` | tự lấy từ `gh` | PAT chỉ-đọc; cũng nhận `GH_TOKEN` / `GITHUB_TOKEN` / `.secrets/github_token` / Colab Secrets |
-| `AISTV_DEVICE_LOGIN` | `1` | `0` = không tự đăng nhập GitHub bằng mã khi thiếu token |
-| `AISTV_DEVICE_TIMEOUT` | `600` | Số giây chờ bạn nhập mã ở `github.com/login/device` |
-| `AISTV_AUTO_PUSH` | `0` | `1` = tự commit/push sau mỗi lượt agent sửa code. Mặc định `0`: bot hiện diff + nút duyệt (⬆️ Push / ↩️ Hoàn tác) |
-| `AISTV_CONFIG_PATH` | `config.env` | Đường dẫn file cấu hình trong repo private |
-| `AISTV_CONFIG_SYNC` | `1` | `0` = không tự tải/đồng bộ config từ xa |
-| `AISTV_ENV_URL` | trống | URL tải thẳng `config.env` (không cần token) |
-| `STV_HOME` | `~/stv_agent` (`%USERPROFILE%\stv_agent`) | Nơi lưu `workspace/`, `sessions/`, `archive/` |
-| `OPENCODE_BIN` | tự tìm | Đường dẫn `opencode` |
-| `AISTV_CLEAN_INSTALL` | `0` | `1` = xoá & cài lại OpenCode mỗi lần chạy (mất dữ liệu phiên OpenCode) |
-| `AISTV_OPENCODE_UPDATE` | `1` | `0` = không tự kiểm tra/nâng OpenCode lên bản mới trên npm mỗi lần khởi động |
-| `AISTV_VENV` | `1` | `0` = dùng Python hệ thống, không tạo `.venv` |
-| `AISTV_REPO` | URL trong `run.sh` / `run.bat` | Repo khác để tải mã nguồn |
-| `AISTV_DIR` | `~/AISTV` (`%USERPROFILE%\AISTV`) | Nơi clone khi chạy one-liner |
-| `AISTV_BRANCH` | `main` | Nhánh cần tải |
-| `AISTV_FIREBASE_URL` | RTDB mặc định | URL Firebase Realtime Database cho trí nhớ đám mây |
-| `AISTV_CLOUD` | `1` | `0` = tắt đồng bộ cloud (chỉ lưu cục bộ) |
-| `AISTV_CLOUD_NS` | `aistv` | Namespace gốc trên Firebase |
-| `AISTV_FIREBASE_SECRET` | trống | `?auth=` nếu Rules yêu cầu xác thực |
-| `AISTV_AUTO_SUMMARY` | `1` | `0` = tắt tự tóm tắt hội thoại |
-| `AISTV_SUMMARY_ITEMS` / `AISTV_SUMMARY_KEEP` | `40` / `16` | Ngưỡng kích hoạt / số lượt giữ lại |
-| `AISTV_PROACTIVE` | `1` | `0` = tắt nhắc việc & theo dõi |
-| `AISTV_REMIND_TICK` | `15` | Nhịp kiểm tra nhắc việc (giây) |
-| `AISTV_WATCH_INTERVAL` / `AISTV_WATCH_GIT_INTERVAL` | `60` / `300` | Nhịp theo dõi log/file · git |
-| `AISTV_WATCH_SELF` | `1` | Tự báo lỗi trong log của chính bot |
-| `AISTV_PROGRESS_TICK` | `1` | Giây giữa 2 lần cập nhật khung tiến độ |
-| `AISTV_PROGRESS_LINES` | `14` | Số dòng cuộn trong khung tiến độ (dòng cũ rơi khỏi đỉnh) |
-| `FB_COOKIES` | trống | File cookie Facebook cho nội dung cần đăng nhập |
-| `TIKTOK_COOKIES` | trống | File cookie TikTok cho video riêng tư/giới hạn vùng |
-| `YT_COOKIES` | trống | File `cookies.txt` cho YouTube khi bị chặn "confirm you're not a bot" |
-| `GEMINI_API_KEY` | trống | Gemini đọc ảnh + xem video (AI Studio, miễn phí) |
-| `AISTV_IMAGE_MODEL` / `AISTV_IMAGE_FALLBACKS` | `gemini-3.1-flash-image` / `gemini-3-pro-image,gemini-2.5-flash-image` | Model tạo ảnh Gemini (API free tier = 0 lượt, cần bật billing) |
-| `AISTV_IMAGE_PROVIDER` | `auto` | Nguồn tạo ảnh: `gemini`, `cloudflare`, `together`, `hf`, `auto` |
-| `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` | trống | Tạo ảnh bằng Cloudflare Workers AI (`FLUX.1-schnell`, có free tier) |
-| `TOGETHER_API_KEY` | trống | Tạo ảnh bằng Together AI (`FLUX.1-schnell-Free`) |
-| `HF_TOKEN` | trống | Tạo ảnh qua Hugging Face Inference |
-| `AISTV_GEN_IMAGE_TIMEOUT` | `300` | Thời gian tối đa một lần tạo ảnh (giây) |
-| `GROQ_API_KEY` / `OPENAI_API_KEY` | trống | Transcript dự phòng cho video không có phụ đề |
-| `WATCH_GEMINI_MODEL` | `gemini-3.8-flash` | Model Gemini chính: đọc ảnh + xem video (context 1M token) |
-| `WATCH_GEMINI_FALLBACKS` | `gemini-3.7-flash,gemini-3.5-flash` | Model dự phòng khi model chính lỗi/hết hạn mức |
-| `WATCH_GEMINI_THINKING` | `low` | Mức suy nghĩ khi đọc ảnh/video: `low` (nhanh) hoặc `high` (kỹ hơn) |
-| `OPENCODE_MODEL` | `opencode/deepseek-v4.1-flash-free` | Model chính của agent (DeepSeek v4.1 Flash); đổi trực tiếp bằng `/model` |
-| `WEB2API_FALLBACK` | `1` | `1` = khi model chính hết hạn mức (429/hết token) hoặc lỗi server/UnknownError tự chuyển sang Gemini Web2API nội bộ |
-| `WEB2API_URL` / `WEB2API_MODEL` | `http://127.0.0.1:8081` / `gemini-3.5-flash-thinking` | Server + model dự phòng (mặc định think cao; đổi `gemini-3.6-flash` nếu cần nhanh) |
-| `AISTV_GUEST_CHAT` | `1` | `1` = người lạ chỉ được chat chữ qua AI STV; `0` = chặn hoàn toàn |
-| `AISTV_GUEST_MODEL` / `AISTV_GUEST_TIMEOUT` | theo `WEB2API_MODEL` / `180` | Model và thời gian chờ cho câu trả lời khách |
-| `AISTV_GUEST_HISTORY` / `AISTV_GUEST_GAP` / `AISTV_GUEST_PARALLEL` | `6` / `1` / `3` | Số lượt nhớ riêng mỗi khách / giây tối thiểu giữa 2 tin / số câu trả lời khách song song |
-| `WEB2API_COOKIE_FILE` | `~/.config/aistv/web2api/cookie.txt` | File dán cookie mới; dán vào là server tự nạp lại |
-| `WEB2API_AUTOSYNC` | `1` | `1` = tự kéo/đẩy cookie nguyên văn với repo private |
-| `GEMINI_RPM` / `GEMINI_RPD` | `10` / `1500` | Tự giữ nhịp request/phút và request/ngày |
-| `AISTV_VISION_HANDOFF` | `1` | `1` = Gemini đọc → DeepSeek đối chiếu/hỏi lại → DeepSeek trả lời; `0` = Gemini trả lời trực tiếp |
-| `AISTV_VISION_FOLLOWUPS` | `2` | Số lần DeepSeek được hỏi lại Gemini (tool `ask_gemini`) cho mỗi ảnh/video |
-| `AISTV_VISION_FOLLOWUP_TIMEOUT` | `240` | Giới hạn thời gian mỗi lần hỏi lại Gemini qua tool (giây) |
-| `GEMINI_MAX_RETRIES` | `2` | Số lần thử lại khi Gemini trả 429 |
-| `GEMINI_TIMEOUT` | `240` | Thời gian tối đa cho **một** lần gọi Gemini (giây; đủ cho video dài) |
-| `GEMINI_DEADLINE` | `600` | Tổng thời gian tối đa cho cả chuỗi model + retry (giây) |
-| `GEMINI_QUOTA_DISABLE` | `0` | `1` = tắt theo dõi hạn mức cục bộ |
-| `WATCH_MAX_IMAGE_MB` | `50` | Giới hạn ảnh tải từ URL |
-| `AISTV_IMAGE_TIMEOUT` / `AISTV_VIDEO_TIMEOUT` | `600` / `900` | Giới hạn thời gian đọc ảnh/video trong chat (giây) |
-| `WATCH_MAX_MB` | `600` | Giới hạn dung lượng video tải về |
-| `JINA_API_KEY` | trống | Tăng hạn mức đọc web khi tìm kiếm |
-| `AISTV_EMAIL_ADDRESS` | trống | Địa chỉ email nhận/gửi |
-| `AISTV_EMAIL_PASSWORD` | trống | Mật khẩu ứng dụng (App Password), không phải mật khẩu đăng nhập |
-| `AISTV_EMAIL_IMAP_HOST` / `AISTV_EMAIL_IMAP_PORT` | tự nhận / `993` | Máy chủ IMAP |
-| `AISTV_EMAIL_SMTP_HOST` / `AISTV_EMAIL_SMTP_PORT` | tự nhận / `587` | Máy chủ SMTP |
+| `TELEGRAM_BOT_TOKEN` | ✅ | Token BotFather |
+| `ALLOWED_USER_IDS` | nên đặt | Chỉ những id này dùng được bot (cách nhau dấu phẩy) |
+| `GEMINI_API_KEY` | tuỳ chọn | Đọc ảnh, xem video, chép lời (thiếu vẫn chạy) |
 
-Cấu hình nâng cao nằm ở đầu `aistv_bot.py` (model, timeout, số lịch sử, `FULL_ACCESS`, `USE_GOOGLE_DRIVE`).
+Đặt key ngay trong chat (tin nhắn chứa key tự xoá): `/key gemini AIza...`
 
-### Dự phòng khi hết hạn mức (Gemini Web2API)
+## 3. Bot làm được gì
 
-Model chính hết token/429 hoặc lỗi từ nhà cung cấp (`UnknownError`, 5xx) → bot tự chạy
-lại bằng server Gemini Web2API ngay trên máy (không cần API key trả phí). Nếu OpenCode
-báo lỗi nội bộ cho cả model dự phòng, bot gọi thẳng Web2API nên vẫn trả lời được.
-Cookie Google lưu **nguyên văn** trong `~/.config/aistv/web2api/cookie.txt` và backup ở
-repo private (`web2api/cookie.txt`), nên đổi máy chỉ cần chạy bot — hoặc
-`python aistv_web2api.py auto`.
+- **Sửa code như agent:** sửa file trong workspace, chạy lệnh, báo diff. `/plan <yêu cầu>` chia 2–8 bước, tự chạy – tự kiểm chứng – tự sửa. `/undo` hoàn tác, nút ⬆️ Push để đẩy lên GitHub (mặc định không tự push).
+- **Trí nhớ dài hạn:** `/remember`, `/memory`, `/forget`; tự tóm tắt hội thoại cũ vào `MEMORY.md`; lưu cloud nên restart vẫn còn.
+- **Nhắc việc & tự động:** `/remind +30m uống nước`, `/task daily 9:00 kiểm tra repo`, `/watch git owner/repo`, `/watch log <file>`, `/watch file <đường dẫn>`.
+- **Ảnh:** gửi ảnh kèm câu hỏi → Gemini mô tả, OCR, đọc biểu đồ. `/see <url>`, `/image <mô tả>` tạo ảnh (nhiều style, tỉ lệ), `/mindmap <chủ đề>` vẽ sơ đồ tư duy.
+- **Video:** `/video <link|file>` xem video dưới 45 phút (hình + tiếng, kèm mốc thời gian). Gửi file ≤ 20MB; dài hơn thì gửi link.
+- **YouTube / Facebook / TikTok:** tìm, lấy thông tin, phụ đề, tải video/âm thanh (TikTok không watermark).
+- **Tin nhắn thoại:** gửi voice → chép lời rồi xử lý như tin chữ.
+- **GitHub:** `/github login` (mã device), quét/tạo repo, đọc README–docs–mã nguồn không cần clone, `/push`.
+- **Email:** `/email inbox`, `/email read`, `/email send`, `/email setup`.
+- **File:** gửi file cho bot → lưu `workspace/inbox/` để agent đọc; `/files`, `/get <đường dẫn>`.
+- **Skills:** `/skills` xem, `/skill <tên> <yêu cầu>` ép dùng, `/skill add owner/repo/path` cài thêm. Có sẵn: debug, TDD, code review, PR, thiết kế codebase, spec/ticket, dạy học, viết lách, frontend design, MCP server…
+- **Chế độ khách:** người ngoài `ALLOWED_USER_IDS` chỉ chat chữ, không dùng lệnh/nút/file/lịch sử.
 
-```bash
-python aistv_web2api.py auto             # kéo cookie + bật server, không cần start
-python aistv_web2api.py import cookies.json   # nạp cookie + tự chạy + tự đẩy GitHub
-python aistv_web2api.py doctor           # kiểm tra
-```
+## 4. Lệnh hay dùng
 
-Dán cookie mới vào `cookie.txt` là server tự nạp lại và chạy. Dán **y như lúc copy**:
-header `name=value; ...`, `Cookie: ...`, JSON export, Netscape `cookies.txt` (cả dòng
-`#HttpOnly_...`) hay cURL đều được tự chuẩn hoá, không cần sửa tay. Bản mã hoá cũ
-(`cookies.enc` + `passphrase`) được tự giải mã một lần sang `cookie.txt` nguyên văn.
-Trong chat: `/web2api` hoặc `/web2api import <chuỗi cookie>` (tin nhắn chứa cookie tự xoá).
+| Lệnh | Tác dụng |
+|---|---|
+| `/new` `/stop` `/status` | Chat mới · huỷ tác vụ · trạng thái |
+| `/plan <yêu cầu>` | Chia bước và tự thực thi |
+| `/undo` `/push` | Hoàn tác · đẩy code lên GitHub |
+| `/model` `/models` | Xem / đổi model |
+| `/remember` `/memory` | Trí nhớ dài hạn |
+| `/remind` `/reminders` `/task` | Nhắc việc · việc định kỳ |
+| `/see` `/video` `/image` `/mindmap` | Ảnh · video · tạo ảnh · sơ đồ tư duy |
+| `/skills` `/skill` | Kỹ năng |
+| `/github` | Đăng nhập, chọn/tạo repo, push |
+| `/email` | Đọc / gửi email |
+| `/files` `/get` | Xem / tải file agent tạo |
+| `/allow` `/deny` | Cấp / thu quyền (chủ bot) |
 
-**Xem ảnh, nghe voice, xem video và tạo ảnh bằng Web2API.** Ngoài chat chữ, server được vá
-thêm các khả năng media (không cần API key trả phí):
-
-- **Xem ảnh:** gửi ảnh/URL ảnh cho bot, Gemini Web đọc chữ (OCR), vật thể, màu sắc…
-  Khi Gemini API hết hạn mức, `aistv_watch.py` tự chuyển sang Web2API.
-- **Nghe voice:** tin nhắn thoại được chép lời qua Web2API rồi đưa nguyên văn cho model chính
-  (`deepseek-v4.1-flash-free`) xử lý — không tốn request Gemini API. MP3/WAV gửi trực tiếp;
-  OGG/Opus (Telegram), FLAC, M4A… tự đổi sang MP3 bằng ffmpeg trước khi gửi.
-- **Xem video:** `watch --engine web2api` gửi video ngắn (≤ 12MB) trực tiếp cho Gemini Web;
-  video dài hơn cần ffmpeg để cắt/nén trước.
-- **Tạo ảnh:** `aistv_image.py` ưu tiên Web2API (provider `web2api`), lỗi thì tự lùi về
-  Cloudflare/Gemini/Together/HF. Ảnh trả về được lưu như ảnh do các provider khác tạo.
-
-Hai patch nằm trong `patches/gemini-web2api-image.patch` (ảnh) và
-`patches/gemini-web2api-media.patch` (audio/video), tự áp khi chạy `setup`/`start`
-(lần đầu cần `curl_cffi`). Kiểm tra nhanh:
-
-```bash
-python aistv_web2api.py doctor
-python aistv_web2api.py test --image "một chú mèo phi hành gia"
-python aistv_image.py "một chú mèo phi hành gia" --provider web2api --json
-```
-
-Chi tiết: [docs/WEB2API.md](docs/WEB2API.md).
-
-## 6. Cấu trúc
-
-```
-AISTV/
-├── aistv_bot.py      bot hoàn chỉnh (cài đặt, agent, Telegram, định dạng)
-├── aistv_planner.py  kế hoạch nhiều bước, checkpoint/hoàn tác, chạy verify
-├── aistv_email.py    đọc/gửi email IMAP·SMTP + CLI cho agent
-├── aistv_youtube.py  tìm video, thông tin, transcript YouTube
-├── aistv_facebook.py đọc bài công khai, video/reel, tải video Facebook
-├── aistv_tiktok.py   thông tin, tải video không watermark, tìm kiếm TikTok
-├── aistv_watch.py    đọc ảnh + xem video bằng Gemini, transcript + frames
-├── aistv_image.py    tạo ảnh (Web2API/Cloudflare/Gemini/Together/HF) + vẽ sơ đồ tư duy Pillow
-├── aistv_skills.py   cài skill chuẩn Agent Skills từ GitHub/zip
-├── aistv_github_docs.py  đọc README/docs, tìm trong tài liệu và mã GitHub
-├── aistv_harness2.py audit/tối ưu harness bằng Harness² (Google Research): export/check/diff/demo
-├── aistv_config.py   đồng bộ config/token dùng chung cho mọi runner (sync/check/get/set/doctor)
-├── aistv_web2api.py  dự phòng Gemini Web2API + đồng bộ cookie nguyên văn (auto/import/push/pull)
-├── patches/          patch thêm xem ảnh + tạo ảnh cho server Web2API
-├── bootstrap.sh      lấy/cập nhật repo rồi chạy run.sh (Linux/macOS/Colab)
-├── run.sh            chạy 1 lệnh: clone → cài → chạy (Linux/macOS/Colab)
-├── bootstrap.bat     như bootstrap.sh nhưng cho Windows (cmd thuần, khuyên dùng)
-├── run.bat           như run.sh nhưng cho Windows (cmd thuần, khuyên dùng)
-├── bootstrap.ps1     bản PowerShell của bootstrap.bat (tuỳ chọn)
-├── run.ps1           bản PowerShell của run.bat (tuỳ chọn)
-├── push.sh           tạo repo GitHub và push (Linux/macOS)
-├── requirements.txt
-├── pyproject.toml    cấu hình ruff + pytest (không phải gói cài đặt)
-├── scripts/
-│   ├── code_map.py   sinh docs/CODEMAP.md (bản đồ hàm/class kèm số dòng)
-│   └── verify.py     một lệnh kiểm chứng: compile → CODEMAP → test → lint → bash
-├── tests/            unittest (planner, checkpoint, code map)
-├── docs/CODEMAP.md   bản đồ code cho agent (tự sinh, đừng sửa tay)
-├── .env.example
-├── seed/             SOUL.md, AGENTS.md, skills mặc định
-├── logs/             (tạo lúc chạy) aistv.log xoay vòng 2MB × 3
-└── workspace/        (tạo lúc chạy) trí nhớ, skills, inbox, file agent tạo
-```
-
-### Bản đồ code & kiểm chứng
-
-`aistv_bot.py` hơn 7.000 dòng — đọc cả file tốn context và dễ sửa sai chỗ. Repo có sẵn hai script
-để agent (và người) định vị + tự kiểm tra:
-
-```bash
-python scripts/code_map.py        # sinh docs/CODEMAP.md: module → L<số dòng> def/class + mô tả
-python scripts/code_map.py --check  # báo lỗi nếu bản đồ đã cũ
-python scripts/verify.py          # compile → CODEMAP khớp → unittest → ruff → bash -n
-python scripts/verify.py --fast   # bỏ unittest khi chỉ sửa nhỏ
-```
-
-- Agent được dặn (AGENTS.md) đọc `docs/CODEMAP.md`, `grep` symbol rồi chỉ đọc 60–150 dòng quanh nó,
-  và **chỉ báo "xong" khi `verify.py` PASS**. Thêm/bớt hàm cấp module thì chạy lại `code_map.py`.
-- `verify.py` không cài thêm gì: thiếu `ruff` hoặc `bash` thì bỏ qua bước đó và ghi rõ.
-- `tests/` chạy bằng `python -m unittest discover -s tests` (planner, checkpoint/undo, code map).
-
-### Harness² (tuỳ chọn)
-
-Cầu nối sang [google-research/harness2](https://github.com/google-research/harness2) — framework tối ưu lớp
-bao quanh model (system prompt, guardrails, memory, tool guidance, skills, subagents).
-
-```bash
-python3 /root/AISTV/aistv_harness2.py setup    # clone + venv 3.12 + dependency (chạy lại vẫn an toàn)
-python3 /root/AISTV/aistv_harness2.py status
-python3 /root/AISTV/aistv_harness2.py export   # -> /root/AISTV/harness/tree (không sửa harness thật)
-python3 /root/AISTV/aistv_harness2.py check
-python3 /root/AISTV/aistv_harness2.py demo --k 2   # offline, không cần credential
-```
-
-`setup` clone Harness² vào `/root/harness2-src` (đổi bằng `HARNESS2_ROOT`) và cài vào venv riêng;
-không cần clone tay. Máy chưa có `uv` thì cài theo hướng dẫn ở trên.
-
-`export` đóng gói SOUL.md + AGENTS.md + MEMORY.md + skills thành harness tree chuẩn Harness² rồi validate
-bằng luật surface `opencode` (skill phải có `name:`/`description:` và được nêu tên, always-on ≤ 24.000 ký tự,
-script được nhắc phải tồn tại). Chạy benchmark thật (JobBench/LAB/WorkBuddy) cần `GOOGLE_CLOUD_PROJECT`,
-`HARNESS2_*_MODEL` và `gcloud auth application-default login`.
-
-Đã kiểm chứng 25/10/2026 trên commit `1cfe254`: tree 38 skills / 58 file / 23.664 ký tự always-on,
-`check` hợp lệ và `demo --k 2` hoàn tất 2 task, 0 failed.
-
-### Headroom — nén context, tiết kiệm token (tuỳ chọn)
-
-Cầu nối sang [headroomlabs-ai/headroom](https://github.com/headroomlabs-ai/headroom) — nén tool output, log,
-JSON, RAG trước khi đưa vào LLM (cùng câu trả lời, token giảm 20-95%). Chạy local, đảo ngược được (CCR).
-
-```bash
-pip install "headroom-ai[proxy,mcp]"   # CLI + MCP server (Python 3.10+); thêm [ml] nếu muốn nén cả văn bản
-export HEADROOM_OFFLINE=1              # tắt beacon telemetry ẩn danh
-headroom doctor                        # kiểm tra cài đặt
-headroom mcp serve                     # MCP: headroom_compress / headroom_retrieve / headroom_stats
-```
-
-Đã kiểm chứng 25/10/2026 trên v0.41.0: JSON tool output 9.262 → 3.940 token (−57,5%), nén dưới 1 ms;
-log thuần và văn dày đặc nén gần 0. Bot dùng thẳng thư viện `headroom` nên **không cần** MCP server;
-muốn bật cho agent tự nén tool output thì thêm bằng `python3 aistv_mcp.py add …` (mặc định tắt).
-Không dùng `headroom wrap` tự động — nó đổi upstream của agent về OpenAI mặc định.
-
-**Trong bot:** trước khi gửi prompt, bot nén phần ngữ cảnh (SOUL/AGENTS/MEMORY/kỹ năng/lịch sử hội thoại)
-bằng Headroom, giữ nguyên yêu cầu mới của người dùng. Chỉ dùng bản nén khi giảm ≥3% và chỉ bật các
-transform cấu trúc (JSON/bảng → dạng gọn, không viết lại văn xuôi): `kompress_model="disabled"`.
-Prompt dạng hội thoại thường không giảm được gì nên footer ghi `headroom 0%`.
-Tắt bằng `AISTV_HEADROOM=0`.
-
-Footer mỗi câu trả lời có dạng:
-
-```
-⏱ 14.0s · deepseek-v4.1-flash-free · 🧠 12,4k tok gốc → 7,1k qua headroom (−43%) · ra 412
-```
-
-`tok gốc` = ngữ cảnh model đọc nếu không nén, `qua headroom` = số thật đã gửi, `ra` = token trả về.
-
-Dữ liệu chạy nằm ngoài repo tại `STV_HOME` (mặc định `~/stv_agent`), nên cập nhật code không mất trí nhớ.
-
-## 7. Bảo mật
+## 5. Lưu ý
 
 - Luôn đặt `ALLOWED_USER_IDS` nếu bot ở nơi công cộng.
-- Người lạ chỉ chat chữ qua AI STV; lệnh/nút/ảnh/video và lịch sử của chủ bot không mở cho họ
-  (`AISTV_GUEST_CHAT=0` nếu muốn chặn hẳn).
-- Token chỉ đọc từ biến môi trường / Colab Secrets / `.env`; agent không nhìn thấy token (đã xoá khỏi môi trường tiến trình con).
-- `FULL_ACCESS = False` mặc định: agent chỉ ghi trong workspace và bị OpenCode chặn thao tác cần quyền.
-- Repo public **không chứa bí mật**; đừng commit `.env`.
-- Cookie Gemini Web2API lưu **nguyên văn** (không mã hoá) ở `~/.config/aistv/web2api/cookie.txt` và repo **private** `AISTV-secrets`. Ai có cookie vào được tài khoản Google — chỉ đồng bộ vào repo private, đừng dán vào chat công khai; lộ thì đăng xuất mọi thiết bị rồi export cookie mới.
-- **Firebase Rules:** mặc định bot chỉ lưu URL database, không nhúng API key. Nếu Rules đang `true` (mở), **ai biết URL cũng đọc/ghi/xoá được** — hãy siết Rules và chỉ cho phép đúng namespace `aistv/<bot id>`, hoặc bật `AISTV_FIREBASE_SECRET`. Không lưu dữ liệu nhạy cảm (mật khẩu, token) vào trí nhớ.
-- **Bí mật đồng bộ luôn được mã hoá trước khi gửi cloud** (PBKDF2 + HMAC-SHA256, khoá suy ra từ token bot), nên kể cả Rules mở thì token/API key cũng không đọc được nếu không có token bot. Hội thoại/trí nhớ thì vẫn là văn bản thô — đừng dán mật khẩu vào chat.
+- Không commit `.env`; repo public không chứa bí mật.
+- Chi tiết công cụ: [docs/TOOLS.md](docs/TOOLS.md) · bản đồ code: [docs/CODEMAP.md](docs/CODEMAP.md).
 
-## Giấy phép
-
-MIT — xem `LICENSE`.
+Giấy phép: MIT — xem `LICENSE`.
