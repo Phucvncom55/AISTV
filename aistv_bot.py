@@ -34,7 +34,7 @@ KIẾN TRÚC (học theo OpenClaw)
 # ════════════════════════════════════════════════════════════════════
 # 0. CẤU HÌNH — chỉnh ở đây
 # ════════════════════════════════════════════════════════════════════
-import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib, importlib.util, mimetypes
+import os, sys, re, json, time, html, shutil, asyncio, getpass, logging, subprocess, functools, hashlib, importlib.util, mimetypes, unicodedata
 import base64, hmac
 import secrets, threading, textwrap, urllib.request, urllib.parse, urllib.error
 from pathlib import Path
@@ -2663,11 +2663,33 @@ def reply_context(msg) -> tuple:
     return "\n".join(lines), label
 
 
+MATH_STYLE_MD = """## QUY TẮC TRÌNH BÀY BÀI GIẢI TOÁN / LÝ / HOÁ / SINH
+Áp dụng cho mọi bài giải môn tự nhiên, kể cả khi người dùng không nhắc tới quy tắc này:
+1. **Tách câu rõ ràng:** mỗi câu một tiêu đề riêng, có dòng trống — `**Câu a — …**`, `**Câu b — …**`.
+2. **Mỗi ý một dòng:** không viết dồn thành đoạn văn dài; mỗi lập luận bắt đầu bằng `*` hoặc `1.` và xuống dòng.
+3. **Ký hiệu chuẩn, viết bằng Unicode** (Telegram không render LaTeX): △ (tam giác), ∥, ⊥, ≡, ≅, ⇒, ⇔,
+   ∠, °, ≠, ≤, ≥, ≈, √, ½, α β γ Δ π. Tách riêng đoạn thẳng, góc, độ dài — ví dụ `AB = a`, `∠A = 90°`
+   thay vì viết dính thành một cụm.
+4. **Mỗi ý chứng minh đủ 3 phần, mỗi phần một dòng:**
+   - **Xét / Ta có:** nêu giả thiết hoặc tính chất đang áp dụng.
+   - **Mà / Suy ra:** lập luận logic trung gian.
+   - **Kết luận:** khẳng định điều cần chứng minh.
+Ví dụ mẫu:
+**Câu a — Tứ giác ADFE là hình gì? Vì sao?**
+* **Xét** tứ giác ADFE, ta có:
+  - AE ∥ DF (AE ⊂ AB, DF ⊂ CD, mà AB ∥ CD).
+  - AE = DF = ½AB = a (E, F là trung điểm của AB, CD).
+* **Suy ra:** ADFE là hình bình hành (một cặp cạnh đối song song và bằng nhau).
+* **Mặt khác:** ∠A = 90° (góc hình chữ nhật) và AE = AD = a.
+* **Kết luận:** ADFE là **hình vuông**."""
+
+
 def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple] = None,
                  quote: str = "") -> str:
     user_text = user_text[:20000]
     head = ["## HỒ SƠ AGENT\n" + read_text(WORKSPACE / "SOUL.md").strip()
             + "\n\n" + read_text(WORKSPACE / "AGENTS.md").strip()]
+    head.append(MATH_STYLE_MD)
     mem = "\n".join(memory_items())
     if mem:
         head.append("## TRÍ NHỚ DÀI HẠN (MEMORY.md)\n" + mem[-4000:])
@@ -3874,6 +3896,150 @@ _TABLE = re.compile(r"(?:^[ \t]*\|.*\|[ \t]*(?:\n|$)){2,}", re.M)
 _ICODE = re.compile(r"`([^`\n]+)`")
 _LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
 
+# LaTeX → Unicode: Telegram không render LaTeX nên phải đổi trước khi gửi.
+_MATH_SYMBOLS = {
+    "triangle": "△", "vartriangle": "△", "Delta": "Δ", "square": "□",
+    "parallel": "∥", "nparallel": "∦", "perp": "⊥", "angle": "∠",
+    "measuredangle": "∡", "equiv": "≡", "cong": "≅", "approx": "≈",
+    "sim": "∼", "simeq": "≃", "neq": "≠", "ne": "≠",
+    "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥", "ll": "≪", "gg": "≫",
+    "pm": "±", "mp": "∓", "times": "×", "cdot": "·", "div": "÷",
+    "Rightarrow": "⇒", "rightarrow": "→", "to": "→", "longrightarrow": "⟶",
+    "Leftarrow": "⇐", "leftarrow": "←", "gets": "←",
+    "Leftrightarrow": "⇔", "leftrightarrow": "↔",
+    "in": "∈", "notin": "∉", "subset": "⊂", "subseteq": "⊆",
+    "supset": "⊃", "supseteq": "⊇", "cup": "∪", "cap": "∩",
+    "emptyset": "∅", "varnothing": "∅", "forall": "∀", "exists": "∃",
+    "infty": "∞", "partial": "∂", "nabla": "∇",
+    "sum": "∑", "prod": "∏", "int": "∫", "oint": "∮",
+    "therefore": "∴", "because": "∵",
+    "dots": "…", "ldots": "…", "cdots": "⋯", "vdots": "⋮", "ddots": "⋱",
+    "circ": "∘", "degree": "°", "prime": "′",
+    "langle": "⟨", "rangle": "⟩", "mid": "|", "vert": "|", "Vert": "‖",
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+    "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "ϑ",
+    "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ",
+    "omicron": "ο", "pi": "π", "varpi": "ϖ", "rho": "ρ", "varrho": "ϱ",
+    "sigma": "σ", "varsigma": "ς", "tau": "τ", "upsilon": "υ", "phi": "φ",
+    "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+    "Gamma": "Γ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π",
+    "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+}
+_SUP = dict(zip("0123456789+-=()nix", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿⁱˣ"))
+_SUB = dict(zip("0123456789+-=()aeoxhklmnpst",
+                "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑₒₓₕₖₗₘₙₚₛₜ"))
+_FRAC_UNICODE = {"1/2": "½", "1/3": "⅓", "2/3": "⅔", "1/4": "¼",
+                 "3/4": "¾", "1/5": "⅕", "1/8": "⅛"}
+
+
+def _math_chars(text: str, table: dict) -> str:
+    text = text.strip()
+    if text and all(ch in table for ch in text):
+        return "".join(table[ch] for ch in text)
+    return ""
+
+
+def _sup_text(text: str) -> str:
+    text = text.strip()
+    if text in (r"\circ", r"\degree"):
+        return "°"
+    mapped = _math_chars(text, _SUP)
+    return mapped or ("^" + (text if len(text) == 1 else f"({text})"))
+
+
+def _sub_text(text: str) -> str:
+    text = text.strip()
+    mapped = _math_chars(text, _SUB)
+    return mapped or ("_" + (text if len(text) == 1 else f"({text})"))
+
+
+def _frac_text(num: str, den: str) -> str:
+    num, den = num.strip(), den.strip()
+    special = _FRAC_UNICODE.get(f"{num}/{den}")
+    if special:
+        return special
+
+    def wrap(part):
+        return part if re.fullmatch(r"[\w.]+", part) else f"({part})"
+
+    return f"{wrap(num)}/{wrap(den)}"
+
+
+def latex_to_unicode(src: str) -> str:
+    """Đổi công thức LaTeX đơn giản sang ký tự Unicode Telegram đọc được."""
+    s = str(src or "").replace("\r", " ")
+    for raw, token in ((r"\{", "\x01"), (r"\}", "\x02"), (r"\%", "\x03"),
+                       (r"\&", "\x04"), (r"\#", "\x05"), (r"\_", "\x06"),
+                       (r"\$", "\x07"), (r"\lbrace", "\x01"), (r"\rbrace", "\x02")):
+        s = s.replace(raw, token)
+
+    s = re.sub(r"\\(?:begin|end)\s*\{[^{}]*\}", " ", s)
+    s = s.replace("&", " ")
+    s = re.sub(r"\\(?:quad|qquad|;|:|,|!)", " ", s)
+    s = s.replace("\\ ", " ").replace("~", " ")
+    s = s.replace("\\\\", "\n")
+
+    s = re.sub(r"\\dfrac|\\tfrac|\\frac", r"\\frac", s)
+    for _ in range(3):
+        s = re.sub(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}",
+                   lambda m: _frac_text(m.group(1), m.group(2)), s)
+    s = re.sub(r"\\sqrt\s*\[([^\]]*)\]\s*\{([^{}]*)\}",
+               lambda m: _sup_text(m.group(1)) + "√(" + m.group(2).strip() + ")", s)
+    s = re.sub(r"\\sqrt\s*\{([^{}]*)\}",
+               lambda m: "√" + (m.group(1).strip()
+                                if re.fullmatch(r"[\w.]+", m.group(1).strip())
+                                else "(" + m.group(1).strip() + ")"), s)
+    s = re.sub(r"\\sqrt\s*([A-Za-z0-9])", r"√\1", s)
+
+    s = re.sub(r"\^\s*\{([^{}]*)\}", lambda m: _sup_text(m.group(1)), s)
+    s = re.sub(r"\^\s*(?:\\circ|\\degree)\b", "°", s)
+    s = re.sub(r"\^\s*([0-9nix+\-=()])", lambda m: _SUP.get(m.group(1), m.group(0)), s)
+    s = re.sub(r"_\s*\{([^{}]*)\}", lambda m: _sub_text(m.group(1)), s)
+    s = re.sub(r"_\s*([A-Za-z0-9])", lambda m: _SUB.get(m.group(1), m.group(0)), s)
+
+    s = re.sub(r"\\(?:widehat|hat)\s*\{([^{}]*)\}",
+               lambda m: "".join(ch + "\u0302" for ch in m.group(1).strip()), s)
+    s = re.sub(r"\\(?:overline|bar)\s*\{([^{}]*)\}",
+               lambda m: "".join(ch + "\u0305" for ch in m.group(1).strip()), s)
+    s = re.sub(r"\\(?:overrightarrow|vec)\s*\{([^{}]*)\}",
+               lambda m: "".join(ch + "\u20d7" for ch in m.group(1).strip()), s)
+    s = re.sub(r"\\(?:text|mathrm|mathbf|mathit|mathsf|operatorname|mbox)\s*\{([^{}]*)\}",
+               r"\1", s)
+    s = re.sub(r"\\(?:left|right|displaystyle|textstyle)\b", "", s)
+
+    s = re.sub(r"\\(sin|cos|tan|cot|sec|csc|arcsin|arccos|arctan|sinh|cosh|tanh"
+               r"|log|ln|lg|lim|max|min|det|gcd|mod)\b", r"\1", s)
+    s = re.sub(r"\\mathbb\s*\{([^{}]*)\}",
+               lambda m: {"R": "ℝ", "N": "ℕ", "Z": "ℤ", "Q": "ℚ",
+                          "C": "ℂ", "P": "ℙ"}.get(m.group(1).strip(), m.group(1).strip()), s)
+    s = re.sub(r"\\([A-Za-z]+)", lambda m: _MATH_SYMBOLS.get(m.group(1), m.group(1)), s)
+    s = re.sub(r"([△□∠∡])\s+", r"\1", s)      # △ABC, ∠A — không dính khoảng trắng thừa
+
+    for _ in range(3):
+        s = re.sub(r"\{([^{}]*)\}", r"\1", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"\(\s+", "(", s)
+    s = re.sub(r"\s+\)", ")", s)
+    s = "\n".join(line.strip() for line in s.split("\n"))
+    s = re.sub(r"\n{2,}", "\n", s).strip()
+    for token, raw in (("\x01", "{"), ("\x02", "}"), ("\x03", "%"), ("\x04", "&"),
+                       ("\x05", "#"), ("\x06", "_"), ("\x07", "$")):
+        s = s.replace(token, raw)
+    return unicodedata.normalize("NFC", s)
+
+
+_MATH_BLOCK = re.compile(r"\$\$(.+?)\$\$|\\\[(.+?)\\\]", re.S)
+_MATH_INLINE = re.compile(r"(?<![\\$])\$(?!\$)([^$\n]+?)\$(?!\$)|\\\(([^\n]+?)\\\)")
+_MATH_HINT = re.compile(r"[\\^_=+<>/±×÷≤≥≠≈√∠△∥⊥⇒⇔]")
+
+
+def _looks_math(text: str) -> bool:
+    """Phân biệt $x = 1$ với giá tiền kiểu $5 và $7."""
+    text = text.strip()
+    if not text:
+        return False
+    return bool(_MATH_HINT.search(text) or re.fullmatch(r"[A-Za-z0-9,.]+", text))
+
 
 def md_to_tg_html(md: str) -> str:
     stash: list = []
@@ -3891,10 +4057,21 @@ def md_to_tg_html(md: str) -> str:
         url = esc(m.group(2)).replace('"', "%22")
         return keep(f'<a href="{url}">{esc(m.group(1))}</a>')
 
+    def math(m, dollar=False):
+        raw = m.group(1) if m.group(1) is not None else m.group(2)
+        if "\x00" in raw:                 # công thức chứa code/placeholder — để nguyên, không phá
+            return m.group(0)
+        if dollar and m.group(1) is not None and not _looks_math(raw):
+            return m.group(0)             # "$5 và $7" là giá tiền, không phải công thức
+        return keep(esc(latex_to_unicode(raw)))
+
     md = _FENCE.sub(fence, md)
     md = _TABLE.sub(lambda m: keep(f"<pre>{esc(m.group(0).strip())}</pre>"), md)
     md = _ICODE.sub(lambda m: keep(f"<code>{esc(m.group(1))}</code>"), md)
     md = _LINK.sub(link, md)              # cất link trước để _ và * trong URL không bị biến thành nghiêng/đậm
+    md = _MATH_BLOCK.sub(math, md)        # $$…$$ / \[…\]
+    md = _MATH_INLINE.sub(lambda m: math(m, dollar=True), md)   # $…$ / \(…\)
+    md = md.replace("\\$", "$")
     md = esc(md)
 
     md = re.sub(r"^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$", "──────────", md, flags=re.M)
