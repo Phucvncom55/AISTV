@@ -1,6 +1,6 @@
 # CODEMAP — bản đồ code AISTV
 
-> Tự sinh bởi `scripts/code_map.py` · 28 file Python · 22907 dòng. Đừng sửa tay: chỉnh code rồi chạy lại `python scripts/code_map.py`.
+> Tự sinh bởi `scripts/code_map.py` · 28 file Python · 22970 dòng. Đừng sửa tay: chỉnh code rồi chạy lại `python scripts/code_map.py`.
 
 ## Cách dùng cho agent
 
@@ -16,7 +16,7 @@
 | `aistv_bot.py` | 8419 | AI STV AGENT — Telegram × OpenCode (dán 1 ô Colab là chạy) |
 | `aistv_browser.py` | 251 | aistv_browser.py — Điều khiển trình duyệt thật bằng Playwright. |
 | `aistv_cloudflare.py` | 506 | aistv_cloudflare.py — Cloudflare API wrapper cho bot AI STV. |
-| `aistv_config.py` | 738 | AI STV - đồng bộ cấu hình (token / API key) cho MỌI môi trường. |
+| `aistv_config.py` | 784 | AI STV - đồng bộ cấu hình (token / API key) cho MỌI môi trường. |
 | `aistv_docs.py` | 259 | aistv_docs.py — Đọc PDF / DOCX / ảnh scan (OCR) hoàn toàn LOCAL. |
 | `aistv_email.py` | 505 | Kết nối email IMAP/SMTP cho AI STV — chỉ dùng thư viện chuẩn. |
 | `aistv_facebook.py` | 468 | AI STV Facebook helper: đọc bài viết, xem/tải video, tìm kiếm. |
@@ -37,7 +37,7 @@
 | `scripts/code_map.py` | 207 | code_map.py — sinh bản đồ code (CODEMAP) để agent định vị nhanh. |
 | `scripts/verify.py` | 155 | verify.py — một lệnh kiểm chứng repo trước khi báo "xong". |
 | `tests/test_cloud_crypto.py` | 74 | Kiểm tra mã hoá dữ liệu cloud (envelope) trong aistv_bot. |
-| `tests/test_config_sync.py` | 132 | Kiểm tra đọc/ghi cấu hình dùng chung (aistv_config.py). |
+| `tests/test_config_sync.py` | 149 | Kiểm tra đọc/ghi cấu hình dùng chung (aistv_config.py). |
 | `tests/test_media.py` | 97 | Kiểm tra chọn nguồn media cho Web2API (voice/video) và nhận diện patch. |
 | `tests/test_planner.py` | 199 | Smoke test cho scripts/code_map.py và aistv_planner.py. |
 | `tests/test_reminders.py` | 68 | Kiểm tra phân loại nhắc việc: tới hạn, quá hạn, quá cũ, định kỳ. |
@@ -456,19 +456,20 @@ L321   def _http_get(url: str, headers: dict=None)
 L327   def _post_form(url: str, data: dict)
 L339   def _copy_to_clipboard(text: str)
 L349   def github_device_login(timeout: int=None, log=None)  — Đăng nhập GitHub bằng mã (device flow) và trả về token.
-L411   def _remember_config_token(token: str, values: dict=None)  — Lưu token vừa đăng nhập để lần chạy sau không phải đăng nhập lại.
-L423   def normalize_repo(repo: str)
-L433   def fetch_url(url: str)
-L440   def fetch_github_status(repo: str, path: str, token: str='')  — Tải file trong repo → (nội dung, mã HTTP). Mã 0 = lỗi mạng.
-L473   def fetch_github(repo: str, path: str=DEFAULT_PATH, token: str='')
-L477   def fetch_remote(values: dict=None, log=None)  — Tải cấu hình từ xa → (values, nhãn nguồn).
-L541   def _have_token(values: dict=None)
-L549   def sync(quiet: bool=False, repo: Path=None, offline: bool=False, protected=None)  — Đọc file + tải cấu hình từ xa (nếu có) và ghi lại.
-L603   def get_value(name: str, repo: Path=None)
-L612   def set_value(name: str, value: str, repo: Path=None)
-L625   def _mask(value: str)
-L631   def cmd_doctor(repo: Path=None)
-L668   def main(argv=None)
+L412   def _remember_config_token(token: str, values: dict=None)  — Lưu token vừa đăng nhập để lần chạy sau không phải đăng nhập lại.
+L447   def _persist_warning(log=None)  — Cảnh báo khi thư mục cấu hình không sống qua lần chạy sau.
+L462   def normalize_repo(repo: str)
+L472   def fetch_url(url: str)
+L479   def fetch_github_status(repo: str, path: str, token: str='')  — Tải file trong repo → (nội dung, mã HTTP). Mã 0 = lỗi mạng.
+L512   def fetch_github(repo: str, path: str=DEFAULT_PATH, token: str='')
+L516   def fetch_remote(values: dict=None, log=None)  — Tải cấu hình từ xa → (values, nhãn nguồn).
+L587   def _have_token(values: dict=None)
+L595   def sync(quiet: bool=False, repo: Path=None, offline: bool=False, protected=None)  — Đọc file + tải cấu hình từ xa (nếu có) và ghi lại.
+L649   def get_value(name: str, repo: Path=None)
+L658   def set_value(name: str, value: str, repo: Path=None)
+L671   def _mask(value: str)
+L677   def cmd_doctor(repo: Path=None)
+L714   def main(argv=None)
 ```
 
 ## aistv_docs.py
@@ -1141,6 +1142,7 @@ L64    class EnvFileTest
   L84    def test_read_files_repo_env_wins_over_shared(self)
   L99    def test_save_values_writes_both_files_and_skips_protected(self)
   L120   def test_save_values_rejects_bad_bot_token(self)
+  L130   def test_remember_config_token_persists_for_next_run(self)
 ```
 
 ## tests/test_media.py

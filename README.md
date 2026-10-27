@@ -91,6 +91,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 
 - Luôn đặt `ALLOWED_USER_IDS` nếu bot ở nơi công cộng.
 - Không commit `.env`; repo public không chứa bí mật.
+- Đăng nhập GitHub chỉ hỏi **một lần**: token được lưu vào `config.env` và `.secrets/github_token`. Trên Colab phải mount Drive hoặc đặt `AISTV_CONFIG_TOKEN` trong 🔑 Secrets; trên Railway đặt `AISTV_CONFIG_TOKEN` trong Variables — nếu không, mỗi phiên/redeploy sẽ hỏi lại.
 - Chi tiết công cụ: [docs/TOOLS.md](docs/TOOLS.md) · bản đồ code: [docs/CODEMAP.md](docs/CODEMAP.md) · khóa Firebase: [docs/FIREBASE.md](docs/FIREBASE.md).
 
 Giấy phép: MIT — xem `LICENSE`.

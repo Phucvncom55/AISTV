@@ -127,6 +127,23 @@ class EnvFileTest(unittest.TestCase):
         self.assertEqual(changed, 0)
         self.assertFalse((repo / ".env").exists())
 
+    def test_remember_config_token_persists_for_next_run(self):
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        stv = self.tmp / "stv"
+        env = {"AISTV_CONFIG_DIR": str(self.tmp / "cfg"), "STV_HOME": str(stv)}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch("pathlib.Path.home", return_value=self.tmp / "home"), \
+                mock.patch.object(cfg, "repo_dir", return_value=repo):
+            saved = cfg._remember_config_token("gho_TEST_TOKEN", {})
+            values, _ = cfg.read_files(repo)
+        self.assertEqual(values.get("AISTV_CONFIG_TOKEN"), "gho_TEST_TOKEN")
+        self.assertIn(str(self.tmp / "cfg" / "config.env"), [str(p) for p in saved])
+        self.assertEqual((stv / ".secrets" / "github_token").read_text("utf-8").strip(),
+                         "gho_TEST_TOKEN")
+        self.assertEqual((repo / ".secrets" / "github_token").read_text("utf-8").strip(),
+                         "gho_TEST_TOKEN")
+
 
 if __name__ == "__main__":
     unittest.main()

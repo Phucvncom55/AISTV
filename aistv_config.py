@@ -378,6 +378,7 @@ def github_device_login(timeout: int = None, log=None) -> str:
     say(f"   1. Mở: {url}")
     say(f"   2. Nhập mã: {user_code}")
     say("   3. Bấm Authorize — script tự chạy tiếp, không cần làm gì thêm.")
+    say("   (chỉ cần một lần — token được lưu lại cho các lần chạy sau)")
     say(f"   (chờ tối đa {expires}s · AISTV_DEVICE_LOGIN=0 để bỏ qua)")
     say("")
     deadline = time.time() + expires
@@ -408,16 +409,54 @@ def github_device_login(timeout: int = None, log=None) -> str:
     return ""
 
 
-def _remember_config_token(token: str, values: dict = None) -> None:
-    """Lưu token vừa đăng nhập để lần chạy sau không phải đăng nhập lại."""
+def _remember_config_token(token: str, values: dict = None) -> list:
+    """Lưu token vừa đăng nhập để lần chạy sau không phải đăng nhập lại.
+
+    Ghi vào config.env dùng chung, .env của repo và .secrets/github_token
+    ($STV_HOME + repo) — nơi nào còn tồn tại là lần sau dùng lại được.
+    """
     values = values if values is not None else {}
     os.environ.setdefault("AISTV_CONFIG_TOKEN", token)
     values.setdefault("AISTV_CONFIG_TOKEN", token)
+    saved = []
+    has_gh = bool((os.getenv("GITHUB_TOKEN") or "").strip()
+                  or (values.get("GITHUB_TOKEN") or "").strip())
     for path in (shared_config_path(), repo_dir() / ".env"):
-        write_env_var(path, "AISTV_CONFIG_TOKEN", token)
-        if not ((os.getenv("GITHUB_TOKEN") or "").strip()
-                or (values.get("GITHUB_TOKEN") or "").strip()):
-            write_env_var(path, "GITHUB_TOKEN", token)
+        if write_env_var(path, "AISTV_CONFIG_TOKEN", token):
+            saved.append(path)
+        if not has_gh and write_env_var(path, "GITHUB_TOKEN", token):
+            saved.append(path)
+    # File token riêng: stored_github_token() và bot /github login cùng đọc.
+    for base in (Path(os.getenv("STV_HOME") or "").expanduser() if os.getenv("STV_HOME")
+                 else Path.home() / "stv_agent", repo_dir()):
+        try:
+            path = base / ".secrets" / "github_token"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(token + "\n", "utf-8")
+            try:
+                if os.name != "nt":
+                    path.chmod(0o600)
+            except Exception:
+                pass
+            saved.append(path)
+        except Exception:
+            continue
+    return saved
+
+
+def _persist_warning(log=None) -> None:
+    """Cảnh báo khi thư mục cấu hình không sống qua lần chạy sau."""
+    if not log:
+        return
+    shared = str(shared_config_path())
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+        log("[config] ⚠ Railway không giữ file khi redeploy: đặt AISTV_CONFIG_TOKEN vào "
+            "Variables (`python aistv_railway.py var-set AISTV_CONFIG_TOKEN=<PAT> --deploy`) "
+            "để không phải đăng nhập lại.")
+    elif Path("/content").is_dir() and not shared.startswith("/content/drive"):
+        log("[config] ⚠ Colab không giữ file giữa các phiên: mount Drive "
+            "(from google.colab import drive; drive.mount('/content/drive')) "
+            "hoặc đặt AISTV_CONFIG_TOKEN trong 🔑 Secrets để không phải đăng nhập lại.")
 
 
 def normalize_repo(repo: str) -> str:
@@ -504,7 +543,14 @@ def fetch_remote(values: dict = None, log=None) -> tuple:
         if not tokens:
             token = github_device_login(log=log)
             if token:
-                _remember_config_token(token, values)
+                saved = _remember_config_token(token, values)
+                if log:
+                    if saved:
+                        log("[config] Đã lưu token đăng nhập vào: "
+                            + ", ".join(str(p) for p in saved[:3]))
+                    else:
+                        log("[config] ⚠ Không ghi được token đăng nhập xuống đĩa.")
+                _persist_warning(log)
                 tokens = [("GitHub device login", token)]
         explicit = bool((os.getenv("AISTV_CONFIG_REPO") or values.get("AISTV_CONFIG_REPO") or "").strip())
         if tokens or explicit:
