@@ -313,7 +313,9 @@ PROGRESS_LINES = int(os.getenv("AISTV_PROGRESS_LINES", "14") or 14) # số dòng
 PROGRESS_CHARS = 3700           # giới hạn ký tự của khung cuộn (Telegram tối đa 4096)
 
 # ── Trí nhớ đám mây: Firebase Realtime Database (sống sót khi restart / Colab reset) ──
-FIREBASE_URL = os.getenv("AISTV_FIREBASE_URL", "https://<project>-default-rtdb.firebaseio.com").rstrip("/")
+# Không hardcode URL: đặt AISTV_FIREBASE_URL trong config.env của repo private.
+# Thiếu biến này thì CLOUD_ENABLED = False, bot vẫn chạy (chỉ mất đồng bộ cloud).
+FIREBASE_URL = (os.getenv("AISTV_FIREBASE_URL") or "").strip().rstrip("/")
 FIREBASE_SECRET = os.getenv("AISTV_FIREBASE_SECRET", "")   # chỉ cần nếu Rules yêu cầu auth (?auth=...)
 CLOUD_ENABLED = bool(FIREBASE_URL) and os.getenv("AISTV_CLOUD", "1") != "0"
 CLOUD_NS_BASE = os.getenv("AISTV_CLOUD_NS", "aistv")       # namespace riêng, không đụng dữ liệu app khác

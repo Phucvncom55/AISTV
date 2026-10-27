@@ -51,6 +51,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 | `TELEGRAM_BOT_TOKEN` | ✅ | Token BotFather |
 | `ALLOWED_USER_IDS` | nên đặt | Chỉ những id này dùng được bot (cách nhau dấu phẩy) |
 | `GEMINI_API_KEY` | tuỳ chọn | Đọc ảnh, xem video, chép lời (thiếu vẫn chạy) |
+| `AISTV_FIREBASE_URL` | tuỳ chọn | URL Firebase RTDB để đồng bộ trí nhớ cloud (đặt trong `config.env` của repo private) |
 
 Đặt key ngay trong chat (tin nhắn chứa key tự xoá): `/key gemini AIza...`
 
