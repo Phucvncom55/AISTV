@@ -142,5 +142,19 @@ class GuestImageLinkTest(unittest.TestCase):
         self.assertIn("pollinations", order)
 
 
+class DisplayNameTest(unittest.TestCase):
+    def test_provider_labels_are_friendly(self):
+        self.assertEqual(bot._provider_label("web2api"), "Gemini")
+        self.assertEqual(bot._provider_label("pollinations"), "Miễn phí")
+        self.assertEqual(bot._provider_label("ai+pil"), "AI STV")
+        self.assertEqual(bot._provider_label("cloudflare"), "Cloudflare")
+        self.assertEqual(bot._provider_label("unknown"), "unknown")
+
+    def test_menu_uses_gemini_not_web2api(self):
+        names = [name for name, _ in bot.COMMANDS]
+        self.assertIn("gemini", names)
+        self.assertNotIn("web2api", names)
+
+
 if __name__ == "__main__":
     unittest.main()

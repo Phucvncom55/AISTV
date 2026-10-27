@@ -56,7 +56,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 | `AISTV_GUEST_MEDIA` | tuỳ chọn | `0` để khách không tạo ảnh/sơ đồ (mặc định bật) |
 | `AISTV_GUEST_RATE` | tuỳ chọn | Số câu chat mỗi phút của khách (mặc định `10`) |
 | `AISTV_GUEST_MEDIA_GAP` | tuỳ chọn | Giây tối thiểu giữa 2 ảnh của khách (mặc định `45`) |
-| `AISTV_GUEST_MODELS` | tuỳ chọn | Thêm model cho khách chọn bằng `/model`, cách nhau dấu phẩy (mặc định Web2API + Gemini Flash) |
+| `AISTV_GUEST_MODELS` | tuỳ chọn | Thêm model cho khách chọn bằng `/model`, cách nhau dấu phẩy (mặc định Gemini + Gemini Flash) |
 
 Đặt key ngay trong chat (tin nhắn chứa key tự xoá): `/key gemini AIza...`
 
@@ -74,7 +74,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 - **Email:** `/email inbox`, `/email read`, `/email send`, `/email setup`.
 - **File:** gửi file cho bot → lưu `workspace/inbox/` để agent đọc; `/files`, `/get <đường dẫn>`.
 - **Skills:** `/skills` xem, `/skill <tên> <yêu cầu>` ép dùng, `/skill add owner/repo/path` cài thêm. Có sẵn: debug, TDD, code review, PR, thiết kế codebase, spec/ticket, dạy học, viết lách, frontend design, MCP server…
-- **Chế độ khách (miễn phí):** người ngoài `ALLOWED_USER_IDS` vẫn chat, hỏi code, tạo ảnh và vẽ sơ đồ tư duy/infographic/biểu đồ bằng Web2API — không tốn key của chủ bot. Trong nhóm, khách nhắc `@bot`, reply tin của bot hoặc dùng `/ask`; mỗi người một ngữ cảnh riêng, có giới hạn chống spam (10 câu/phút, 1 ảnh/45 giây, 6 ảnh/giờ). Chủ bot bật/tắt và chặn bằng `/guest`.
+- **Chế độ khách (miễn phí):** người ngoài `ALLOWED_USER_IDS` vẫn chat, hỏi code, tạo ảnh và vẽ sơ đồ tư duy/infographic/biểu đồ bằng Gemini miễn phí — không tốn key của chủ bot. Trong nhóm, khách nhắc `@bot`, reply tin của bot hoặc dùng `/ask`; mỗi người một ngữ cảnh riêng, có giới hạn chống spam (10 câu/phút, 1 ảnh/45 giây, 6 ảnh/giờ). Chủ bot bật/tắt và chặn bằng `/guest`.
 
 ## 4. Lệnh hay dùng
 
@@ -84,6 +84,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 | `/plan <yêu cầu>` | Chia bước và tự thực thi |
 | `/undo` `/push` | Hoàn tác · đẩy code lên GitHub |
 | `/model` `/models` | Xem / đổi model |
+| `/gemini` | Chủ bot: trạng thái, bật/tắt, làm mới Gemini dự phòng (chat, ảnh, sơ đồ) |
 | `/remember` `/memory` | Trí nhớ dài hạn |
 | `/remind` `/reminders` `/task` | Nhắc việc · việc định kỳ |
 | `/see` `/video` `/image` `/mindmap` | Ảnh · video · tạo ảnh · sơ đồ tư duy |

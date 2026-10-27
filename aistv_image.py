@@ -333,17 +333,17 @@ def _web2api_ready() -> bool:
 
 def web2api_image(prompt: str, aspect: str = "1:1", ref: str = "", size: str = "", **_):
     if web2api is None:
-        raise ImageError("thiếu aistv_web2api.py")
+        raise ImageError("thiếu module Gemini")
     if not web2api.enabled():
-        raise ImageError("Web2API đang tắt (WEB2API_ENABLE=0)")
+        raise ImageError("Gemini đang tắt")
     if ref:
-        raise ImageError("Web2API chưa nhận ảnh tham chiếu — dùng Gemini API")
+        raise ImageError("Gemini nội bộ chưa nhận ảnh tham chiếu — dùng Gemini API")
     full = prompt
     if aspect and aspect != "1:1":
         full = f"{prompt} Aspect ratio {aspect}."
     raw, mime, err = web2api.generate_image(full, timeout=300)
     if not raw:
-        raise ImageError(err or "Web2API không trả ảnh")
+        raise ImageError(err or "Gemini không trả ảnh")
     return raw, mime or "image/png", "web2api/" + web2api.default_model()
 
 
@@ -745,13 +745,13 @@ def _cf_text(prompt: str, max_tokens: int = 1600, temperature: float = 0.45) -> 
 def _web2api_text(prompt: str) -> str:
     """Dàn ý qua Gemini Web (cookie) — không cần API key, dùng cho khách."""
     if web2api is None or not _web2api_ready():
-        raise ImageError("Web2API chưa sẵn sàng")
+        raise ImageError("Gemini chưa sẵn sàng")
     if not web2api.ensure_server(quiet=True):
-        raise ImageError("server Web2API chưa chạy")
+        raise ImageError("server Gemini chưa chạy")
     text, err = web2api.chat([{"role": "user", "content": prompt}],
                              web2api.default_model(), timeout=120)
     if not (text or "").strip():
-        raise ImageError(err or "Web2API không trả lời")
+        raise ImageError(err or "Gemini không trả lời")
     return text
 
 

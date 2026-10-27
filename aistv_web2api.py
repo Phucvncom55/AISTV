@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AI STV - Gemini Web2API: server nội bộ + đồng bộ cookie dạng chữ.
+"""AI STV - Gemini nội bộ: server + đồng bộ cookie dạng chữ.
 
 Vì sao có file này
 ------------------
 Khi model chính (OpenCode / DeepSeek...) hết hạn mức request hoặc lỗi server,
-agent tự chuyển sang một server Gemini Web2API chạy ngay trên máy chủ của mình.
+agent tự chuyển sang server Gemini nội bộ chạy ngay trên máy chủ của mình.
 Server đó dùng cookie tài khoản Google (Gemini Web) nên KHÔNG cần API key trả phí.
 
 Cookie lưu thẳng dạng chữ (KHÔNG mã hoá) để dễ sửa:
@@ -1225,7 +1225,7 @@ def start(wait: float = 25.0, quiet: bool = False) -> tuple:
     while time.time() < deadline:
         if health():
             if not quiet:
-                print(f"Web2API đã chạy tại {base_url()} (pid {proc.pid})")
+                print(f"Gemini đã chạy tại {base_url()} (pid {proc.pid})")
             return True, "đã khởi động"
         if proc.poll() is not None:
             break
@@ -1384,7 +1384,7 @@ def generate(parts: list, model: str = "", timeout: float = 240,
              system: str = "") -> tuple:
     """Gọi /v1beta/models/{model}:generateContent, trả (text, lỗi)."""
     if not ensure_server():
-        return None, "Web2API chưa sẵn sàng"
+        return None, "Gemini chưa sẵn sàng"
     body = {
         "contents": [{"role": "user", "parts": _normalise_parts(parts)}],
         "generationConfig": {"temperature": temperature,
@@ -1412,7 +1412,7 @@ def generate(parts: list, model: str = "", timeout: float = 240,
     if text:
         return text, None
     feedback = (data.get("promptFeedback") or {}).get("blockReason")
-    return None, f"Web2API không trả lời{(' (' + feedback + ')') if feedback else ''}"
+    return None, f"Gemini không trả lời{(' (' + feedback + ')') if feedback else ''}"
 
 
 def _image_mime(raw: bytes) -> str:
@@ -1521,7 +1521,7 @@ def generate_image(prompt: str, model: str = "", timeout: float = 240,
     if not prompt:
         return None, "", "thiếu mô tả ảnh"
     if not ensure_server():
-        return None, "", "Web2API chưa sẵn sàng"
+        return None, "", "Gemini chưa sẵn sàng"
     # Gemini Web đôi khi trả lời bằng văn bản (công thức, hướng dẫn) nếu câu lệnh
     # không nói rõ là tạo ảnh. Thêm tiền tố để luôn vào chế độ sinh ảnh.
     full = prompt if _IMAGE_VERB_RE.match(prompt) else f"Create an image: {prompt}"
@@ -1536,7 +1536,7 @@ def generate_image(prompt: str, model: str = "", timeout: float = 240,
     if err:
         low = err.lower()
         if "404" in low or "501" in low or "not found" in low:
-            return None, "", ("server Web2API chưa có tính năng tạo ảnh — "
+            return None, "", ("server Gemini chưa có tính năng tạo ảnh — "
                               "chạy `python aistv_web2api.py setup` để vá")
         return None, "", err
     try:
@@ -1604,7 +1604,7 @@ def status_report() -> dict:
 
 
 def cmd_doctor() -> int:
-    print("== Gemini Web2API ==")
+    print("== Gemini ==")
     print(f"Runtime      : {runtime_dir()}")
     print(f"Cookie file  : {cookie_path()}")
     print(f"Server       : {base_url()} ({'local' if is_local() else 'remote'})")
@@ -1673,7 +1673,7 @@ def cmd_watch(interval: float = 5.0) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Gemini Web2API nội bộ + đồng bộ cookie nguyên văn cho AISTV")
+        description="Gemini nội bộ + đồng bộ cookie nguyên văn cho AISTV")
     sub = parser.add_subparsers(dest="cmd")
 
     p_setup = sub.add_parser("setup", help="tải server + tạo config")
@@ -1766,7 +1766,7 @@ def main(argv=None) -> int:
         # status
         cfg = _read_json(config_path(), {})
         state = _read_json(state_path(), {}) or {}
-        print(f"Web2API: {'ON' if enabled() else 'OFF'} · {base_url()} · "
+        print(f"Gemini: {'ON' if enabled() else 'OFF'} · {base_url()} · "
               f"{'đang chạy' if health() else 'không chạy'}")
         print(f"Cookie : {'có' if cookie_header() else 'chưa có'} · "
               f"XSRF: {'có' if cfg.get('xsrf_token') else 'chưa có'} · "

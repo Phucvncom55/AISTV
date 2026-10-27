@@ -921,7 +921,7 @@ GEMINI_READY = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
 
 
 def vision_ready() -> bool:
-    """Có nguồn đọc ảnh/video/audio: Gemini API hoặc Web2API đã vá media."""
+    """Có nguồn đọc ảnh/video/audio: Gemini API hoặc Gemini nội bộ đã vá media."""
     if GEMINI_READY:
         return True
     if web2api is None:
@@ -1569,18 +1569,18 @@ def bootstrap_workspace() -> None:
         try:
             if web2api.enabled():
                 models = {
-                    WEB2API_MODEL: {"name": f"Gemini {WEB2API_MODEL} (web2api)"},
+                    WEB2API_MODEL: {"name": f"Gemini · {WEB2API_MODEL}"},
                     "gemini-3.5-flash-thinking": {
-                        "name": "Gemini Thinking (web2api)"},
+                        "name": "Gemini Thinking"},
                 }
                 for item in (os.getenv("OPENCODE_FALLBACK_MODELS") or "").split(","):
                     item = item.strip()
                     if item.startswith("web2api/") and item.split("/", 1)[1]:
                         mid = item.split("/", 1)[1].strip()
-                        models.setdefault(mid, {"name": f"Gemini {mid} (web2api)"})
+                        models.setdefault(mid, {"name": f"Gemini · {mid}"})
                 cfg["providers"] = {
                     "web2api": {
-                        "name": "Gemini Web2API (nội bộ)",
+                        "name": "Gemini (nội bộ)",
                         "package": "@opencode/ai/providers/openai-compatible",
                         "settings": {"baseURL": web2api.base_url() + "/v1"},
                         "headers": {"Authorization": "Bearer " + web2api.api_key()},
@@ -3644,7 +3644,7 @@ def _pretty_error(text: str) -> str:
 
 
 def agent_model_chain() -> list:
-    """Model chính + model dự phòng (Gemini Web2API) khi hết hạn mức."""
+    """Model chính + model dự phòng (Gemini) khi hết hạn mức."""
     chain = [opencode_model()]
     if not WEB2API_FALLBACK or web2api is None:
         return chain
@@ -3665,23 +3665,23 @@ def agent_model_chain() -> list:
 def _fallback_hint() -> str:
     """Gợi ý ngắn khi model dự phòng không trả lời được (dựa trên trạng thái thật)."""
     if web2api is None:
-        return "💡 Thiếu aistv_web2api.py nên không có model dự phòng."
+        return "💡 Thiếu module Gemini nên không có model dự phòng."
     try:
         info = web2api.status_report()
     except Exception:
-        return "💡 Chạy /web2api để kiểm tra model dự phòng."
+        return "💡 Gửi /gemini để kiểm tra model dự phòng."
     if not info.get("enabled"):
-        return "💡 Model dự phòng đang tắt (WEB2API_ENABLE=0)."
+        return "💡 Model dự phòng đang tắt."
     if not info.get("cookie"):
-        return ("💡 Chưa có cookie Gemini. Dán cookie mới: /web2api import "
+        return ("💡 Chưa có cookie Gemini. Dán cookie mới: /gemini import "
                 "__Secure-1PSID=...; SAPISID=... rồi thử lại.")
     if not info.get("running"):
-        return "💡 Server dự phòng chưa chạy. Gửi /web2api auto để bật lại."
+        return "💡 Server dự phòng chưa chạy. Gửi /gemini auto để bật lại."
     if not info.get("xsrf"):
-        return "💡 Web2API thiếu XSRF token. Gửi /web2api refresh rồi thử lại."
+        return "💡 Gemini thiếu XSRF token. Gửi /gemini refresh rồi thử lại."
     # Server + cookie + XSRF đều ổn → đừng đổ lỗi cookie. Xem log để biết lý do thật.
-    return ("💡 Web2API vẫn chạy và đã có cookie/XSRF — lỗi nằm ở phía Gemini "
-            "hoặc OpenCode. Gửi /web2api logs (hoặc /web2api test \"ping\") để xem chi tiết.")
+    return ("💡 Gemini vẫn chạy và đã có cookie/XSRF — lỗi nằm ở phía Gemini "
+            "hoặc OpenCode. Gửi /gemini logs (hoặc /gemini test \"ping\") để xem chi tiết.")
 
 
 def _agent_failure(err_text: str, quota: bool = False, tools: bool = False,
@@ -3783,34 +3783,34 @@ def _drop_fake_files(text: str) -> str:
 
 
 async def _run_web2api_direct(prompt: str, model: str) -> tuple:
-    """Gọi thẳng server Web2API, không qua OpenCode.
+    """Gọi thẳng server Gemini dự phòng, không qua OpenCode.
 
     OpenCode đôi khi trả 500 "Unexpected server error. Check server logs for
-    details." cho cả model dự phòng dù server Web2API vẫn khoẻ (request không
+    details." cho cả model dự phòng dù server Gemini vẫn khoẻ (request không
     hề tới server). Đường tắt này giữ cho dự phòng hoạt động đúng ý nghĩa của nó.
     Đường tắt này KHÔNG có công cụ nên phải nói rõ để model không bịa là đã làm.
     Trả (ok, text hoặc lỗi).
     """
     if web2api is None:
-        return False, "Thiếu aistv_web2api.py nên không gọi được Web2API."
+        return False, "Thiếu module Gemini nên không gọi được model dự phòng."
     prompt = _TOOLLESS_RULES + "\n\nYÊU CẦU CỦA NGƯỜI DÙNG:\n" + prompt
     mid = model.split("/", 1)[1] if "/" in model else ""
     try:
         ready = await asyncio.to_thread(web2api.ensure_server)
     except Exception as exc:
-        return False, f"Web2API: {type(exc).__name__}: {exc}"
+        return False, f"Gemini: {type(exc).__name__}: {exc}"
     if not ready:
-        return False, "Web2API: server chưa sẵn sàng"
+        return False, "Gemini: server chưa sẵn sàng"
     timeout = 240 if AGENT_TIMEOUT <= 0 else max(60, min(AGENT_TIMEOUT, 300))
     try:
         text, err = await asyncio.to_thread(
             web2api.chat, [{"role": "user", "content": prompt}], mid, timeout)
     except Exception as exc:
-        return False, f"Web2API: {type(exc).__name__}: {exc}"
+        return False, f"Gemini: {type(exc).__name__}: {exc}"
     text = _drop_fake_files(clean_output(text or ""))
     if text:
         return True, text
-    return False, "Web2API: " + (err or "không trả lời")
+    return False, "Gemini: " + (err or "không trả lời")
 
 
 def make_checkpoint(chat_id: int, label: str = "") -> str:
@@ -4913,11 +4913,14 @@ def image_provider_line() -> str:
     names = []
     try:
         if web2api is not None and web2api.enabled():
-            names.append("Gemini Web2API")
+            names.append("Gemini")
     except Exception:
         pass
     if get_secret("GEMINI_API_KEY") or get_secret("GOOGLE_API_KEY"):
-        names.append("Gemini")
+        if "Gemini" in names:
+            names.append("Gemini API")
+        else:
+            names.append("Gemini")
     if get_secret("CLOUDFLARE_ACCOUNT_ID") and get_secret("CLOUDFLARE_API_TOKEN"):
         names.append("Cloudflare")
     if get_secret("TOGETHER_API_KEY"):
@@ -4932,10 +4935,10 @@ def web2api_line() -> str:
     if web2api is None:
         return "không có module"
     if not WEB2API_FALLBACK:
-        return "đã tắt (WEB2API_FALLBACK=0)"
+        return "đã tắt"
     try:
         if not web2api.enabled():
-            return "đã tắt (WEB2API_ENABLE=0)"
+            return "đã tắt"
         up = web2api.health(1.2)
         return ("🟢 đang chạy" if up else "🟡 chưa bật (tự bật khi hết hạn mức)") + \
                f" · {WEB2API_MODEL}"
@@ -4958,9 +4961,9 @@ def build_status(chat_id: int) -> str:
         f"• GitHub: {esc(gh)}\n"
         f"• Email: {esc(email_line())}\n"
         f"• Gemini ({VISION_MODEL}) đọc ảnh/video: "
-        f"{'✅ sẵn sàng' if GEMINI_READY else ('🟡 qua Web2API' if vision_ready() else '⚠️ thiếu GEMINI_API_KEY')}"
+        f"{'✅ sẵn sàng' if GEMINI_READY else ('🟡 qua Gemini' if vision_ready() else '⚠️ thiếu GEMINI_API_KEY')}"
         f"{' · thảo luận 2 chiều' if VISION_HANDOFF else ' · trả lời trực tiếp'}\n"
-        f"• Dự phòng Web2API: {esc(web2api_line())}\n"
+        f"• Gemini dự phòng: {esc(web2api_line())}\n"
         f"• Tạo ảnh: {esc(image_provider_line())}\n"
         f"• Khách: chat {'bật' if GUEST_CHAT and GUEST_ACTIVE['chat'] else 'tắt'} · "
         f"ảnh {'bật' if GUEST_ACTIVE['media'] else 'tắt'} · "
@@ -5998,7 +6001,7 @@ GUEST_HELP_TEXT = (
     "• Hỏi đáp, giải thích, viết/sửa code…\n"
     "• <code>vẽ ảnh …</code>, <code>sơ đồ tư duy …</code>, <code>biểu đồ …</code>\n"
     "• <code>/ask &lt;câu hỏi&gt;</code> — chắc chắn bot nhận được trong nhóm\n"
-    "• <code>/model</code> — xem/đổi model trả lời (mặc định Web2API)\n"
+    "• <code>/model</code> — xem/đổi model trả lời (mặc định Gemini)\n"
     "• <code>/new</code> — xoá ngữ cảnh riêng của bạn\n"
     "Giới hạn: 10 tin/phút và 1 ảnh/45 giây mỗi người. Lệnh quản trị chỉ dành cho chủ bot."
 )
@@ -6220,7 +6223,7 @@ async def _guest_send_url_images(msg, chat, urls: list) -> int:
 
 async def _guest_media_reply(msg, context, chat, user, text: str, kind: str = "image",
                              prompt: str = "", style: str = "", aspect: str = "1:1") -> bool:
-    """Khách tạo ảnh / sơ đồ qua nguồn miễn phí (Web2API, dự phòng Pollinations)."""
+    """Khách tạo ảnh / sơ đồ qua nguồn miễn phí (Gemini, dự phòng Pollinations)."""
     if not GUEST_ACTIVE["media"]:
         await msg.reply_text("🎨 Tạo ảnh đang tắt cho khách. Chủ bot có thể bật lại bằng /guest images on.")
         return True
@@ -6296,7 +6299,7 @@ async def _guest_typing(bot, chat_id: int, stop: asyncio.Event) -> None:
 
 
 async def _guest_answer(msg, context, chat, user, text: str, direct: bool = False) -> None:
-    """Khách: Web2API miễn phí cho chat/code/ảnh/sơ đồ; không tool, không dữ liệu của chủ."""
+    """Khách: Gemini miễn phí cho chat/code/ảnh/sơ đồ; không tool, không dữ liệu của chủ."""
     if not GUEST_ACTIVE["chat"] or _guest_banned(user.id):
         return
     if chat.type != "private" and not direct:
@@ -6350,7 +6353,7 @@ async def _guest_answer(msg, context, chat, user, text: str, direct: bool = Fals
                 acquired = True
                 ready = await asyncio.to_thread(web2api.ensure_server)
                 if not ready:
-                    err = "Web2API chưa sẵn sàng"
+                    err = "Gemini chưa sẵn sàng"
                 else:
                     system = GUEST_SYSTEM + (GUEST_CODE_HINT if intent == "code" else "")
                     messages = [{"role": "system", "content": system}]
@@ -6472,8 +6475,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not vision_ready():
         try:
             await status.edit_text(
-                "⚠️ Cần GEMINI_API_KEY hoặc Web2API đã vá media để nghe tin nhắn thoại.\n"
-                "Gửi: <code>/key gemini &lt;key&gt;</code> hoặc <code>/web2api restart</code>",
+                "⚠️ Cần GEMINI_API_KEY hoặc Gemini đã bật media để nghe tin nhắn thoại.\n"
+                "Gửi: <code>/key gemini &lt;key&gt;</code> hoặc <code>/gemini restart</code>",
                 parse_mode=HTML)
         except Exception:
             pass
@@ -6776,6 +6779,17 @@ def _photo_for_telegram(path: Path) -> Path:
         return path
 
 
+def _provider_label(name: str) -> str:
+    low = str(name or "").strip().lower()
+    for prefix, label in (("web2api", "Gemini"), ("pollinations", "Miễn phí"),
+                          ("ai+pil", "AI STV"), ("gemini", "Gemini API"),
+                          ("cloudflare", "Cloudflare"), ("together", "Together"),
+                          ("hf", "HuggingFace")):
+        if low == prefix or low.startswith(prefix + "/"):
+            return label
+    return str(name or "")
+
+
 def _image_caption(data: dict) -> str:
     bits = []
     prompt = str(data.get("prompt") or "").strip()
@@ -6789,7 +6803,7 @@ def _image_caption(data: dict) -> str:
     elif data.get("style"):
         meta.append(esc(str(data["style"])))
     if data.get("provider"):
-        meta.append(esc(str(data["provider"])))
+        meta.append(esc(_provider_label(str(data["provider"]))))
     if meta:
         bits.append("<i>" + " · ".join(meta) + "</i>")
     return "\n".join(bits)[:1000] or "🎨 Ảnh đã tạo"
@@ -6980,7 +6994,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = caption or "Hãy cho tôi biết nội dung chính của ảnh này."
     await respond(msg, context, update.effective_chat.id,
                   f"{prompt}\n\n(Người dùng vừa gửi ảnh, đã lưu tại: inbox/{dest.name}. "
-                  "Chưa có GEMINI_API_KEY và Web2API chưa vá media nên không đọc ảnh được.)",
+                  "Chưa có GEMINI_API_KEY và Gemini chưa bật media nên không đọc ảnh được.)",
                   quoted_msg=msg)
 
 
@@ -7004,7 +7018,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = caption or "Hãy xem video này và tóm tắt nội dung chính kèm mốc thời gian."
     await respond(msg, context, update.effective_chat.id,
                   f"{prompt}\n\n(Người dùng vừa gửi video, đã lưu tại: inbox/{dest.name}. "
-                  "Dùng skill watch với aistv_watch.py để xem; chưa có GEMINI_API_KEY/Web2API media nên ưu tiên "
+                  "Dùng skill watch với aistv_watch.py để xem; chưa có GEMINI_API_KEY/Gemini media nên ưu tiên "
                   "transcript + frames.)",
                   quoted_msg=msg)
 
@@ -7048,8 +7062,8 @@ async def _cmd_gemini_media(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if not vision_ready():
         await msg.reply_text(
             "⚠️ Chưa có nguồn đọc ảnh/video.\n"
-            "Thêm <code>GEMINI_API_KEY</code> vào <code>.env</code>, hoặc bật Web2API đã vá media:\n"
-            "<code>/web2api restart</code> (không tốn request API).", parse_mode=HTML)
+            "Thêm <code>GEMINI_API_KEY</code> vào <code>.env</code>, hoặc bật Gemini đã có media:\n"
+            "<code>/gemini restart</code> (không tốn request API).", parse_mode=HTML)
         return
     source = _resolve_media_source(args[0])
     question = " ".join(args[1:]).strip()
@@ -8901,16 +8915,16 @@ async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @guard()
 async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quản lý server Gemini Web2API dự phòng (chỉ chủ bot)."""
+    """Quản lý Gemini dự phòng (chỉ chủ bot)."""
     msg = update.effective_message
     if web2api is None:
-        await msg.reply_text("⚠️ Thiếu <code>aistv_web2api.py</code> trong repo.", parse_mode=HTML)
+        await msg.reply_text("⚠️ Thiếu module Gemini trong repo.", parse_mode=HTML)
         return
     action = (context.args[0].lower().lstrip("-") if context.args else "status")
     if action in ("status", "st", ""):
         info = await asyncio.to_thread(web2api.status_report)
         lines = [
-            "🧩 <b>Gemini Web2API (dự phòng)</b>",
+            "✨ <b>Gemini dự phòng</b>",
             f"• Bật: {'có' if info['enabled'] and WEB2API_FALLBACK else 'không'} · "
             f"model <code>{esc(WEB2API_MODEL)}</code>",
             f"• Server: <code>{esc(info['url'])}</code> "
@@ -8918,24 +8932,24 @@ async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Cookie: {'✅ có' if info['cookie'] else '❌ chưa có'} · "
             f"XSRF: {'✅' if info['xsrf'] else '❌'} · "
             f"GitHub: {'✅ đã đồng bộ' if info['synced'] else '⏳ chưa đẩy'}",
-            f"• Xem/tạo ảnh: {'✅ sẵn sàng' if info.get('images_ready') else ('⚠️ thiếu curl_cffi' if info.get('images') and not info.get('curl_cffi') else ('⚠️ server chưa chạy' if info.get('images') else '❌ chưa vá — chạy /web2api restart'))}",
-            f"• Nghe voice / xem video: {'✅ đã vá' if info.get('media') else '❌ chưa vá — chạy /web2api restart'}"
+            f"• Xem/tạo ảnh: {'✅ sẵn sàng' if info.get('images_ready') else ('⚠️ thiếu curl_cffi' if info.get('images') and not info.get('curl_cffi') else ('⚠️ server chưa chạy' if info.get('images') else '❌ chưa vá — chạy /gemini restart'))}",
+            f"• Nghe voice / xem video: {'✅ đã vá' if info.get('media') else '❌ chưa vá — chạy /gemini restart'}"
             f" · {'🟢 server chạy' if info.get('running') else '🔴 server tắt'}",
             f"• File dán cookie: <code>{esc(info['cookie_file'])}</code>",
             f"• Kho đồng bộ: <code>{esc(info['store'])}</code> (nguyên văn, repo private)",
             "",
-            "Lệnh: <code>/web2api start|stop|restart|refresh|pull|push|auto</code>",
-            "Dán cookie mới: <code>/web2api import __Secure-1PSID=...; SAPISID=...</code>",
+            "Lệnh: <code>/gemini start|stop|restart|refresh|pull|push|auto</code>",
+            "Dán cookie mới: <code>/gemini import __Secure-1PSID=...; SAPISID=...</code>",
         ]
         await msg.reply_text("\n".join(lines), parse_mode=HTML)
         return
     if not is_owner(update.effective_user.id):
-        await msg.reply_text("🔒 Chỉ chủ bot được điều khiển Web2API.")
+        await msg.reply_text("🔒 Chỉ chủ bot được điều khiển Gemini.")
         return
     if action in ("import", "cookie", "set"):
         text = " ".join(context.args[1:]).strip()
         if not text:
-            await msg.reply_text("Dùng: <code>/web2api import &lt;chuỗi cookie&gt;</code>",
+            await msg.reply_text("Dùng: <code>/gemini import &lt;chuỗi cookie&gt;</code>",
                                  parse_mode=HTML)
             return
         try:
@@ -8973,7 +8987,7 @@ async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action in ("auto", "sync"):
             ok, detail = await asyncio.to_thread(web2api.auto, False)
         else:
-            await note.edit_text("Dùng: <code>/web2api start|stop|restart|refresh|pull|push|auto</code>",
+            await note.edit_text("Dùng: <code>/gemini start|stop|restart|refresh|pull|push|auto</code>",
                                  parse_mode=HTML)
             return
         await note.edit_text(("✅ " if ok else "❌ ") + esc(str(detail))[:3800])
@@ -9002,7 +9016,7 @@ COMMANDS = [
     ("push", "Đẩy code lên GitHub (đồng bộ sang Windows)"),
     ("restart", "Khởi động lại bot"),
     ("key", "Xem / đặt API key"),
-    ("web2api", "Dự phòng Gemini Web2API"),
+    ("gemini", "Gemini dự phòng — chat, ảnh, sơ đồ"),
     ("ask", "Hỏi trong nhóm không cần @mention"),
     ("guest", "Bật/tắt, chặn khách"),
     ("files", "File trong workspace"), ("get", "Tải file về"), ("help", "Hướng dẫn"),
@@ -9284,7 +9298,7 @@ def main() -> None:
                       (["restart"], cmd_restart),
                       (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny),
                       (["key", "keys"], cmd_key),
-                      (["web2api", "w2a"], cmd_web2api),
+                      (["gemini", "web2api", "w2a"], cmd_web2api),
                       (["ask"], cmd_ask),
                       (["guest", "khach"], cmd_guest)]:
         app.add_handler(CommandHandler(names, fn))
