@@ -792,7 +792,7 @@ ARCHIVE = HOME / "archive"
 SECRETS_DIR = HOME / ".secrets"
 GITHUB_TOKEN_FILE = SECRETS_DIR / "github_token"
 GITHUB_REPO_FILE = SECRETS_DIR / "github_repo"      # owner/name đang dùng (đổi bằng /github repo)
-VM_CREDS_FILE = SECRETS_DIR / "vm_creds.json"       # PAT + Tailscale key cho /vm (chỉ lưu máy này, không đẩy cloud)
+VM_CREDS_FILE = SECRETS_DIR / "vm_creds.json"       # PAT + Tailscale key cho /vm (đồng bộ mã hoá qua Firebase)
 STATE_FILE = HOME / "state.json"
 LOG_DIR = HOME / "logs"
 LOG_FILE = LOG_DIR / "aistv.log"
@@ -1078,7 +1078,8 @@ AGENTS_RULES_25_32 = """25. Repo chính (code bot) là thư mục chứa `aistv_
 33. Người dùng muốn tạo máy ảo Windows cho Integration Test (Windows runner + Tailscale + RDP) → gọi tool
     `create_vm` với PAT GitHub của tài khoản sẽ chạy máy ảo và Tailscale auth key (nếu đã lưu trước bằng
     /vm token, /vm key thì bỏ trống tham số). KHÔNG in lại token/key ra chat/log, KHÔNG ghi chúng vào file.
-    Mặc định windows-latest, 330 phút (60–330). Thông tin đăng nhập do workflow gửi qua Telegram DM.
+    Mặc định windows-latest, 360 phút (60–360). Thông tin đăng nhập do workflow gửi qua Telegram DM.
+     Máy ảo có bảng nút /vm (chọn Windows, thời gian, nhập khoá, tạo) — hướng dẫn người dùng bấm nút.
 """
 AGENTS_MD = """# AGENTS — Quy tắc làm việc
 1. Thư mục hiện tại là workspace của bạn. File bạn tạo phải nằm ở đây, tên rõ ràng, có đuôi file.
@@ -1474,14 +1475,14 @@ export default tool({
     windows_version: tool.schema.string().optional()
       .describe("windows-latest (default) | windows-2022 | windows-2025"),
     timeout_minutes: tool.schema.number().optional()
-      .describe("Run time in minutes, 60-330 (default 330)"),
+      .describe("Run time in minutes, 60-360 (default 360)"),
   },
   async execute(args) {
     const url = process.env.AISTV_ASK_URL
     const token = process.env.AISTV_TOOL_TOKEN || ""
     const chat = Number(process.env.AISTV_CHAT_ID || 0)
     if (!url) {
-      return "create_vm is unavailable. Tell the user to send /vm create."
+      return "create_vm is unavailable. Tell the user to open /vm and use the buttons."
     }
     if (!chat || chat <= 0) {
       return "create_vm only works in a private chat with the bot. Ask the user to DM the bot."
@@ -1633,7 +1634,8 @@ def bootstrap_workspace() -> None:
                     "\n33. Người dùng muốn tạo máy ảo Windows cho Integration Test → gọi tool `create_vm` "
                     "với PAT GitHub của tài khoản sẽ chạy máy ảo + Tailscale auth key (bỏ trống nếu đã lưu "
                     "qua /vm token, /vm key). Không in lại token/key, không ghi vào file. "
-                    "Mặc định windows-latest, 330 phút (60–330); thông tin đăng nhập gửi qua Telegram DM.\n"
+                    "Mặc định windows-latest, 360 phút (60–360); thông tin đăng nhập gửi qua Telegram DM. "
+                    "Hướng dẫn người dùng mở /vm và bấm nút.\n"
                 )
                 changed = True
             # Quy tắc 25–31 (đường dẫn repo, CODEMAP, verify, plan, cổng review, checkpoint).
@@ -2298,7 +2300,7 @@ class _AskHandler(BaseHTTPRequestHandler):
                 "has_pat": bool(creds.get("pat")),
                 "has_key": bool(creds.get("tailscale_key")),
                 "windows": creds.get("windows") or "windows-latest",
-                "minutes": int(creds.get("minutes") or 330),
+                "minutes": int(creds.get("minutes") or 360),
             })
             return
         if vm_lib is None:
@@ -2543,8 +2545,18 @@ def load_vm_creds() -> dict:
         return {}
 
 
+def _write_vm_creds(creds: dict) -> None:
+    SECRETS_DIR.mkdir(parents=True, exist_ok=True)
+    VM_CREDS_FILE.write_text(json.dumps(creds), "utf-8")
+    try:
+        VM_CREDS_FILE.chmod(0o600)
+    except Exception:
+        pass
+
+
 def save_vm_creds(pat: Optional[str] = None, tskey: Optional[str] = None,
                   windows: Optional[str] = None, minutes: Optional[int] = None) -> dict:
+    global SECRETS_DIRTY
     creds = load_vm_creds()
     if pat is not None:
         creds["pat"] = (pat or "").strip()
@@ -2554,20 +2566,47 @@ def save_vm_creds(pat: Optional[str] = None, tskey: Optional[str] = None,
         creds["windows"] = windows
     if minutes:
         creds["minutes"] = int(minutes)
-    SECRETS_DIR.mkdir(parents=True, exist_ok=True)
-    VM_CREDS_FILE.write_text(json.dumps(creds), "utf-8")
-    try:
-        VM_CREDS_FILE.chmod(0o600)
-    except Exception:
-        pass
+    _write_vm_creds(creds)
+    SECRETS_DIRTY = True                 # cloud_loop đẩy blob mã hoá lên Firebase
     return creds
 
 
 def clear_vm_creds() -> None:
+    global SECRETS_DIRTY
     try:
         VM_CREDS_FILE.unlink()
     except Exception:
         pass
+    SECRETS_DIRTY = True
+
+
+VM_AWAIT: dict = {}                  # chat_id -> ("pat" | "key", thời điểm bắt đầu chờ)
+VM_AWAIT_SECONDS = 900
+VM_WINDOWS = ("windows-latest", "windows-2022", "windows-2025")
+VM_MINUTES = (60, 120, 180, 240, 300, 360)
+
+
+def vm_defaults() -> tuple:
+    """(runner, số phút) đang chọn — mặc định windows-latest / 360."""
+    default_min = getattr(vm_lib, "DEFAULT_MINUTES", 360) if vm_lib else 360
+    creds = load_vm_creds()
+    return (str(creds.get("windows") or "windows-latest"),
+            int(creds.get("minutes") or default_min))
+
+
+def vm_keyboard() -> InlineKeyboardMarkup:
+    win, minutes = vm_defaults()
+    rows = [[InlineKeyboardButton(("✅ " if w == win else "") + w,
+                                 callback_data=f"vm:win:{w}") for w in VM_WINDOWS],
+            [InlineKeyboardButton(("✅ " if m == minutes else "") + f"{m} phút",
+                                  callback_data=f"vm:min:{m}") for m in VM_MINUTES[:3]],
+            [InlineKeyboardButton(("✅ " if m == minutes else "") + f"{m} phút",
+                                  callback_data=f"vm:min:{m}") for m in VM_MINUTES[3:]],
+            [InlineKeyboardButton("🔑 Nhập PAT GitHub", callback_data="vm:pat"),
+             InlineKeyboardButton("🔑 Nhập Tailscale key", callback_data="vm:key")],
+            [InlineKeyboardButton("🚀 Tạo máy ảo", callback_data="vm:create"),
+             InlineKeyboardButton("🧹 Xoá đã lưu", callback_data="vm:forget")]]
+    return InlineKeyboardMarkup(rows)
 
 
 def vm_status_text() -> str:
@@ -2580,20 +2619,35 @@ def vm_status_text() -> str:
                 else "<b>chưa lưu</b>")
     key_line = (f"<code>{esc(vm_lib.mask_value(key))}</code>" if key
                 else "<b>chưa lưu</b>")
+    win, minutes = vm_defaults()
     lines = ["🖥 <b>Máy ảo Windows (Integration Test)</b>",
              f"• PAT GitHub: {pat_line}",
              f"• Tailscale key: {key_line}",
-             f"• Runner: {esc(creds.get('windows') or 'windows-latest')} · "
-             f"{int(creds.get('minutes') or 330)} phút"]
-    if pat and key:
-        lines.append("• Sẵn sàng: <code>/vm create</code>")
-    lines += ["", "<b>Lệnh</b>",
-              "/vm token &lt;PAT&gt; — lưu PAT của tài khoản sẽ chạy máy ảo",
-              "/vm key &lt;tskey&gt; — lưu Tailscale auth key (tag:vm-user)",
-              "/vm create [windows] [phút] — tạo máy ảo (60–330 phút)",
-              "/vm &lt;PAT&gt; &lt;tskey&gt; — lưu cả hai rồi tạo luôn",
-              "/vm forget — xoá thông tin đã lưu"]
+             f"• Runner: {esc(win)} · {minutes} phút"]
+    lines.append("• Sẵn sàng — bấm 🚀 Tạo máy ảo" if (pat and key)
+                 else "• Cần nhập PAT và Tailscale key bằng nút bên dưới")
+    lines += ["", "Thông tin đăng nhập (IP, user, mật khẩu) gửi qua Telegram DM.",
+              "PAT + key được lưu và đồng bộ mã hoá lên Firebase."]
     return "\n".join(lines)
+
+
+def _vm_creds_from_cloud(data: dict) -> dict:
+    """Tách PAT/key/runner/phút từ blob secrets trên Firebase."""
+    out = {}
+    for name, value in (data or {}).items():
+        if not str(name).startswith("AISTV_VM_"):
+            continue
+        value = str(value or "").strip()
+        if not value:
+            continue
+        field = str(name)[len("AISTV_VM_"):].lower()
+        if field == "minutes":
+            try:
+                value = int(value)
+            except ValueError:
+                continue
+        out["tailscale_key" if field == "tskey" else field] = value
+    return out
 
 
 # ── Quét repo của tài khoản đang dùng token & chọn repo đích ──
@@ -5331,8 +5385,7 @@ HELP_TEXT = (
     "/github repos — quét repo của tài khoản, bấm nút để chọn repo đích\n"
     "/github repo use owner/name — đặt repo đích · /github repo create tên [private]\n"
     "/github status · /github repo · /github logout\n"
-    "/vm token &lt;PAT&gt; — lưu PAT cho máy ảo (chủ bot)\n"
-    "/vm key &lt;tskey&gt; · /vm create [windows] [phút] — tạo máy ảo Windows integration test\n"
+    "/vm — bảng nút tạo máy ảo Windows: chọn runner, thời gian, nhập PAT + Tailscale key (chủ bot)\n"
     "/push — đẩy code lên GitHub ngay (Windows chạy run.bat là có bản mới)\n"
     "/update — pull bản mới trên GitHub rồi khởi động lại\n/restart — khởi động lại bot\n\n"
     "<b>Hệ thống (chủ bot)</b>\n/model [provider/tên] — xem/đổi model\n/models — danh sách model\n/allow &lt;id&gt; · /deny &lt;id&gt; — cấp/thu hồi quyền"
@@ -5777,71 +5830,191 @@ async def cmd_vm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("⚠️ /vm chỉ dùng trong chat riêng — thông tin đăng nhập gửi qua DM.")
         return
     args = [a.strip() for a in (context.args or []) if a.strip()]
-    sub = args[0].lower() if args else "status"
+    sub = args[0].lower() if args else ""
+    VM_AWAIT.pop(chat.id, None)
 
     if sub in ("forget", "clear", "xoa"):
         clear_vm_creds()
-        await msg.reply_text("🧹 Đã xoá PAT + Tailscale key đã lưu trên máy này.")
+        await msg.reply_text("🧹 Đã xoá PAT + Tailscale key (đồng bộ cả Firebase).",
+                             reply_markup=vm_keyboard())
         return
     if sub in ("token", "pat"):
-        pat = args[1] if len(args) > 1 else ""
-        if not pat:
-            await msg.reply_text("Dùng: /vm token &lt;PAT&gt;", parse_mode=HTML)
+        if len(args) < 2:
+            await msg.reply_text("Bấm 🔑 Nhập PAT GitHub trong bảng bên dưới.",
+                                 reply_markup=vm_keyboard())
             return
-        try:
-            login = await asyncio.to_thread(vm_lib.whoami, pat) if vm_lib else "?"
-        except Exception as e:
-            await msg.reply_text("❌ " + oneline(_redact_secrets(str(e)), 300))
-            return
-        save_vm_creds(pat=pat)
-        try:
-            await msg.delete()          # xoá tin nhắn chứa PAT
-        except Exception:
-            pass
-        await msg.reply_text(
-            f"✅ Đã lưu PAT cho account <b>{esc(login)}</b> (chỉ trên máy này).\n"
-            "Bước tiếp: <code>/vm key &lt;tskey&gt;</code> rồi <code>/vm create</code>.",
-            parse_mode=HTML)
+        await _vm_save_pat(context.bot, chat.id, args[1], msg)
         return
     if sub in ("key", "tskey"):
-        key = args[1] if len(args) > 1 else ""
-        if not key:
-            await msg.reply_text("Dùng: /vm key &lt;tskey-…&gt;", parse_mode=HTML)
+        if len(args) < 2:
+            await msg.reply_text("Bấm 🔑 Nhập Tailscale key trong bảng bên dưới.",
+                                 reply_markup=vm_keyboard())
             return
-        save_vm_creds(tskey=key)
-        mask = vm_lib.mask_value(key) if vm_lib else "***"
-        try:
-            await msg.delete()          # xoá tin nhắn chứa key
-        except Exception:
-            pass
-        await msg.reply_text(
-            f"✅ Đã lưu Tailscale key <code>{esc(mask)}</code>.\n"
-            "Tạo máy ảo: <code>/vm create [windows-latest|windows-2022|windows-2025] [60–330]</code>",
-            parse_mode=HTML)
+        await _vm_save_key(context.bot, chat.id, args[1], msg)
         return
     if sub in ("create", "tao", "new"):
         win = args[1] if len(args) > 1 else ""
         minutes = args[2] if len(args) > 2 else ""
-        await _vm_create_flow(context, chat.id, "", "", win, minutes)
+        await _vm_create_flow(context.bot, chat.id, "", "", win, minutes)
         return
-
-    # /vm <PAT> <tskey> [windows] [phút] — lưu cả hai rồi tạo luôn
-    if len(args) >= 2:
+    if len(args) >= 2:                       # /vm <PAT> <tskey> [windows] [phút]
         win = args[2] if len(args) > 2 else ""
         minutes = args[3] if len(args) > 3 else ""
         try:
-            await msg.delete()          # xoá tin nhắn chứa PAT + key
+            await msg.delete()               # xoá tin nhắn chứa PAT + key
         except Exception:
             pass
-        await _vm_create_flow(context, chat.id, args[0], args[1], win, minutes)
+        await _vm_create_flow(context.bot, chat.id, args[0], args[1], win, minutes)
         return
-    await msg.reply_text(vm_status_text(), parse_mode=HTML)
+    await msg.reply_text(vm_status_text(), parse_mode=HTML, reply_markup=vm_keyboard())
 
 
-async def _vm_create_flow(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
-                          pat: str, key: str, win: str, minutes) -> None:
-    """Tạo máy ảo từ creds truyền vào hoặc creds đã lưu; báo kết quả vào chat."""
+async def _vm_save_pat(bot, chat_id: int, pat: str, src_msg=None) -> bool:
+    """Kiểm tra PAT bằng GitHub API rồi lưu; trả True nếu thành công."""
+    pat = (pat or "").strip()
+    if src_msg is not None:
+        try:
+            await src_msg.delete()          # xoá tin nhắn chứa PAT ngay
+        except Exception:
+            pass
+    if vm_lib is None:
+        await bot.send_message(chat_id, "⚠️ Module aistv_vm chưa có trên máy này.")
+        return False
+    try:
+        login = await asyncio.to_thread(vm_lib.whoami, pat)
+    except Exception as e:
+        await bot.send_message(chat_id, "❌ " + oneline(_redact_secrets(str(e)), 300),
+                               reply_markup=vm_keyboard())
+        return False
+    save_vm_creds(pat=pat)
+    await bot.send_message(
+        chat_id,
+        f"✅ Đã lưu PAT cho account <b>{esc(login)}</b> (đồng bộ Firebase).",
+        parse_mode=HTML, reply_markup=vm_keyboard())
+    return True
+
+
+async def _vm_save_key(bot, chat_id: int, key: str, src_msg=None) -> bool:
+    """Kiểm tra hình dạng Tailscale key rồi lưu."""
+    key = (key or "").strip()
+    if src_msg is not None:
+        try:
+            await src_msg.delete()          # xoá tin nhắn chứa key ngay
+        except Exception:
+            pass
+    if not key.startswith("tskey-") or any(c.isspace() for c in key):
+        await bot.send_message(chat_id,
+                               "❌ Tailscale key phải bắt đầu bằng <code>tskey-</code>.",
+                               parse_mode=HTML, reply_markup=vm_keyboard())
+        return False
+    save_vm_creds(tskey=key)
+    mask = vm_lib.mask_value(key) if vm_lib else "***"
+    await bot.send_message(chat_id,
+                           f"✅ Đã lưu Tailscale key <code>{esc(mask)}</code> (đồng bộ Firebase).",
+                           parse_mode=HTML, reply_markup=vm_keyboard())
+    return True
+
+
+async def _vm_take_input(msg, context: ContextTypes.DEFAULT_TYPE, chat, text: str,
+                         mode: str) -> None:
+    """Tin nhắn người dùng gửi sau khi bấm nút nhập PAT / Tailscale key."""
     bot = context.bot
+    value = (text or "").strip().strip('"').strip("'")
+    try:
+        await msg.delete()                   # xoá tin nhắn chứa khoá
+    except Exception:
+        pass
+    ok = (await _vm_save_key(bot, chat.id, value) if mode == "key"
+          else await _vm_save_pat(bot, chat.id, value))
+    if not ok:                               # nhập sai → chờ gửi lại
+        VM_AWAIT[chat.id] = (mode, time.time())
+        await bot.send_message(
+            chat.id, "Gửi lại khoá hoặc bấm Huỷ.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✖️ Huỷ", callback_data="vm:cancel")]]))
+
+
+async def _vm_edit_menu(q) -> None:
+    try:
+        await q.edit_message_text(vm_status_text(), parse_mode=HTML,
+                                  reply_markup=vm_keyboard())
+    except Exception:
+        pass
+
+
+async def _on_vm_button(q, data: str) -> None:
+    chat_id = q.message.chat_id if q.message else 0
+    if not (q.from_user and is_owner(q.from_user.id)):
+        await q.answer("Chỉ chủ bot dùng được.", show_alert=True)
+        return
+    if chat_id <= 0:
+        await q.answer("Chỉ dùng trong chat riêng.", show_alert=True)
+        return
+    parts = data.split(":")
+    act = parts[1] if len(parts) > 1 else ""
+    arg = parts[2] if len(parts) > 2 else ""
+    bot = q.get_bot()
+
+    if act == "win":
+        try:
+            win = vm_lib.normalize_windows(arg) if vm_lib else arg
+        except Exception as e:
+            await q.answer(oneline(str(e), 180), show_alert=True)
+            return
+        save_vm_creds(windows=win)
+        await q.answer(f"Runner: {win}")
+        await _vm_edit_menu(q)
+        return
+    if act == "min":
+        try:
+            minutes = vm_lib.clamp_minutes(arg) if vm_lib else int(arg)
+        except Exception as e:
+            await q.answer(oneline(str(e), 180), show_alert=True)
+            return
+        save_vm_creds(minutes=minutes)
+        await q.answer(f"{minutes} phút")
+        await _vm_edit_menu(q)
+        return
+    if act in ("pat", "key"):
+        VM_AWAIT[chat_id] = (act, time.time())
+        await q.answer()
+        label = "PAT GitHub" if act == "pat" else "Tailscale auth key (tskey-…)"
+        await bot.send_message(
+            chat_id,
+            f"🔑 Gửi <b>{label}</b> vào chat này.\n"
+            "Tin nhắn chứa khoá sẽ bị xoá ngay sau khi lưu.",
+            parse_mode=HTML,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✖️ Huỷ", callback_data="vm:cancel")]]))
+        return
+    if act == "cancel":
+        VM_AWAIT.pop(chat_id, None)
+        await q.answer("Đã huỷ")
+        try:
+            await q.edit_message_text("✖️ Đã huỷ nhập.")
+        except Exception:
+            pass
+        return
+    if act == "forget":
+        VM_AWAIT.pop(chat_id, None)
+        clear_vm_creds()
+        await q.answer("Đã xoá")
+        await _vm_edit_menu(q)
+        return
+    if act == "create":
+        creds = load_vm_creds()
+        if not creds.get("pat") or not creds.get("tailscale_key"):
+            await q.answer("Cần nhập PAT và Tailscale key trước.", show_alert=True)
+            return
+        await q.answer("Đang tạo máy ảo…")
+        await _vm_create_flow(bot, chat_id, "", "", "", "")
+        return
+    await q.answer()
+
+
+async def _vm_create_flow(bot, chat_id: int, pat: str, key: str,
+                          win: str, minutes) -> None:
+    """Tạo máy ảo từ creds truyền vào hoặc creds đã lưu; báo kết quả vào chat."""
     if vm_lib is None:
         await bot.send_message(chat_id, "⚠️ Module aistv_vm chưa có trên máy này — cập nhật bot rồi thử lại.")
         return
@@ -5851,9 +6024,8 @@ async def _vm_create_flow(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
     if not pat or not key:
         await bot.send_message(
             chat_id,
-            "⚠️ Thiếu PAT GitHub hoặc Tailscale key.\n"
-            "Lưu trước: <code>/vm token &lt;PAT&gt;</code> · <code>/vm key &lt;tskey&gt;</code>",
-            parse_mode=HTML)
+            "⚠️ Thiếu PAT GitHub hoặc Tailscale key — bấm 🔑 để nhập.",
+            reply_markup=vm_keyboard())
         return
     wait = await bot.send_message(chat_id, "⏳ Đang tạo máy ảo… (fork repo, ghi secrets, kích hoạt workflow)")
     try:
@@ -6864,6 +7036,13 @@ async def _dispatch_text(msg, context, chat, text: str, direct: bool = False):
     user = getattr(msg, "from_user", None)
     if not (user and authorized(user.id, chat.type)):
         return                                       # khách không bao giờ chạm vào luồng hỏi-đáp của agent
+    pending = VM_AWAIT.get(chat.id)
+    if pending and chat.type == "private":           # đang chờ PAT / Tailscale key từ nút /vm
+        mode, started = pending
+        VM_AWAIT.pop(chat.id, None)
+        if time.time() - started <= VM_AWAIT_SECONDS:
+            await _vm_take_input(msg, context, chat, text, mode)
+            return
     with ASK_LOCK:
         ask_id = ASK_BY_CHAT.get(chat.id)
     if ask_id:                                       # đang chờ agent hỏi → tin nhắn này là câu trả lời
@@ -7926,6 +8105,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("ghr:"):
         await _on_gh_repo_button(q, data)
         return
+    if data.startswith("vm:"):
+        await _on_vm_button(q, data)
+        return
     if data.startswith("ask:"):
         await _on_ask_button(q, data)
         return
@@ -8211,6 +8393,12 @@ def _local_secret_values() -> dict:
     gh = github_token()
     if gh:
         data["GITHUB_TOKEN"] = gh
+    vm = load_vm_creds()
+    # Luôn gửi cả khoá rỗng để xoá creds cũ trên cloud khi người dùng bấm Xoá.
+    data["AISTV_VM_PAT"] = str(vm.get("pat") or "")
+    data["AISTV_VM_TSKEY"] = str(vm.get("tailscale_key") or "")
+    data["AISTV_VM_WINDOWS"] = str(vm.get("windows") or "")
+    data["AISTV_VM_MINUTES"] = str(vm.get("minutes") or "")
     if mail:
         try:
             cfg = mail.load()
@@ -8261,6 +8449,8 @@ async def cloud_restore_secrets() -> int:
     SECRETS_CLOUD_KEYS.update(str(k) for k in data)
     restored = 0
     for name, value in data.items():
+        if str(name).startswith("AISTV_VM_"):
+            continue                     # xử lý riêng bên dưới (ghi vào vm_creds.json)
         value = str(value or "").strip()
         if not value:
             continue
@@ -8280,6 +8470,17 @@ async def cloud_restore_secrets() -> int:
             restored += 1
         except Exception:
             continue
+    cloud_vm = _vm_creds_from_cloud(data)
+    if cloud_vm:
+        local_vm = load_vm_creds()
+        merged = dict(local_vm)
+        for field, value in cloud_vm.items():
+            if not merged.get(field):    # giữ creds đã có trên máy này
+                merged[field] = value
+        if merged != local_vm:
+            _write_vm_creds(merged)
+            restored += 1
+            log.info("Khôi phục thông tin máy ảo từ cloud")
     if restored:
         ids = [int(x) for x in re.findall(r"\d+", get_secret("ALLOWED_USER_IDS"))]
         if ids:

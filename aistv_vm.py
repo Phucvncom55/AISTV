@@ -34,8 +34,8 @@ SOURCE_REPO = (os.getenv("AISTV_VM_SOURCE_REPO") or "Phucvncom55/AISTV").strip()
 REPO_NAME = (os.getenv("AISTV_VM_REPO_NAME") or "AISTV").strip()
 WORKFLOW_FILE = "windows-integration-test.yml"
 WINDOWS_VERSIONS = ("windows-latest", "windows-2022", "windows-2025")
-MIN_MINUTES, MAX_MINUTES = 60, 330
-DEFAULT_MINUTES = 330
+MIN_MINUTES, MAX_MINUTES = 60, 360
+DEFAULT_MINUTES = 360
 
 
 class VMError(RuntimeError):
@@ -62,7 +62,7 @@ def normalize_windows(value: str) -> str:
 
 
 def clamp_minutes(value) -> int:
-    """Ép thời gian chạy về khoảng 60–330 phút; rỗng → 330."""
+    """Ép thời gian chạy về khoảng 60–360 phút; rỗng → 360."""
     if value in (None, ""):
         return DEFAULT_MINUTES
     try:

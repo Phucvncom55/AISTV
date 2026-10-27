@@ -25,11 +25,12 @@ class InputTest(unittest.TestCase):
             vm.normalize_windows("windows-7")
 
     def test_clamp_minutes(self):
-        self.assertEqual(vm.clamp_minutes(""), 330)
-        self.assertEqual(vm.clamp_minutes(None), 330)
+        self.assertEqual(vm.MAX_MINUTES, 360)
+        self.assertEqual(vm.clamp_minutes(""), 360)
+        self.assertEqual(vm.clamp_minutes(None), 360)
         self.assertEqual(vm.clamp_minutes("120"), 120)
         self.assertEqual(vm.clamp_minutes(10), 60)
-        self.assertEqual(vm.clamp_minutes(999), 330)
+        self.assertEqual(vm.clamp_minutes(999), 360)
         with self.assertRaises(vm.VMError):
             vm.clamp_minutes("abc")
 

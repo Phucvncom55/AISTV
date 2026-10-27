@@ -22,20 +22,20 @@ on:
           - windows-2022
           - windows-2025
       timeout_minutes:
-        description: 'Thời gian chạy test (phút), tối thiểu 60 - tối đa 330'
+        description: 'Thời gian chạy test (phút), tối thiểu 60 - tối đa 360'
         required: true
-        default: 330
+        default: 360
         type: number
 
 jobs:
   integration-test:
     name: Integration Test
     runs-on: ${{ github.event.inputs.windows_version || 'windows-latest' }}
-    timeout-minutes: 350
+    timeout-minutes: 360
 
     env:
       # Cho phép tùy chỉnh thời gian chạy qua biến môi trường (fallback khi không dùng workflow_dispatch)
-      TIMEOUT_MINUTES: ${{ github.event.inputs.timeout_minutes || 330 }}
+      TIMEOUT_MINUTES: ${{ github.event.inputs.timeout_minutes || 360 }}
       TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -141,7 +141,7 @@ jobs:
 
           $timeoutMin = [int]$env:TIMEOUT_MINUTES
           if ($timeoutMin -lt 60) { $timeoutMin = 60 }
-          if ($timeoutMin -gt 330) { $timeoutMin = 330 }
+          if ($timeoutMin -gt 360) { $timeoutMin = 360 }
           $deadline = (Get-Date).ToUniversalTime().AddMinutes($timeoutMin).ToString('yyyy-MM-dd HH:mm') + ' UTC'
 
           $lines = @(
@@ -170,12 +170,12 @@ jobs:
 
       - name: Keep-Alive Integration Test Loop
         shell: powershell
-        timeout-minutes: 340
+        timeout-minutes: 360
         run: |
           $ErrorActionPreference = 'Stop'
           $timeoutMinutes = [int]$env:TIMEOUT_MINUTES
           if ($timeoutMinutes -lt 60)  { $timeoutMinutes = 60 }
-          if ($timeoutMinutes -gt 330) { $timeoutMinutes = 330 }
+          if ($timeoutMinutes -gt 360) { $timeoutMinutes = 360 }
 
           Write-Host "Môi trường Integration Test đã sẵn sàng - thời gian chạy: $timeoutMinutes phút"
           Write-Host "Kết nối RDP qua Tailscale: mstsc /v:$env:TS_IP (user: $env:VM_USER)"
