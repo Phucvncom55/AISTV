@@ -91,6 +91,6 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 
 - Luôn đặt `ALLOWED_USER_IDS` nếu bot ở nơi công cộng.
 - Không commit `.env`; repo public không chứa bí mật.
-- Chi tiết công cụ: [docs/TOOLS.md](docs/TOOLS.md) · bản đồ code: [docs/CODEMAP.md](docs/CODEMAP.md).
+- Chi tiết công cụ: [docs/TOOLS.md](docs/TOOLS.md) · bản đồ code: [docs/CODEMAP.md](docs/CODEMAP.md) · khóa Firebase: [docs/FIREBASE.md](docs/FIREBASE.md).
 
 Giấy phép: MIT — xem `LICENSE`.

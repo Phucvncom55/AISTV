@@ -1,0 +1,12 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "aistv": {
+      "$ns": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    }
+  }
+}
