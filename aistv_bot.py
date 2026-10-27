@@ -6727,21 +6727,75 @@ def _fb_url(path: str) -> str:
     return url
 
 
-def fb_call(method: str, path: str, data=None, timeout: int = 20):
+# Dữ liệu cá nhân (lịch sử chat, trí nhớ, nhắc việc, watch, tóm tắt) mã hoá
+# toàn bộ trước khi ghi lên cloud: DB public cũng không đọc được nội dung.
+PERSONAL_CLOUD_ROOTS = {"mem", "hist", "summary", "rem", "watch"}
+ENC_MARK = "_enc"
+_CLOUD_MIGRATED = False
+
+
+def _personal_path(path: str) -> bool:
+    return path.strip("/").split("/")[0] in PERSONAL_CLOUD_ROOTS
+
+
+def _is_sealed(value) -> bool:
+    return (isinstance(value, dict) and bool(value.get(ENC_MARK))
+            and isinstance(value.get("blob"), str))
+
+
+def _seal_node(data):
+    if data is None:
+        return None
+    return {ENC_MARK: 1, "at": int(time.time()), "blob": _seal(data)}
+
+
+def _open_node(value):
+    """Giải mã node; dữ liệu thô kiểu cũ (trước khi mã hoá) trả nguyên trạng."""
+    if _is_sealed(value):
+        try:
+            return _open(str(value["blob"]))
+        except Exception as e:
+            log.warning("Không giải mã được node cloud: %s", oneline(str(e), 120))
+            return None
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if _is_sealed(v):
+                dec = _open_node(v)
+                if dec is not None:
+                    out[k] = dec
+            else:
+                out[k] = v
+        return out
+    return value
+
+
+def fb_call(method: str, path: str, data=None, timeout: int = 20, raw: bool = False):
     """REST tới Firebase RTDB (đồng bộ). Không bao giờ ném lỗi ra ngoài."""
     if not CLOUD_ENABLED:
         return None
+    personal = _personal_path(path)
+    if personal and not raw and data is not None:
+        try:
+            data = _seal_node(data)
+        except Exception as e:
+            # Không mã hoá được thì KHÔNG ghi thô lên cloud.
+            log.warning("Không mã hoá được /%s: %s", _cloud_path(path), oneline(str(e), 120))
+            return None
     body = json.dumps(data, ensure_ascii=False).encode("utf-8") if data is not None else None
     req = urllib.request.Request(_fb_url(path), data=body, method=method,
                                  headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", "replace")
+            raw_body = resp.read().decode("utf-8", "replace")
         CLOUD_STAT.update(ok=True, at=time.time())
         if method in ("PUT", "POST", "PATCH"):
             CLOUD_STAT["up"] += 1
         CLOUD_STAT["last"] = f"{method} /{_cloud_path(path)}"
-        return json.loads(raw) if raw.strip() and raw.strip() != "null" else None
+        result = json.loads(raw_body) if raw_body.strip() and raw_body.strip() != "null" else None
+        if personal and not raw:
+            result = _open_node(result)
+        return result
     except Exception as e:
         CLOUD_STAT.update(ok=False, err=CLOUD_STAT["err"] + 1)
         log.warning("Firebase %s /%s: %s", method, _cloud_path(path), oneline(str(e), 160))
@@ -6750,6 +6804,40 @@ def fb_call(method: str, path: str, data=None, timeout: int = 20):
 
 async def fb(method: str, path: str, data=None):
     return await asyncio.to_thread(fb_call, method, path, data)
+
+
+async def fb_raw_get(path: str):
+    """GET nguyên bản (không giải mã) — dùng để phát hiện node cũ còn dạng thô."""
+    return await asyncio.to_thread(fb_call, "GET", path, None, 20, True)
+
+
+async def cloud_encrypt_existing() -> int:
+    """Mã hoá các node cá nhân bản cũ còn nằm dạng thô trên cloud (mỗi phiên 1 lần)."""
+    global _CLOUD_MIGRATED
+    if not CLOUD_ENABLED or _CLOUD_MIGRATED:
+        return 0
+    _CLOUD_MIGRATED = True
+    if os.getenv("AISTV_CLOUD_ENCRYPT_MIGRATE", "1") == "0":
+        return 0
+    moved = 0
+    for path in ("mem/items", "rem", "watch"):
+        value = await fb_raw_get(path)
+        if value is None or _is_sealed(value):
+            continue
+        await fb("PUT", path, value)
+        moved += 1
+    for root in ("hist", "summary"):
+        data = await fb_raw_get(root)
+        if not isinstance(data, dict):
+            continue
+        for child, value in data.items():
+            if value is None or _is_sealed(value):
+                continue
+            await fb("PUT", f"{root}/{child}", value)
+            moved += 1
+    if moved:
+        log.info("Mã hoá %d nhóm dữ liệu cloud cũ (lịch sử/trí nhớ/nhắc việc)", moved)
+    return moved
 
 
 def _save_json(path: Path, data) -> None:
@@ -6786,7 +6874,7 @@ def _keystream(key: bytes, nonce: bytes, size: int) -> bytes:
     return bytes(out[:size])
 
 
-def encrypt_secrets(data: dict) -> str:
+def _seal(data) -> str:
     master = _secret_master_key()
     enc_key = hmac.new(master, b"enc", hashlib.sha256).digest()
     mac_key = hmac.new(master, b"mac", hashlib.sha256).digest()
@@ -6797,7 +6885,7 @@ def encrypt_secrets(data: dict) -> str:
     return base64.b64encode(nonce + tag + ct).decode("ascii")
 
 
-def decrypt_secrets(blob: str) -> dict:
+def _open(blob: str):
     raw = base64.b64decode(blob)
     if len(raw) < 48:
         raise ValueError("dữ liệu quá ngắn")
@@ -6808,7 +6896,15 @@ def decrypt_secrets(blob: str) -> dict:
     if not hmac.compare_digest(tag, hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()):
         raise ValueError("sai khoá hoặc dữ liệu bị sửa")
     plain = bytes(a ^ b for a, b in zip(ct, _keystream(enc_key, nonce, len(ct))))
-    data = json.loads(plain.decode("utf-8"))
+    return json.loads(plain.decode("utf-8"))
+
+
+def encrypt_secrets(data: dict) -> str:
+    return _seal(data)
+
+
+def decrypt_secrets(blob: str) -> dict:
+    data = _open(blob)
     return data if isinstance(data, dict) else {}
 
 
@@ -6961,6 +7057,10 @@ async def cloud_restore_all() -> None:
     if not CLOUD_ENABLED:
         log.info("Cloud: tắt (AISTV_CLOUD=0)")
         return
+    try:
+        await cloud_encrypt_existing()
+    except Exception as e:
+        log.warning("Mã hoá dữ liệu cloud cũ lỗi: %s", oneline(str(e), 120))
     try:
         mem = await cloud_merge_memory()
     except Exception as e:
@@ -7202,10 +7302,15 @@ async def rem_restore() -> None:
         data.setdefault(k, v)
     REMINDERS.clear()
     REMINDERS.update({k: v for k, v in data.items() if isinstance(v, dict) and v.get("when")})
+    now_ts = time.time()
     stale = [k for k, v in REMINDERS.items()
-             if float(v.get("when", 0)) < time.time() - 2 * 86400 and v.get("repeat") != "daily"]
+             if float(v.get("when", 0)) < now_ts - 2 * 86400 and v.get("repeat") != "daily"]
     for k in stale:
-        REMINDERS.pop(k, None)
+        rec = REMINDERS[k]
+        if now_ts - float(rec.get("when", 0)) > 30 * 86400:
+            REMINDERS.pop(k, None)              # quá cũ: bỏ hẳn
+        else:
+            rec["expired"] = True               # quá hạn: báo một lần rồi xoá
     await rem_save(push=cloud_ok)          # cloud lỗi thì chỉ ghi cục bộ, tránh xoá dữ liệu cloud
 
 
@@ -7221,7 +7326,8 @@ def build_reminders() -> str:
     for r in sorted(REMINDERS.values(), key=lambda x: float(x.get("when", 0))):
         icon = "🤖" if r.get("kind") == "agent" else "⏰"
         rep = " · mỗi ngày" if r.get("repeat") == "daily" else ""
-        rows.append(f"{icon} <code>{esc(r.get('id'))}</code> · {esc(_when_str(r.get('when')))}{rep}"
+        flag = "⚠️ quá hạn · " if r.get("expired") else ""
+        rows.append(f"{icon} <code>{esc(r.get('id'))}</code> · {flag}{esc(_when_str(r.get('when')))}{rep}"
                     f" <i>({esc(_in_str(r.get('when')))})</i>\n   {esc(oneline(r.get('text', ''), 140))}")
     return ("⏰ <b>Nhắc việc &amp; việc định kỳ</b>\n" + "\n".join(rows)
             + "\n\nXoá: <code>/unremind &lt;mã|all&gt;</code>")
@@ -7293,6 +7399,15 @@ async def tick_reminders(app) -> None:
             continue
         chat_id = int(rec.get("chat") or 0)
         if not chat_id:
+            REMINDERS.pop(rid, None)
+            changed = True
+            continue
+        if rec.get("expired"):
+            await send_plain(
+                app, chat_id,
+                f"⚠️ <b>Việc đã quá hạn</b> · {esc(_when_str(ts))}\n{esc(rec.get('text', ''))}\n"
+                f"<i>Bot không chạy đúng lúc nên việc này bị lỡ; đã bỏ khỏi danh sách.</i>",
+                html_ok=True)
             REMINDERS.pop(rid, None)
             changed = True
             continue
