@@ -142,6 +142,21 @@ def ensure_repo(login: str, pat: str) -> str:
     raise VMError("Fork đang được GitHub tạo — thử lại sau khoảng 1 phút.")
 
 
+def sync_fork(login: str, pat: str, branch: str = "main") -> str:
+    """Đồng bộ fork đã có với repo nguồn trước khi chạy workflow.
+
+    Fork cũ vẫn giữ workflow lỗi thời, nên phải merge-upstream mỗi lần tạo máy.
+    Trả: 'updated' | 'up-to-date' | 'diverged' | 'skipped'.
+    """
+    code, body = _api("POST", f"/repos/{login}/{REPO_NAME}/merge-upstream", pat,
+                      {"branch": branch}, timeout=30)
+    if code == 200:
+        return "up-to-date" if body.get("merge_type") == "none" else "updated"
+    if code == 409 or "conflict" in str(body.get("message") or "").lower():
+        return "diverged"
+    return "skipped"
+
+
 def enable_actions(login: str, pat: str) -> None:
     """Bật Actions (fork của repo công khai mặc định bị tắt workflow)."""
     _api("PUT", f"/repos/{login}/{REPO_NAME}/actions/permissions", pat,
@@ -223,6 +238,9 @@ def create_vm(pat: str, tailscale_authkey: str, telegram_bot_token: str = "",
 
     login = whoami(pat)
     repo_state = ensure_repo(login, pat)
+    info = _repo_info(login, pat) or {}
+    ref = str(info.get("default_branch") or "main")
+    sync = sync_fork(login, pat, ref) if repo_state == "existing" else "skipped"
     enable_actions(login, pat)
 
     code, pk = _api("GET", f"/repos/{login}/{REPO_NAME}/actions/secrets/public-key",
@@ -233,8 +251,6 @@ def create_vm(pat: str, tailscale_authkey: str, telegram_bot_token: str = "",
     set_secret(login, pat, "TELEGRAM_BOT_TOKEN", telegram_bot_token, pk)
     set_secret(login, pat, "TELEGRAM_CHAT_ID", str(telegram_chat_id or ""), pk)
 
-    info = _repo_info(login, pat) or {}
-    ref = str(info.get("default_branch") or "main")
     dispatch_workflow(login, pat, windows, minutes, ref)
     run_url = latest_run_url(login, pat)
 
@@ -242,6 +258,7 @@ def create_vm(pat: str, tailscale_authkey: str, telegram_bot_token: str = "",
         "login": login,
         "repo": f"{login}/{REPO_NAME}",
         "repo_state": repo_state,
+        "sync": sync,
         "windows": windows,
         "minutes": minutes,
         "run_url": run_url,

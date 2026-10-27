@@ -2334,11 +2334,14 @@ class _AskHandler(BaseHTTPRequestHandler):
             "minutes": res["minutes"],
             "run_url": res["run_url"],
             "workflow_url": res["workflow_url"],
+            "sync": res["sync"],
             "message": (
                 f"Đã kích hoạt máy ảo trên account {res['login']} ({res['repo']}, "
                 f"{res['windows']}, {res['minutes']} phút). Theo dõi: "
                 f"{res['run_url'] or res['workflow_url']}. "
                 "Thông tin đăng nhập sẽ được gửi qua Telegram DM khi máy ảo sẵn sàng (~2-3 phút)."
+                + (" Fork đang lệch bản gốc nên chưa đồng bộ được code mới — cần sync thủ công."
+                   if res["sync"] == "diverged" else "")
             ),
         })
 
@@ -6067,7 +6070,14 @@ async def _vm_create_flow(bot, chat_id: int, pat: str, key: str,
         return
     save_vm_creds(pat=explicit_pat or None, tskey=key,
                   windows=res["windows"], minutes=res["minutes"])
-    state_note = "fork mới" if res["repo_state"] == "forked" else "có sẵn"
+    if res["repo_state"] == "forked":
+        state_note = "fork mới"
+    elif res.get("sync") == "updated":
+        state_note = "có sẵn, đã đồng bộ bản mới"
+    elif res.get("sync") == "diverged":
+        state_note = "có sẵn, fork lệch bản gốc (sync thủ công trên GitHub)"
+    else:
+        state_note = "có sẵn"
     text = (
         f"✅ <b>Đã kích hoạt máy ảo</b>\n"
         f"• Account: <b>{esc(res['login'])}</b>\n"

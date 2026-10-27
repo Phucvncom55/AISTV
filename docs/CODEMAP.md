@@ -1,6 +1,6 @@
 # CODEMAP — bản đồ code AISTV
 
-> Tự sinh bởi `scripts/code_map.py` · 33 file Python · 25966 dòng. Đừng sửa tay: chỉnh code rồi chạy lại `python scripts/code_map.py`.
+> Tự sinh bởi `scripts/code_map.py` · 33 file Python · 26014 dòng. Đừng sửa tay: chỉnh code rồi chạy lại `python scripts/code_map.py`.
 
 ## Cách dùng cho agent
 
@@ -13,7 +13,7 @@
 
 | File | Dòng | Mục đích |
 |---|---:|---|
-| `aistv_bot.py` | 10091 | AI STV AGENT — Telegram × OpenCode (dán 1 ô Colab là chạy) |
+| `aistv_bot.py` | 10101 | AI STV AGENT — Telegram × OpenCode (dán 1 ô Colab là chạy) |
 | `aistv_browser.py` | 251 | aistv_browser.py — Điều khiển trình duyệt thật bằng Playwright. |
 | `aistv_cloudflare.py` | 506 | aistv_cloudflare.py — Cloudflare API wrapper cho bot AI STV. |
 | `aistv_config.py` | 784 | AI STV - đồng bộ cấu hình (token / API key) cho MỌI môi trường. |
@@ -29,7 +29,7 @@
 | `aistv_railway.py` | 406 | aistv_railway.py — wrapper Railway CLI cho bot AI STV. |
 | `aistv_skills.py` | 880 | Cài / quản lý Agent Skills cho AISTV. |
 | `aistv_tiktok.py` | 863 | AI STV TikTok helper: xem thông tin, tải video không watermark, tìm kiếm. |
-| `aistv_vm.py` | 284 | aistv_vm.py — Tạo máy ảo Windows (GitHub Actions runner) cho Integration Test. |
+| `aistv_vm.py` | 301 | aistv_vm.py — Tạo máy ảo Windows (GitHub Actions runner) cho Integration Test. |
 | `aistv_voice.py` | 210 | aistv_voice.py — Nghe (STT) và nói (TTS) hoàn toàn local. |
 | `aistv_watch.py` | 2365 | AI STV Watch: xem video bằng transcript + frames + Gemini (tuỳ chọn). |
 | `aistv_web2api.py` | 1783 | AI STV - Gemini nội bộ: server + đồng bộ cookie dạng chữ. |
@@ -45,7 +45,7 @@
 | `tests/test_pages.py` | 105 | Kiểm tra dựng lời giải dài thành ảnh A4 nhiều trang. |
 | `tests/test_planner.py` | 199 | Smoke test cho scripts/code_map.py và aistv_planner.py. |
 | `tests/test_reminders.py` | 68 | Kiểm tra phân loại nhắc việc: tới hạn, quá hạn, quá cũ, định kỳ. |
-| `tests/test_vm.py` | 67 | Kiểm tra helper tạo máy ảo (aistv_vm.py). |
+| `tests/test_vm.py` | 88 | Kiểm tra helper tạo máy ảo (aistv_vm.py). |
 
 ## aistv_bot.py
 
@@ -127,316 +127,316 @@ L2083  class _AskHandler
   L2112  def _handle_post(self)
   L2236  def _handle_github_login(self, path: str, data: dict)  — Bắt đầu / kiểm tra phiên đăng nhập GitHub bằng mã cho agent.
   L2295  def _handle_vm(self, path: str, data: dict)  — Tool create_vm của agent: trạng thái creds đã lưu / tạo máy ảo Windows.
-L2346  class _AskServer
-  L2350  def handle_error(self, request, client_address)
-L2358  def start_ask_server()  — Mở HTTP server 127.0.0.1 để tool ask_user gọi vào bot.
-L2377  def _gh_http(url: str, data: Optional[dict]=None, token: str='', timeout: int=30)
-L2392  def _gh_device_start()
-L2397  def _gh_device_poll(device_code: str)
-L2403  def github_token()  — Token theo thứ tự: env/Colab Secrets → file bền vững → gh CLI.
-L2430  def github_token_source()
-L2450  def apply_github_config(token: str)  — Cấu hình git credential + gh CLI + user.name/email từ token.
-L2497  def save_github_token(token: str)  — Lưu token (chmod 600) + bản sao trên Google Drive nếu đang mount.
-L2519  def clear_github_token()
-L2544  def load_vm_creds()
-L2552  def _write_vm_creds(creds: dict)
-L2561  def save_vm_creds(pat: Optional[str]=None, tskey: Optional[str]=None, windows: Optional[str]=None, minutes: Optional[int]...
-L2578  def clear_vm_creds()
-L2593  def vm_defaults()  — (runner, số phút) đang chọn — mặc định windows-latest / 360.
-L2601  def vm_keyboard()
-L2616  def vm_pat()  — PAT cho máy ảo: ưu tiên PAT đã lưu, không có thì dùng token GitHub của bot.
-L2622  def vm_status_text()
-L2655  def _vm_creds_from_cloud(data: dict)  — Tách PAT/key/runner/phút từ blob secrets trên Firebase.
-L2679  def _gh_api(path: str, token: str, method: str='GET', payload: Optional[dict]=None, timeout: int=30)
-L2705  def gh_all_repos(token: str, refresh: bool=False)  — Toàn bộ repo token nhìn thấy (chủ, cộng tác, tổ chức), mới đẩy lên trước.
-L2734  def gh_repo_meta(slug: str, token: str)
-L2742  def gh_repo_has_bot(slug: str, token: str)
-L2750  def current_repo_slug()  — Repo đích: env → file .secrets/github_repo → state → origin của bản clone.
-L2768  def repo_remote_slug()
-L2776  def set_repo_slug(slug: str)
-L2791  def gh_repo_picker(chat_id: int, token: str, page: int=0, refresh: bool=False)
-L2828  def gh_repo_detail(chat_id: int, idx: int)
-L2858  def _gh_set_origin(rd: Path, slug: str)
-L2866  def gh_switch_repo(slug: str)  — Đổi origin sang repo đã chọn rồi fetch/pull fast-forward.
-L2884  def gh_push_code(slug: str)  — Đặt origin về repo đã chọn rồi đẩy code hiện tại lên.
-L2902  def gh_create_repo(name: str, token: str, private: bool=False)
-L2916  def repo_access(slug: str, token: str)
-L2920  def repo_can_push(slug: str, token: str)
-L2925  def repo_dir()
-L2933  def _git(args: list, cwd: Path, timeout: int=180)
-L2942  def restart_bot()  — Thay tiến trình hiện tại bằng bản mới. Không làm trong notebook Colab.
-L2979  def _msg_brief(m)  — Nội dung ngắn gọn của một tin nhắn Telegram (chữ, chú thích, loại tệp).
-L2996  def reply_context(msg)  — Phân tích tin nhắn đang được trả lời/trích dẫn (Reply Message / Quoting).
-L3064  def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple]=None, quote: str='')
-L3141  def _redact(s)
-L3158  def clean_output(s: str)
-L3167  def _clip(s, n: int=PROGRESS_DETAIL)
-L3172  def _rel(path)
-L3179  def _int(x)
-L3186  def _fmt_tok(n: int)  — 1234 -> '1,2k' cho footer gọn trên điện thoại.
-L3193  def _note_usage(chat_id: int, tokens: dict, cost=None)  — Cộng dồn token thật OpenCode báo ở mỗi bước (sự kiện step_finish).
-L3221  def _headroom_fn()  — Nạp Headroom một lần; máy chưa cài thì trả None (bot vẫn chạy bình thường).
-L3236  def _headroom_warm()  — Gọi thử một lần cho Headroom nạp sẵn pipeline (lần đầu mất vài giây).
-L3251  def _headroom_shrink(text: str)  — Nén phần ngữ cảnh của prompt (giữ nguyên yêu cầu mới của người dùng).
-L3279  async def _headroom_prompt(prompt: str)  — Chạy nén ở luồng riêng, tối đa 2,5 giây — quá giờ thì dùng prompt gốc.
-L3289  def _token_footer(chat_id: int, saved: int=0)  — Cụm token cuối tin nhắn: token gốc và phần còn lại sau khi qua Headroom.
-L3331  def _tool_entry(part: dict)  — Đổi 1 sự kiện tool_use của OpenCode thành dòng tiến độ gọn cho Telegram.
-L3403  def _keep_tool_timing(old: dict, new: dict)  — Cập nhật cùng callID: giữ mốc quan sát đầu tiên để đo thời gian chạy.
-L3411  def _dur_text(sec: float)
-L3422  def _tool_dur(e: dict, live: bool=True)  — Thời gian tool đang/đã chạy: ' · 35s' (rỗng nếu chưa đo được).
-L3440  def _status_rows(chat_id: int, limit: int=PROGRESS_KEEP)
-L3454  def _model_base(name: str='')  — Tên model bỏ phần #variant để so sánh.
-L3459  def _model_has_no_thinking()  — Model hiện tại đã từng chạy mà không trả reasoning (vd bản flash free).
-L3464  def _thinking_text(chat_id: int)
-L3471  def _thinking_tail(chat_id: int, n: int=600)
-L3476  def _last_action(chat_id: int)
-L3487  def _push_live(chat_id: int, kind: str, payload, call: Optional[str]=None)  — Ghi 1 sự kiện vào dòng thời gian để tin nhắn tiến độ cuộn như terminal.
-L3510  def _wrap_live(text: str, width: int=44)
-L3521  def _code_block(text: str, lang: str='')  — Khối mã kiểu ```lang … ``` để lệnh/code dễ đọc trên Telegram.
-L3527  def _live_blocks(chat_id: int, detailed: bool=False)  — Đổi dòng thời gian thành các khối HTML gọn, mới nhất ở cuối.
-L3570  def _tail_blocks(blocks: list, max_lines: int=PROGRESS_LINES, max_chars: int=PROGRESS_CHARS)  — Giữ các khối cuối vừa khung; khối cũ rơi khỏi đỉnh (cuộn xuống).
-L3586  def _render_status(chat_id: int, started: float, frame: str='🧠')
-L3605  async def _iter_lines(stream, max_line: int=4 * 1024 * 1024)  — Đọc theo chunk và tự cắt dòng.
-L3642  async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list)  — Gửi prompt qua stdin, đọc stdout từng dòng.
-L3761  def _is_opencode_error_output(text: str)  — CLI in help/lỗi cú pháp thay vì câu trả lời — đừng gửi nguyên văn cho người dùng.
-L3767  def _is_error_payload(text: str)  — OpenCode đôi khi in nguyên JSON/lỗi (UnknownError...) như 'câu trả lời'.
-L3815  def _is_error_history(content: str)  — Lọc bỏ nội dung lỗi từng bị lưu nhầm vào lịch sử hội thoại.
-L3842  def _is_quota_error(text: str)  — Lỗi hết hạn mức / hết token (không phải lỗi cấu hình model).
-L3864  def _is_server_error(text: str)  — Lỗi từ nhà cung cấp model (UnknownError, 5xx...) — cũng nên thử dự phòng.
-L3875  def _human_secs(sec: float)  — Đổi số giây thành chuỗi ngắn kiểu '18 giờ 20 phút'.
-L3893  def _pretty_error(text: str)  — Rút gọn JSON lỗi của OpenCode thành một dòng dễ đọc.
-L3922  def agent_model_chain()  — Model chính + model dự phòng (Gemini) khi hết hạn mức.
-L3941  def _fallback_hint()  — Gợi ý ngắn khi model dự phòng không trả lời được (dựa trên trạng thái thật).
-L3963  def _agent_failure(err_text: str, quota: bool=False, tools: bool=False, server: bool=False)
-L3989  async def _run_opencode_once(chat_id: int, prompt: str, env: dict, model: str)  — Chạy một lượt OpenCode. Trả (ok, text/lỗi, đã_chạy_tool).
-L4050  def _drop_fake_files(text: str)  — Bỏ dòng 'File kết quả: …' khi câu trả lời đến từ đường không có công cụ.
-L4061  async def _run_web2api_direct(prompt: str, model: str)  — Gọi thẳng server Gemini dự phòng, không qua OpenCode.
-L4092  def make_checkpoint(chat_id: int, label: str='')  — Chụp repo trước khi agent sửa. Trả checkpoint id ('' nếu không làm được).
-L4112  def review_markup(chat_id: int)
-L4121  async def _autopush_after_agent(chat_id: int)  — Sau lượt agent: tự push (nếu bật) hoặc hiện diff + nút duyệt.
-L4171  async def run_agent(chat_id: int, prompt: str, retries: int=1)  — Trả về (ok, text).
-L4245  def snapshot()
-L4313  def _math_chars(text: str, table: dict)
-L4320  def _sup_text(text: str)
-L4328  def _sub_text(text: str)
-L4334  def _frac_text(num: str, den: str)
-L4346  def latex_to_unicode(src: str)  — Đổi công thức LaTeX đơn giản sang ký tự Unicode Telegram đọc được.
-L4414  def _looks_math(text: str)  — Phân biệt $x = 1$ với giá tiền kiểu $5 và $7.
-L4422  def md_to_tg_html(md: str)
-L4468  def split_markdown(text: str, limit: int=SPLIT_LIMIT)  — Chia theo đoạn văn; luôn đóng/mở lại khối code để không vỡ định dạng.
-L4512  async def _reply(message, body: str, fallback: str, **kw)
-L4523  async def send_rich(message, text: str, footer: str='', markup=None)
-L4539  async def send_thinking(message, chat_id: int)  — Gửi phần reasoning của model dưới dạng blockquote mở rộng được.
-L4573  async def _ticker(bot, chat_id: int, status, started: float, stop: asyncio.Event)
-L4612  async def _finish_status(status, chat_id: int, started: float, ok: bool)  — Chốt tin nhắn tiến độ; ở chế độ gọn thì xoá hẳn để nhường chỗ cho câu trả lời.
-L4643  async def send_new_files(message, before: dict)
-L4661  async def respond(message, context, chat_id: int, text: str, skill: Optional[tuple]=None, quoted_msg=None, store_text: Optional...
-L4716  def plan_keyboard(plan: dict)
-L4735  def plans_list_text()
-L4752  async def _plan_edit(msg, plan: dict, note: str='')
-L4762  async def create_plan(chat_id: int, request: str, msg)
-L4791  async def run_plan(chat_id: int, plan_id: str)
-L4923  async def push_repo_now()
-L4935  async def _q_edit(q, text: str, markup='keep')
-L4945  async def _on_review_button(q, data: str)  — Nút ⬆️ Push / ↩️ Hoàn tác / 📄 Xem thay đổi của cổng duyệt.
-L5012  async def _on_plan_button(q, data: str)
-L5102  @guard() async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5144  @guard() async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5176  def email_line()
-L5188  def image_provider_line()
-L5209  def web2api_line()  — Một dòng trạng thái cho /status (không chặn lâu).
-L5225  def build_status(chat_id: int)
-L5260  def build_skills_index(exclude: Optional[str]=None, limit: int=60)  — Danh sách gọn để agent tự chọn skill phù hợp (progressive disclosure).
-L5301  def build_skills_pages(limit: int=3600)
-L5329  def build_skills()  — Giữ hàm cũ cho tương thích; nội dung có thể dài hơn 1 tin nhắn Telegram.
-L5334  def build_memory()
-L5342  def welcome_text()
-L5417  @guard(allow_guest=True) async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5429  @guard(allow_guest=True) async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5438  @guard(allow_guest=True) async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5449  @guard() async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5465  @guard() async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5470  @guard(allow_guest=True) async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5491  @guard() async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5514  @guard() async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5539  @guard() async def cmd_activity(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5560  @guard() async def cmd_variant(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5585  async def _github_connected(bot, chat_id: int, info: dict, tok: str)  — Sau khi có token: kiểm tra repo đích; không truy cập được thì quét repo cho chọn.
-L5628  async def _github_repo_cmd(msg, sub: str, args: list, tok: str)  — Xử lý /github repo|repos [list|use owner/name|create tên [private]].
-L5713  async def _gh_poll_task(bot, chat_id: int, device: dict)
-L5756  @guard(owner_only=True) async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5852  @guard(owner_only=True) async def cmd_vm(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L5897  async def _vm_save_pat(bot, chat_id: int, pat: str, src_msg=None)  — Kiểm tra PAT bằng GitHub API rồi lưu; trả True nếu thành công.
-L5922  async def _vm_save_key(bot, chat_id: int, key: str, src_msg=None)  — Kiểm tra hình dạng Tailscale key rồi lưu.
-L5943  async def _vm_take_input(msg, context: ContextTypes.DEFAULT_TYPE, chat, text: str, mode: str)  — Tin nhắn người dùng gửi sau khi bấm nút nhập PAT / Tailscale key.
-L5962  async def _vm_edit_menu(q)
-L5970  async def _on_vm_button(q, data: str)
-L6040  async def _vm_create_flow(bot, chat_id: int, pat: str, key: str, win: str, minutes)  — Tạo máy ảo từ creds truyền vào hoặc creds đã lưu; báo kết quả vào chat.
-L6086  @guard(owner_only=True) async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6141  @guard(owner_only=True) async def cmd_push(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Đẩy code hiện tại lên GitHub để Windows CMD chạy run.bat là có bản mới.
-L6168  @guard(owner_only=True) async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6177  @guard() async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6191  @guard() async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6196  @guard(owner_only=True) async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6210  async def _reply_skills(message)
-L6215  def _parse_skill_add_args(args: list)
-L6243  def _format_skill_install(result: dict)
-L6274  async def _cmd_skill_add(update: Update, context: ContextTypes.DEFAULT_TYPE, source: str, force: bool, name: Optional[str], ref...
-L6319  @guard() async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6324  @guard() async def cmd_skill(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6370  @guard() async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6380  @guard() async def cmd_get(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6397  @guard(owner_only=True) async def cmd_allow(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6409  @guard(owner_only=True) async def cmd_deny(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L6436  def _mask_secret(value: str)
-L6442  @guard(owner_only=True) async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Xem / đặt API key ngay trong chat — không cần mở terminal.
-L6541  class _WindowLimit  — Giới hạn số lần trong một cửa sổ thời gian, tách riêng theo từng khoá.
-  L6544  def __init__(self, count: int, window: float)
-  L6549  def check(self, key, now: float=None)  — Trả 0 nếu được phép; ngược lại trả số giây cần chờ.
-  L6561  def _prune(self, now: float)
-L6596  def guest_intent(text: str)  — Phân loại yêu cầu của khách: mindmap/infographic/chart/image/code/chat.
-L6614  def _guest_subject(text: str)
-L6622  def _guest_key(chat, user)
-L6626  def _guest_banned(user_id: int)
-L6636  def _guest_model(user_id: int)
-L6640  async def _guest_model_command(update, context)
-L6670  async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE)  — /ask: trong nhóm luôn được bot nhận, không cần @mention (khách chat miễn phí).
-L6689  def _guest_hist(key)
-L6698  def _guest_notice(key, gap: float=25.0)  — Chỉ gửi 1 tin nhắc trong `gap` giây cho mỗi khoá (chống spam thông báo).
-L6707  def _thread_kw(msg)
-L6714  def _strip_image_links(text: str, urls: list)
-L6723  async def _guest_send_url_images(msg, chat, urls: list)  — Tải ảnh Gemini trả về trong câu trả lời và gửi thành ảnh thật (không gửi link trần).
-L6747  async def _guest_media_reply(msg, context, chat, user, text: str, kind: str='image', prompt: str='', style: str='', aspect: str...  — Khách tạo ảnh / sơ đồ qua nguồn miễn phí (Gemini, dự phòng Pollinations).
-L6812  def _guest_vision_ready(kind: str)  — Web2API đã vá đọc ảnh (image) hoặc video chưa.
-L6825  def _guest_vision_args(kind: str, source: str, question: str)  — Lệnh aistv_watch.py chỉ dùng Web2API — không chạm key Gemini của chủ.
-L6834  async def _guest_vision_gate(msg, chat, user, label: str)  — Kiểm tra giới hạn trước khi tải file; True = bị chặn (đã báo).
-L6859  async def _guest_vision_reply(msg, chat, user, source: str, question: str, kind: str)  — Khách nhờ Gemini đọc ảnh/video qua Web2API (miễn phí, không dùng key chủ).
-L6905  async def _guest_media_read(update, context, kind: str, media, name: str, mime: str)  — Tải ảnh/video của khách vào thư mục tạm riêng, đọc xong xoá ngay.
-L6946  async def _guest_typing(bot, chat_id: int, stop: asyncio.Event)
-L6958  async def _guest_answer(msg, context, chat, user, text: str, direct: bool=False)  — Khách: Gemini miễn phí cho chat/code/ảnh/sơ đồ/đọc media; không tool, không dữ liệu của chủ.
-L7058  async def _dispatch_text(msg, context, chat, text: str, direct: bool=False)  — Dùng chung cho tin nhắn gõ tay và tin nhắn thoại đã chép lời (chỉ chủ bot).
-L7093  async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L7117  @guard() async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Tin nhắn thoại / file âm thanh → chép lời bằng Gemini → xử lý như tin nhắn chữ.
-L7176  def _redact_secrets(text: str)
-L7191  def _watch_cli(args: list, timeout: int=900)  — Chạy aistv_watch.py bằng đúng Python của bot; trả về (code, stdout, stderr).
-L7208  def _image_cli(args: list, timeout: int=300)  — Chạy aistv_image.py bằng đúng Python của bot.
-L7225  def _resolve_media_source(source: str)
-L7247  def _vision_question(kind: str, question: str)
-L7253  def _vision_cli_args(source: str, question: str, kind: str)
-L7262  def _vision_timeout(kind: str)
-L7267  def _vision_parse(out: str)  — (text, model) từ JSON của aistv_watch.py.
-L7277  def _vision_followup(source: str, question: str, kind: str)  — DeepSeek hỏi lại Gemini ngay trên media đã gửi → (ok, answer, error).
-L7295  def _vision_handoff_prompt(kind: str, source: str, question: str, report: str, model: str)
-L7324  async def gemini_media_reply(message, context, chat_id: int, source, question: str, kind: str)  — Gemini đọc ảnh/video → DeepSeek (model chính) đối chiếu, hỏi lại nếu cần → trả lời.
-L7393  async def generate_image_job(prompt: str, style: str='', aspect: str='1:1', kind: str='image', ref: str='', model: str='', prov...
-L7434  def _photo_for_telegram(path: Path)  — Ảnh > 9MB → thu nhỏ sang JPEG (photo Telegram tối đa 10MB).
-L7449  def _provider_label(name: str)
-L7460  def _image_caption(data: dict)
-L7479  async def send_generated_image(chat_id: int, data: dict, reply_to: int=None, message_thread_id: int=None)
-L7500  def _math_for_pages(m, dollar: bool=False)
-L7507  def pages_plain_text(md: str)  — Markdown cho ảnh: đổi công thức sang Unicode, giữ nguyên code block.
-L7522  def render_pages_ready(md: str, title: str='')
-L7527  async def _send_page_images(chat_id: int, paths: list, title: str, as_document: bool=False, reply_to: int=None, message_thread_...
-L7582  async def _tool_pages_job(chat_id: int, md: str, title: str='', fmt: str='photo', reply_to: int=None, message_thread_id: int=None)
-L7605  async def _tool_image_job(chat_id: int, prompt: str, style: str='', aspect: str='1:1', kind: str='image', model: str='')  — Chạy nền khi agent gọi tool generate_image (HTTP nội bộ).
-L7633  async def _download_telegram_file(message, file_obj, name: str, mime: str='', folder: Optional[Path]=None)
-L7652  @guard(allow_guest=True) async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L7679  @guard(allow_guest=True) async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L7708  @guard(allow_guest=True) async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L7743  async def _cmd_gemini_media(update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str)
-L7782  def _parse_image_args(args)
-L7849  async def _image_generate_reply(update, prompt: str, style: str='', aspect: str='1:1', kind: str='image', model: str='', provid...
-L7882  @guard(allow_guest=True) async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Mặc định tạo ảnh; nếu tham số đầu là file/URL ảnh thì đọc ảnh (như cũ).
-L7912  @guard() async def cmd_see(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L7917  @guard(allow_guest=True) async def cmd_mindmap(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L7934  @guard() async def cmd_pages(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Dựng tin nhắn dài (hoặc nội dung gõ kèm) thành ảnh từng trang A4.
-L7968  @guard() async def cmd_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L7972  async def _on_ask_button(q, data: str)
-L8013  async def _on_gh_repo_button(q, data: str)
-L8120  @guard() async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L8194  async def on_error(update, context: ContextTypes.DEFAULT_TYPE)
-L8222  def _cloud_path(path: str)
-L8226  def _fb_url(path: str)
-L8240  def _personal_path(path: str)
-L8244  def _is_sealed(value)
-L8249  def _seal_node(data)
-L8255  def _open_node(value)  — Giải mã node; dữ liệu thô kiểu cũ (trước khi mã hoá) trả nguyên trạng.
-L8276  def fb_call(method: str, path: str, data=None, timeout: int=20, raw: bool=False)  — REST tới Firebase RTDB (đồng bộ). Không bao giờ ném lỗi ra ngoài.
-L8308  async def fb(method: str, path: str, data=None)
-L8312  async def fb_raw_get(path: str)  — GET nguyên bản (không giải mã) — dùng để phát hiện node cũ còn dạng thô.
-L8317  async def cloud_encrypt_existing()  — Mã hoá các node cá nhân bản cũ còn nằm dạng thô trên cloud (mỗi phiên 1 lần).
-L8346  def _save_json(path: Path, data)
-L8353  def _load_json(path: Path)
-L8364  def _secret_master_key()
-L8371  def _keystream(key: bytes, nonce: bytes, size: int)
-L8380  def _seal(data)
-L8391  def _open(blob: str)
-L8405  def encrypt_secrets(data: dict)
-L8409  def decrypt_secrets(blob: str)
-L8414  def _local_secret_values()
-L8440  async def cloud_push_secrets()
-L8461  async def cloud_restore_secrets()  — Máy mới: giải mã bí mật trên cloud và ghi vào config.env (không ghi đè cái đã có).
-L8527  async def cloud_merge_memory()  — Gộp MEMORY.md cục bộ với bản trên cloud (giữ thứ tự, không trùng).
-L8547  async def cloud_push_memory()
-L8552  async def cloud_push_history(chat_id: int)
-L8557  async def cloud_pull_history(chat_id: int)
-L8569  async def ensure_history(chat_id: int)  — Máy mới / Colab reset: lấy lại hội thoại của chat này từ cloud.
-L8578  async def cloud_restore_all()
-L8610  async def cloud_loop()  — Gom thay đổi rồi đẩy lên Firebase (tránh gọi mạng mỗi lần append).
-L8633  def add_memory_lines(lines: list)
-L8652  async def ask_model_once(prompt: str, timeout: int=300)  — Gọi OpenCode 1 lần, không tool, không đụng state hội thoại.
-L8675  async def summarize_chat(chat_id: int, force: bool=False)  — Cô đọng các lượt cũ thành gạch đầu dòng trong MEMORY.md rồi cắt lịch sử.
-L8714  def maybe_schedule_summary(chat_id: int)
-L8740  def _new_id(prefix: str)
-L8744  def _when_str(ts)
-L8752  def _in_str(ts)
-L8766  def _next_at(hh: int, mm: int, add_days: int=0)
-L8776  def parse_schedule(text: str)  — Trả (epoch|None, kiểu lặp, phần nội dung còn lại).
-L8812  async def rem_save(push: bool=True)
-L8818  def _prune_reminders(records: dict, now_ts: float | None=None)  — Lọc nhắc việc: bỏ mục hỏng, đánh dấu quá hạn, bỏ mục quá cũ (>30 ngày).
-L8838  async def rem_restore()
-L8850  def build_reminders()
-L8869  async def send_plain(app, chat_id: int, text: str, html_ok: bool=False, markup=None)
-L8891  async def _run_scheduled_task_guarded(app, rec: dict)
-L8905  async def _run_scheduled_task(app, rec: dict)
-L8920  async def tick_reminders(app)
-L8976  def _norm_repo(s: str)
-L8981  def _path_digest(p: Path)
-L8998  async def watch_save()
-L9004  async def watch_restore()
-L9014  async def _watch_git(app, w: dict)
-L9038  async def _watch_log(app, w: dict)
-L9073  async def _watch_file(app, w: dict)
-L9084  async def tick_watches(app)
-L9101  def build_watches()
-L9118  async def install_self_watch()
-L9133  async def _scheduler_loop(app)
-L9151  @guard() async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9156  @guard() async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9160  async def _add_schedule(update, context, kind: str)
-L9185  @guard() async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9190  @guard() async def cmd_unremind(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9208  @guard() async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9266  @guard() async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9276  def build_cloud(chat_id: int)
-L9307  @guard() async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9357  def _email_fp(cfg: dict)  — Vân tay cấu hình: đổi email/mật khẩu/host → kết quả test cũ không còn giá trị.
-L9364  def _clean_app_password(parts)  — Gmail hiển thị App Password dạng 'abcd efgh ijkl mnop' — bỏ hết khoảng trắng.
-L9372  def _email_pw_label(cfg: dict)
-L9381  def build_email()
-L9414  def _parse_email_read(chat_id: int, key: str)
-L9427  @guard() async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9552  async def _web2api_loop()  — Giữ cookie/server luôn mới: dán cookie.txt là tự chạy, máy mới tự kéo.
-L9572  @guard(owner_only=True) async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Bật/tắt và chặn khách khi nhóm spam (chỉ chủ bot).
-L9678  @guard() async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Quản lý Gemini dự phòng (chỉ chủ bot).
-L9788  def _merge_env_file(path: Path, text: str)  — Thêm các biến còn thiếu từ text vào path; không ghi đè giá trị đang có.
-L9831  def _remote_config_text()  — Tải config.env từ AISTV_ENV_URL hoặc repo private (dự phòng cho bản cũ).
-L9878  def _bootstrap_remote_config()  — Máy mới: tự nạp token/API key từ config.env dùng chung trên GitHub.
-L9899  def _valid_bot_token(value: str)  — Token BotFather: 123456789:AAH... — chan dan nham lenh khac vao prompt.
-L9904  def get_token()
-L9962  def _startup_github()
-L9973  async def post_init(app)
-L10017 def main()
+L2349  class _AskServer
+  L2353  def handle_error(self, request, client_address)
+L2361  def start_ask_server()  — Mở HTTP server 127.0.0.1 để tool ask_user gọi vào bot.
+L2380  def _gh_http(url: str, data: Optional[dict]=None, token: str='', timeout: int=30)
+L2395  def _gh_device_start()
+L2400  def _gh_device_poll(device_code: str)
+L2406  def github_token()  — Token theo thứ tự: env/Colab Secrets → file bền vững → gh CLI.
+L2433  def github_token_source()
+L2453  def apply_github_config(token: str)  — Cấu hình git credential + gh CLI + user.name/email từ token.
+L2500  def save_github_token(token: str)  — Lưu token (chmod 600) + bản sao trên Google Drive nếu đang mount.
+L2522  def clear_github_token()
+L2547  def load_vm_creds()
+L2555  def _write_vm_creds(creds: dict)
+L2564  def save_vm_creds(pat: Optional[str]=None, tskey: Optional[str]=None, windows: Optional[str]=None, minutes: Optional[int]...
+L2581  def clear_vm_creds()
+L2596  def vm_defaults()  — (runner, số phút) đang chọn — mặc định windows-latest / 360.
+L2604  def vm_keyboard()
+L2619  def vm_pat()  — PAT cho máy ảo: ưu tiên PAT đã lưu, không có thì dùng token GitHub của bot.
+L2625  def vm_status_text()
+L2658  def _vm_creds_from_cloud(data: dict)  — Tách PAT/key/runner/phút từ blob secrets trên Firebase.
+L2682  def _gh_api(path: str, token: str, method: str='GET', payload: Optional[dict]=None, timeout: int=30)
+L2708  def gh_all_repos(token: str, refresh: bool=False)  — Toàn bộ repo token nhìn thấy (chủ, cộng tác, tổ chức), mới đẩy lên trước.
+L2737  def gh_repo_meta(slug: str, token: str)
+L2745  def gh_repo_has_bot(slug: str, token: str)
+L2753  def current_repo_slug()  — Repo đích: env → file .secrets/github_repo → state → origin của bản clone.
+L2771  def repo_remote_slug()
+L2779  def set_repo_slug(slug: str)
+L2794  def gh_repo_picker(chat_id: int, token: str, page: int=0, refresh: bool=False)
+L2831  def gh_repo_detail(chat_id: int, idx: int)
+L2861  def _gh_set_origin(rd: Path, slug: str)
+L2869  def gh_switch_repo(slug: str)  — Đổi origin sang repo đã chọn rồi fetch/pull fast-forward.
+L2887  def gh_push_code(slug: str)  — Đặt origin về repo đã chọn rồi đẩy code hiện tại lên.
+L2905  def gh_create_repo(name: str, token: str, private: bool=False)
+L2919  def repo_access(slug: str, token: str)
+L2923  def repo_can_push(slug: str, token: str)
+L2928  def repo_dir()
+L2936  def _git(args: list, cwd: Path, timeout: int=180)
+L2945  def restart_bot()  — Thay tiến trình hiện tại bằng bản mới. Không làm trong notebook Colab.
+L2982  def _msg_brief(m)  — Nội dung ngắn gọn của một tin nhắn Telegram (chữ, chú thích, loại tệp).
+L2999  def reply_context(msg)  — Phân tích tin nhắn đang được trả lời/trích dẫn (Reply Message / Quoting).
+L3067  def build_prompt(chat_id: int, user_text: str, skill: Optional[tuple]=None, quote: str='')
+L3144  def _redact(s)
+L3161  def clean_output(s: str)
+L3170  def _clip(s, n: int=PROGRESS_DETAIL)
+L3175  def _rel(path)
+L3182  def _int(x)
+L3189  def _fmt_tok(n: int)  — 1234 -> '1,2k' cho footer gọn trên điện thoại.
+L3196  def _note_usage(chat_id: int, tokens: dict, cost=None)  — Cộng dồn token thật OpenCode báo ở mỗi bước (sự kiện step_finish).
+L3224  def _headroom_fn()  — Nạp Headroom một lần; máy chưa cài thì trả None (bot vẫn chạy bình thường).
+L3239  def _headroom_warm()  — Gọi thử một lần cho Headroom nạp sẵn pipeline (lần đầu mất vài giây).
+L3254  def _headroom_shrink(text: str)  — Nén phần ngữ cảnh của prompt (giữ nguyên yêu cầu mới của người dùng).
+L3282  async def _headroom_prompt(prompt: str)  — Chạy nén ở luồng riêng, tối đa 2,5 giây — quá giờ thì dùng prompt gốc.
+L3292  def _token_footer(chat_id: int, saved: int=0)  — Cụm token cuối tin nhắn: token gốc và phần còn lại sau khi qua Headroom.
+L3334  def _tool_entry(part: dict)  — Đổi 1 sự kiện tool_use của OpenCode thành dòng tiến độ gọn cho Telegram.
+L3406  def _keep_tool_timing(old: dict, new: dict)  — Cập nhật cùng callID: giữ mốc quan sát đầu tiên để đo thời gian chạy.
+L3414  def _dur_text(sec: float)
+L3425  def _tool_dur(e: dict, live: bool=True)  — Thời gian tool đang/đã chạy: ' · 35s' (rỗng nếu chưa đo được).
+L3443  def _status_rows(chat_id: int, limit: int=PROGRESS_KEEP)
+L3457  def _model_base(name: str='')  — Tên model bỏ phần #variant để so sánh.
+L3462  def _model_has_no_thinking()  — Model hiện tại đã từng chạy mà không trả reasoning (vd bản flash free).
+L3467  def _thinking_text(chat_id: int)
+L3474  def _thinking_tail(chat_id: int, n: int=600)
+L3479  def _last_action(chat_id: int)
+L3490  def _push_live(chat_id: int, kind: str, payload, call: Optional[str]=None)  — Ghi 1 sự kiện vào dòng thời gian để tin nhắn tiến độ cuộn như terminal.
+L3513  def _wrap_live(text: str, width: int=44)
+L3524  def _code_block(text: str, lang: str='')  — Khối mã kiểu ```lang … ``` để lệnh/code dễ đọc trên Telegram.
+L3530  def _live_blocks(chat_id: int, detailed: bool=False)  — Đổi dòng thời gian thành các khối HTML gọn, mới nhất ở cuối.
+L3573  def _tail_blocks(blocks: list, max_lines: int=PROGRESS_LINES, max_chars: int=PROGRESS_CHARS)  — Giữ các khối cuối vừa khung; khối cũ rơi khỏi đỉnh (cuộn xuống).
+L3589  def _render_status(chat_id: int, started: float, frame: str='🧠')
+L3608  async def _iter_lines(stream, max_line: int=4 * 1024 * 1024)  — Đọc theo chunk và tự cắt dòng.
+L3645  async def _talk(proc, data: Optional[bytes], chat_id: int, err_lines: list)  — Gửi prompt qua stdin, đọc stdout từng dòng.
+L3764  def _is_opencode_error_output(text: str)  — CLI in help/lỗi cú pháp thay vì câu trả lời — đừng gửi nguyên văn cho người dùng.
+L3770  def _is_error_payload(text: str)  — OpenCode đôi khi in nguyên JSON/lỗi (UnknownError...) như 'câu trả lời'.
+L3818  def _is_error_history(content: str)  — Lọc bỏ nội dung lỗi từng bị lưu nhầm vào lịch sử hội thoại.
+L3845  def _is_quota_error(text: str)  — Lỗi hết hạn mức / hết token (không phải lỗi cấu hình model).
+L3867  def _is_server_error(text: str)  — Lỗi từ nhà cung cấp model (UnknownError, 5xx...) — cũng nên thử dự phòng.
+L3878  def _human_secs(sec: float)  — Đổi số giây thành chuỗi ngắn kiểu '18 giờ 20 phút'.
+L3896  def _pretty_error(text: str)  — Rút gọn JSON lỗi của OpenCode thành một dòng dễ đọc.
+L3925  def agent_model_chain()  — Model chính + model dự phòng (Gemini) khi hết hạn mức.
+L3944  def _fallback_hint()  — Gợi ý ngắn khi model dự phòng không trả lời được (dựa trên trạng thái thật).
+L3966  def _agent_failure(err_text: str, quota: bool=False, tools: bool=False, server: bool=False)
+L3992  async def _run_opencode_once(chat_id: int, prompt: str, env: dict, model: str)  — Chạy một lượt OpenCode. Trả (ok, text/lỗi, đã_chạy_tool).
+L4053  def _drop_fake_files(text: str)  — Bỏ dòng 'File kết quả: …' khi câu trả lời đến từ đường không có công cụ.
+L4064  async def _run_web2api_direct(prompt: str, model: str)  — Gọi thẳng server Gemini dự phòng, không qua OpenCode.
+L4095  def make_checkpoint(chat_id: int, label: str='')  — Chụp repo trước khi agent sửa. Trả checkpoint id ('' nếu không làm được).
+L4115  def review_markup(chat_id: int)
+L4124  async def _autopush_after_agent(chat_id: int)  — Sau lượt agent: tự push (nếu bật) hoặc hiện diff + nút duyệt.
+L4174  async def run_agent(chat_id: int, prompt: str, retries: int=1)  — Trả về (ok, text).
+L4248  def snapshot()
+L4316  def _math_chars(text: str, table: dict)
+L4323  def _sup_text(text: str)
+L4331  def _sub_text(text: str)
+L4337  def _frac_text(num: str, den: str)
+L4349  def latex_to_unicode(src: str)  — Đổi công thức LaTeX đơn giản sang ký tự Unicode Telegram đọc được.
+L4417  def _looks_math(text: str)  — Phân biệt $x = 1$ với giá tiền kiểu $5 và $7.
+L4425  def md_to_tg_html(md: str)
+L4471  def split_markdown(text: str, limit: int=SPLIT_LIMIT)  — Chia theo đoạn văn; luôn đóng/mở lại khối code để không vỡ định dạng.
+L4515  async def _reply(message, body: str, fallback: str, **kw)
+L4526  async def send_rich(message, text: str, footer: str='', markup=None)
+L4542  async def send_thinking(message, chat_id: int)  — Gửi phần reasoning của model dưới dạng blockquote mở rộng được.
+L4576  async def _ticker(bot, chat_id: int, status, started: float, stop: asyncio.Event)
+L4615  async def _finish_status(status, chat_id: int, started: float, ok: bool)  — Chốt tin nhắn tiến độ; ở chế độ gọn thì xoá hẳn để nhường chỗ cho câu trả lời.
+L4646  async def send_new_files(message, before: dict)
+L4664  async def respond(message, context, chat_id: int, text: str, skill: Optional[tuple]=None, quoted_msg=None, store_text: Optional...
+L4719  def plan_keyboard(plan: dict)
+L4738  def plans_list_text()
+L4755  async def _plan_edit(msg, plan: dict, note: str='')
+L4765  async def create_plan(chat_id: int, request: str, msg)
+L4794  async def run_plan(chat_id: int, plan_id: str)
+L4926  async def push_repo_now()
+L4938  async def _q_edit(q, text: str, markup='keep')
+L4948  async def _on_review_button(q, data: str)  — Nút ⬆️ Push / ↩️ Hoàn tác / 📄 Xem thay đổi của cổng duyệt.
+L5015  async def _on_plan_button(q, data: str)
+L5105  @guard() async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5147  @guard() async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5179  def email_line()
+L5191  def image_provider_line()
+L5212  def web2api_line()  — Một dòng trạng thái cho /status (không chặn lâu).
+L5228  def build_status(chat_id: int)
+L5263  def build_skills_index(exclude: Optional[str]=None, limit: int=60)  — Danh sách gọn để agent tự chọn skill phù hợp (progressive disclosure).
+L5304  def build_skills_pages(limit: int=3600)
+L5332  def build_skills()  — Giữ hàm cũ cho tương thích; nội dung có thể dài hơn 1 tin nhắn Telegram.
+L5337  def build_memory()
+L5345  def welcome_text()
+L5420  @guard(allow_guest=True) async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5432  @guard(allow_guest=True) async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5441  @guard(allow_guest=True) async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5452  @guard() async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5468  @guard() async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5473  @guard(allow_guest=True) async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5494  @guard() async def cmd_models(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5517  @guard() async def cmd_think(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5542  @guard() async def cmd_activity(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5563  @guard() async def cmd_variant(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5588  async def _github_connected(bot, chat_id: int, info: dict, tok: str)  — Sau khi có token: kiểm tra repo đích; không truy cập được thì quét repo cho chọn.
+L5631  async def _github_repo_cmd(msg, sub: str, args: list, tok: str)  — Xử lý /github repo|repos [list|use owner/name|create tên [private]].
+L5716  async def _gh_poll_task(bot, chat_id: int, device: dict)
+L5759  @guard(owner_only=True) async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5855  @guard(owner_only=True) async def cmd_vm(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L5900  async def _vm_save_pat(bot, chat_id: int, pat: str, src_msg=None)  — Kiểm tra PAT bằng GitHub API rồi lưu; trả True nếu thành công.
+L5925  async def _vm_save_key(bot, chat_id: int, key: str, src_msg=None)  — Kiểm tra hình dạng Tailscale key rồi lưu.
+L5946  async def _vm_take_input(msg, context: ContextTypes.DEFAULT_TYPE, chat, text: str, mode: str)  — Tin nhắn người dùng gửi sau khi bấm nút nhập PAT / Tailscale key.
+L5965  async def _vm_edit_menu(q)
+L5973  async def _on_vm_button(q, data: str)
+L6043  async def _vm_create_flow(bot, chat_id: int, pat: str, key: str, win: str, minutes)  — Tạo máy ảo từ creds truyền vào hoặc creds đã lưu; báo kết quả vào chat.
+L6096  @guard(owner_only=True) async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6151  @guard(owner_only=True) async def cmd_push(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Đẩy code hiện tại lên GitHub để Windows CMD chạy run.bat là có bản mới.
+L6178  @guard(owner_only=True) async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6187  @guard() async def cmd_remember(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6201  @guard() async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6206  @guard(owner_only=True) async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6220  async def _reply_skills(message)
+L6225  def _parse_skill_add_args(args: list)
+L6253  def _format_skill_install(result: dict)
+L6284  async def _cmd_skill_add(update: Update, context: ContextTypes.DEFAULT_TYPE, source: str, force: bool, name: Optional[str], ref...
+L6329  @guard() async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6334  @guard() async def cmd_skill(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6380  @guard() async def cmd_files(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6390  @guard() async def cmd_get(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6407  @guard(owner_only=True) async def cmd_allow(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6419  @guard(owner_only=True) async def cmd_deny(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L6446  def _mask_secret(value: str)
+L6452  @guard(owner_only=True) async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Xem / đặt API key ngay trong chat — không cần mở terminal.
+L6551  class _WindowLimit  — Giới hạn số lần trong một cửa sổ thời gian, tách riêng theo từng khoá.
+  L6554  def __init__(self, count: int, window: float)
+  L6559  def check(self, key, now: float=None)  — Trả 0 nếu được phép; ngược lại trả số giây cần chờ.
+  L6571  def _prune(self, now: float)
+L6606  def guest_intent(text: str)  — Phân loại yêu cầu của khách: mindmap/infographic/chart/image/code/chat.
+L6624  def _guest_subject(text: str)
+L6632  def _guest_key(chat, user)
+L6636  def _guest_banned(user_id: int)
+L6646  def _guest_model(user_id: int)
+L6650  async def _guest_model_command(update, context)
+L6680  async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE)  — /ask: trong nhóm luôn được bot nhận, không cần @mention (khách chat miễn phí).
+L6699  def _guest_hist(key)
+L6708  def _guest_notice(key, gap: float=25.0)  — Chỉ gửi 1 tin nhắc trong `gap` giây cho mỗi khoá (chống spam thông báo).
+L6717  def _thread_kw(msg)
+L6724  def _strip_image_links(text: str, urls: list)
+L6733  async def _guest_send_url_images(msg, chat, urls: list)  — Tải ảnh Gemini trả về trong câu trả lời và gửi thành ảnh thật (không gửi link trần).
+L6757  async def _guest_media_reply(msg, context, chat, user, text: str, kind: str='image', prompt: str='', style: str='', aspect: str...  — Khách tạo ảnh / sơ đồ qua nguồn miễn phí (Gemini, dự phòng Pollinations).
+L6822  def _guest_vision_ready(kind: str)  — Web2API đã vá đọc ảnh (image) hoặc video chưa.
+L6835  def _guest_vision_args(kind: str, source: str, question: str)  — Lệnh aistv_watch.py chỉ dùng Web2API — không chạm key Gemini của chủ.
+L6844  async def _guest_vision_gate(msg, chat, user, label: str)  — Kiểm tra giới hạn trước khi tải file; True = bị chặn (đã báo).
+L6869  async def _guest_vision_reply(msg, chat, user, source: str, question: str, kind: str)  — Khách nhờ Gemini đọc ảnh/video qua Web2API (miễn phí, không dùng key chủ).
+L6915  async def _guest_media_read(update, context, kind: str, media, name: str, mime: str)  — Tải ảnh/video của khách vào thư mục tạm riêng, đọc xong xoá ngay.
+L6956  async def _guest_typing(bot, chat_id: int, stop: asyncio.Event)
+L6968  async def _guest_answer(msg, context, chat, user, text: str, direct: bool=False)  — Khách: Gemini miễn phí cho chat/code/ảnh/sơ đồ/đọc media; không tool, không dữ liệu của chủ.
+L7068  async def _dispatch_text(msg, context, chat, text: str, direct: bool=False)  — Dùng chung cho tin nhắn gõ tay và tin nhắn thoại đã chép lời (chỉ chủ bot).
+L7103  async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L7127  @guard() async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Tin nhắn thoại / file âm thanh → chép lời bằng Gemini → xử lý như tin nhắn chữ.
+L7186  def _redact_secrets(text: str)
+L7201  def _watch_cli(args: list, timeout: int=900)  — Chạy aistv_watch.py bằng đúng Python của bot; trả về (code, stdout, stderr).
+L7218  def _image_cli(args: list, timeout: int=300)  — Chạy aistv_image.py bằng đúng Python của bot.
+L7235  def _resolve_media_source(source: str)
+L7257  def _vision_question(kind: str, question: str)
+L7263  def _vision_cli_args(source: str, question: str, kind: str)
+L7272  def _vision_timeout(kind: str)
+L7277  def _vision_parse(out: str)  — (text, model) từ JSON của aistv_watch.py.
+L7287  def _vision_followup(source: str, question: str, kind: str)  — DeepSeek hỏi lại Gemini ngay trên media đã gửi → (ok, answer, error).
+L7305  def _vision_handoff_prompt(kind: str, source: str, question: str, report: str, model: str)
+L7334  async def gemini_media_reply(message, context, chat_id: int, source, question: str, kind: str)  — Gemini đọc ảnh/video → DeepSeek (model chính) đối chiếu, hỏi lại nếu cần → trả lời.
+L7403  async def generate_image_job(prompt: str, style: str='', aspect: str='1:1', kind: str='image', ref: str='', model: str='', prov...
+L7444  def _photo_for_telegram(path: Path)  — Ảnh > 9MB → thu nhỏ sang JPEG (photo Telegram tối đa 10MB).
+L7459  def _provider_label(name: str)
+L7470  def _image_caption(data: dict)
+L7489  async def send_generated_image(chat_id: int, data: dict, reply_to: int=None, message_thread_id: int=None)
+L7510  def _math_for_pages(m, dollar: bool=False)
+L7517  def pages_plain_text(md: str)  — Markdown cho ảnh: đổi công thức sang Unicode, giữ nguyên code block.
+L7532  def render_pages_ready(md: str, title: str='')
+L7537  async def _send_page_images(chat_id: int, paths: list, title: str, as_document: bool=False, reply_to: int=None, message_thread_...
+L7592  async def _tool_pages_job(chat_id: int, md: str, title: str='', fmt: str='photo', reply_to: int=None, message_thread_id: int=None)
+L7615  async def _tool_image_job(chat_id: int, prompt: str, style: str='', aspect: str='1:1', kind: str='image', model: str='')  — Chạy nền khi agent gọi tool generate_image (HTTP nội bộ).
+L7643  async def _download_telegram_file(message, file_obj, name: str, mime: str='', folder: Optional[Path]=None)
+L7662  @guard(allow_guest=True) async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L7689  @guard(allow_guest=True) async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L7718  @guard(allow_guest=True) async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L7753  async def _cmd_gemini_media(update: Update, context: ContextTypes.DEFAULT_TYPE, kind: str)
+L7792  def _parse_image_args(args)
+L7859  async def _image_generate_reply(update, prompt: str, style: str='', aspect: str='1:1', kind: str='image', model: str='', provid...
+L7892  @guard(allow_guest=True) async def cmd_image(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Mặc định tạo ảnh; nếu tham số đầu là file/URL ảnh thì đọc ảnh (như cũ).
+L7922  @guard() async def cmd_see(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L7927  @guard(allow_guest=True) async def cmd_mindmap(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L7944  @guard() async def cmd_pages(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Dựng tin nhắn dài (hoặc nội dung gõ kèm) thành ảnh từng trang A4.
+L7978  @guard() async def cmd_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L7982  async def _on_ask_button(q, data: str)
+L8023  async def _on_gh_repo_button(q, data: str)
+L8130  @guard() async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L8204  async def on_error(update, context: ContextTypes.DEFAULT_TYPE)
+L8232  def _cloud_path(path: str)
+L8236  def _fb_url(path: str)
+L8250  def _personal_path(path: str)
+L8254  def _is_sealed(value)
+L8259  def _seal_node(data)
+L8265  def _open_node(value)  — Giải mã node; dữ liệu thô kiểu cũ (trước khi mã hoá) trả nguyên trạng.
+L8286  def fb_call(method: str, path: str, data=None, timeout: int=20, raw: bool=False)  — REST tới Firebase RTDB (đồng bộ). Không bao giờ ném lỗi ra ngoài.
+L8318  async def fb(method: str, path: str, data=None)
+L8322  async def fb_raw_get(path: str)  — GET nguyên bản (không giải mã) — dùng để phát hiện node cũ còn dạng thô.
+L8327  async def cloud_encrypt_existing()  — Mã hoá các node cá nhân bản cũ còn nằm dạng thô trên cloud (mỗi phiên 1 lần).
+L8356  def _save_json(path: Path, data)
+L8363  def _load_json(path: Path)
+L8374  def _secret_master_key()
+L8381  def _keystream(key: bytes, nonce: bytes, size: int)
+L8390  def _seal(data)
+L8401  def _open(blob: str)
+L8415  def encrypt_secrets(data: dict)
+L8419  def decrypt_secrets(blob: str)
+L8424  def _local_secret_values()
+L8450  async def cloud_push_secrets()
+L8471  async def cloud_restore_secrets()  — Máy mới: giải mã bí mật trên cloud và ghi vào config.env (không ghi đè cái đã có).
+L8537  async def cloud_merge_memory()  — Gộp MEMORY.md cục bộ với bản trên cloud (giữ thứ tự, không trùng).
+L8557  async def cloud_push_memory()
+L8562  async def cloud_push_history(chat_id: int)
+L8567  async def cloud_pull_history(chat_id: int)
+L8579  async def ensure_history(chat_id: int)  — Máy mới / Colab reset: lấy lại hội thoại của chat này từ cloud.
+L8588  async def cloud_restore_all()
+L8620  async def cloud_loop()  — Gom thay đổi rồi đẩy lên Firebase (tránh gọi mạng mỗi lần append).
+L8643  def add_memory_lines(lines: list)
+L8662  async def ask_model_once(prompt: str, timeout: int=300)  — Gọi OpenCode 1 lần, không tool, không đụng state hội thoại.
+L8685  async def summarize_chat(chat_id: int, force: bool=False)  — Cô đọng các lượt cũ thành gạch đầu dòng trong MEMORY.md rồi cắt lịch sử.
+L8724  def maybe_schedule_summary(chat_id: int)
+L8750  def _new_id(prefix: str)
+L8754  def _when_str(ts)
+L8762  def _in_str(ts)
+L8776  def _next_at(hh: int, mm: int, add_days: int=0)
+L8786  def parse_schedule(text: str)  — Trả (epoch|None, kiểu lặp, phần nội dung còn lại).
+L8822  async def rem_save(push: bool=True)
+L8828  def _prune_reminders(records: dict, now_ts: float | None=None)  — Lọc nhắc việc: bỏ mục hỏng, đánh dấu quá hạn, bỏ mục quá cũ (>30 ngày).
+L8848  async def rem_restore()
+L8860  def build_reminders()
+L8879  async def send_plain(app, chat_id: int, text: str, html_ok: bool=False, markup=None)
+L8901  async def _run_scheduled_task_guarded(app, rec: dict)
+L8915  async def _run_scheduled_task(app, rec: dict)
+L8930  async def tick_reminders(app)
+L8986  def _norm_repo(s: str)
+L8991  def _path_digest(p: Path)
+L9008  async def watch_save()
+L9014  async def watch_restore()
+L9024  async def _watch_git(app, w: dict)
+L9048  async def _watch_log(app, w: dict)
+L9083  async def _watch_file(app, w: dict)
+L9094  async def tick_watches(app)
+L9111  def build_watches()
+L9128  async def install_self_watch()
+L9143  async def _scheduler_loop(app)
+L9161  @guard() async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9166  @guard() async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9170  async def _add_schedule(update, context, kind: str)
+L9195  @guard() async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9200  @guard() async def cmd_unremind(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9218  @guard() async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9276  @guard() async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9286  def build_cloud(chat_id: int)
+L9317  @guard() async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9367  def _email_fp(cfg: dict)  — Vân tay cấu hình: đổi email/mật khẩu/host → kết quả test cũ không còn giá trị.
+L9374  def _clean_app_password(parts)  — Gmail hiển thị App Password dạng 'abcd efgh ijkl mnop' — bỏ hết khoảng trắng.
+L9382  def _email_pw_label(cfg: dict)
+L9391  def build_email()
+L9424  def _parse_email_read(chat_id: int, key: str)
+L9437  @guard() async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9562  async def _web2api_loop()  — Giữ cookie/server luôn mới: dán cookie.txt là tự chạy, máy mới tự kéo.
+L9582  @guard(owner_only=True) async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Bật/tắt và chặn khách khi nhóm spam (chỉ chủ bot).
+L9688  @guard() async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Quản lý Gemini dự phòng (chỉ chủ bot).
+L9798  def _merge_env_file(path: Path, text: str)  — Thêm các biến còn thiếu từ text vào path; không ghi đè giá trị đang có.
+L9841  def _remote_config_text()  — Tải config.env từ AISTV_ENV_URL hoặc repo private (dự phòng cho bản cũ).
+L9888  def _bootstrap_remote_config()  — Máy mới: tự nạp token/API key từ config.env dùng chung trên GitHub.
+L9909  def _valid_bot_token(value: str)  — Token BotFather: 123456789:AAH... — chan dan nham lenh khac vao prompt.
+L9914  def get_token()
+L9972  def _startup_github()
+L9983  async def post_init(app)
+L10027 def main()
 ```
 
 ## aistv_browser.py
@@ -936,13 +936,14 @@ L87    def _api(method: str, path: str, token: str, payload: Optional[dict]=None
 L113   def whoami(pat: str)  — Tên tài khoản của PAT (dùng để chọn repo đích).
 L126   def _repo_info(login: str, pat: str)
 L131   def ensure_repo(login: str, pat: str)  — Đảm bảo tài khoản có repo chứa workflow. Trả 'existing' hoặc 'forked'.
-L145   def enable_actions(login: str, pat: str)  — Bật Actions (fork của repo công khai mặc định bị tắt workflow).
-L153   def seal_secret(public_key_b64: str, value: str)  — Mã hoá secret theo chuẩn GitHub Actions (libsodium sealed box).
-L163   def set_secret(login: str, pat: str, name: str, value: str, public_key: Optional[dict]=None)  — Ghi một Repository Secret (bỏ qua nếu giá trị rỗng).
-L182   def dispatch_workflow(login: str, pat: str, windows: str, minutes: int, ref: str='main')  — Kích hoạt workflow_dispatch với tham số runner + thời gian chạy.
-L200   def latest_run_url(login: str, pat: str)  — URL của lần chạy mới nhất của workflow (rỗng nếu chưa thấy).
-L214   def create_vm(pat: str, tailscale_authkey: str, telegram_bot_token: str='', telegram_chat_id='', windows_version: str='',...  — Tạo máy ảo trên tài khoản của PAT; trả dict mô tả kết quả.
-L252   def main(argv=None)
+L145   def sync_fork(login: str, pat: str, branch: str='main')  — Đồng bộ fork đã có với repo nguồn trước khi chạy workflow.
+L160   def enable_actions(login: str, pat: str)  — Bật Actions (fork của repo công khai mặc định bị tắt workflow).
+L168   def seal_secret(public_key_b64: str, value: str)  — Mã hoá secret theo chuẩn GitHub Actions (libsodium sealed box).
+L178   def set_secret(login: str, pat: str, name: str, value: str, public_key: Optional[dict]=None)  — Ghi một Repository Secret (bỏ qua nếu giá trị rỗng).
+L197   def dispatch_workflow(login: str, pat: str, windows: str, minutes: int, ref: str='main')  — Kích hoạt workflow_dispatch với tham số runner + thời gian chạy.
+L215   def latest_run_url(login: str, pat: str)  — URL của lần chạy mới nhất của workflow (rỗng nếu chưa thấy).
+L229   def create_vm(pat: str, tailscale_authkey: str, telegram_bot_token: str='', telegram_chat_id='', windows_version: str='',...  — Tạo máy ảo trên tài khoản của PAT; trả dict mô tả kết quả.
+L269   def main(argv=None)
 ```
 
 ## aistv_voice.py
@@ -1408,11 +1409,17 @@ L27    class PruneRemindersTest
 _Kiểm tra helper tạo máy ảo (aistv_vm.py)._
 
 ```text
-L20    class InputTest
-  L21    def test_normalize_windows(self)
-  L27    def test_clamp_minutes(self)
-  L37    def test_validate_credentials(self)
-  L48    def test_mask_value(self)
-L57    @unittest.skipUnless(HAS_NACL, 'chưa cài pynacl') class SealedBoxTest
-  L58    def test_seal_roundtrip(self)
+L21    class InputTest
+  L22    def test_normalize_windows(self)
+  L28    def test_clamp_minutes(self)
+  L38    def test_validate_credentials(self)
+  L49    def test_mask_value(self)
+L57    class SyncForkTest
+  L58    def _sync(self, status, body)
+  L62    def test_updated(self)
+  L66    def test_already_up_to_date(self)
+  L69    def test_diverged(self)
+  L72    def test_other_errors_do_not_block(self)
+L78    @unittest.skipUnless(HAS_NACL, 'chưa cài pynacl') class SealedBoxTest
+  L79    def test_seal_roundtrip(self)
 ```

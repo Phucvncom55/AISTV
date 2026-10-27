@@ -4,6 +4,7 @@ import base64
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -51,6 +52,26 @@ class InputTest(unittest.TestCase):
         masked = vm.mask_value("ghp_" + "x" * 30)
         self.assertTrue(masked.startswith("ghp_"))
         self.assertNotIn("x" * 10, masked)
+
+
+class SyncForkTest(unittest.TestCase):
+    def _sync(self, status, body):
+        with mock.patch.object(vm, "_api", return_value=(status, body)):
+            return vm.sync_fork("someone", "ghp_" + "a" * 36)
+
+    def test_updated(self):
+        self.assertEqual(self._sync(200, {"merge_type": "fast-forward"}), "updated")
+        self.assertEqual(self._sync(200, {"merge_type": "merge"}), "updated")
+
+    def test_already_up_to_date(self):
+        self.assertEqual(self._sync(200, {"merge_type": "none"}), "up-to-date")
+
+    def test_diverged(self):
+        self.assertEqual(self._sync(409, {"message": "Merge conflict"}), "diverged")
+
+    def test_other_errors_do_not_block(self):
+        self.assertEqual(self._sync(500, {"message": "boom"}), "skipped")
+        self.assertEqual(self._sync(404, {"message": "Not a fork"}), "skipped")
 
 
 @unittest.skipUnless(HAS_NACL, "chưa cài pynacl")
