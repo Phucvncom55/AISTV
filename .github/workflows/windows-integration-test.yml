@@ -5,6 +5,11 @@
 #   TELEGRAM_BOT_TOKEN : Token của bot Telegram dùng để gửi DM riêng tư
 #   TELEGRAM_CHAT_ID   : Chat ID của chủ nhân (nhận thông tin đăng nhập qua DM)
 # GH_PAT không cần trong workflow này - nó do hệ thống bot/Telegram quản lý riêng.
+#
+# LƯU Ý ENCODING: các bước dùng `shell: powershell` (Windows PowerShell 5.1) phải là
+# ASCII thuần. Runner ghi script ra file .ps1 UTF-8 không BOM; PowerShell 5.1 đọc theo
+# ANSI/CP1252 nên chữ Việt bị vỡ dấu và có thể biến thành dấu nháy cong -> lỗi cú pháp.
+# Riêng bước gửi Telegram dùng `shell: pwsh` (PowerShell 7, đọc UTF-8) để giữ tiếng Việt.
 # ------------------------------------------------------------------
 
 name: Windows Environment Integration Test
@@ -44,13 +49,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Validate secrets
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TAILSCALE_AUTHKEY) {
+            throw 'TAILSCALE_AUTHKEY is missing. Add it in Settings > Secrets and variables > Actions (value starts with tskey-).'
+          }
+          if (-not $env:TELEGRAM_BOT_TOKEN -or -not $env:TELEGRAM_CHAT_ID) {
+            Write-Host 'WARNING: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set - login details will NOT be delivered.'
+          }
+          Write-Host 'Secrets OK.'
+
       - name: Configure System User & RDP Access
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $Username = 'trongphuc'
 
-          # Sinh mật khẩu ngẫu nhiên 36 ký tự (Base64 của 27 bytes), đảm bảo đủ độ phức tạp
+          # 36-char random password (Base64 of 27 bytes) with all character classes
           $RandomBytes = New-Object Byte[] 27
           [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($RandomBytes)
           $PasswordStr = [Convert]::ToBase64String($RandomBytes)
@@ -68,17 +85,17 @@ jobs:
               -Description 'Automated Integration Test Service' -AccountNeverExpires
           }
 
-          # Phân quyền Administrator + Remote Desktop Users
+          # Administrator + Remote Desktop Users
           Add-LocalGroupMember -Group 'Administrators' -Member $Username
           Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $Username
 
-          # Bật RDP và mở tường lửa cho kết nối qua Tailscale Mesh Network
+          # Enable RDP and open firewall for connections over the Tailscale mesh
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
           Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
-          # Tùy chọn tăng cường: chỉ cho phép RDP từ dải mạng Tailscale (100.64.0.0/10)
+          # Optional hardening: allow RDP only from the Tailscale range
           # Get-NetFirewallRule -DisplayGroup 'Remote Desktop' | Set-NetFirewallRule -RemoteAddress '100.64.0.0/10'
 
-          # Mask mật khẩu - tuyệt đối không lộ plaintext trên log công khai
+          # Mask the password - never print it in clear text on public logs
           Write-Output "::add-mask::$PasswordStr"
 
           [System.IO.File]::AppendAllText($env:GITHUB_ENV, "VM_USER=$Username`n")
@@ -89,10 +106,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if (-not $env:TAILSCALE_AUTHKEY) {
-            throw 'TAILSCALE_AUTHKEY chưa được cấu hình (Repository Secret). Dừng workflow.'
+            throw 'TAILSCALE_AUTHKEY is missing (Repository Secret). Aborting.'
           }
 
-          # Mask authkey khỏi log công khai
+          # Mask the auth key in public logs
           Write-Output "::add-mask::$env:TAILSCALE_AUTHKEY"
 
           [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -105,19 +122,19 @@ jobs:
 
           $tsHostname = 'stv-' + $env:COMPUTERNAME
           Write-Host "Connecting to Tailnet (hostname: $tsHostname, tag:vm-user)..."
-          # Authkey nên là pre-authenticated key có sẵn tag:vm-user (reusable); khi đó advertise-tags là dự phòng
-          # (tùy chọn: thêm --ephemeral để node tự xóa khỏi Tailnet khi runner bị hủy)
+          # Auth key should be a reusable pre-authenticated key tagged tag:vm-user;
+          # --advertise-tags is a fallback in case the key has no tag yet.
           & 'C:\Program Files\Tailscale\tailscale.exe' up --authkey=$env:TAILSCALE_AUTHKEY --hostname=$tsHostname --accept-routes --advertise-tags=tag:vm-user --timeout=30s
-          if ($LASTEXITCODE -ne 0) { throw 'tailscale up thất bại' }
+          if ($LASTEXITCODE -ne 0) { throw 'tailscale up failed' }
 
-          # Lấy IP Tailscale (retry tối đa 60 giây)
+          # Get the Tailscale IP (retry for up to 60 seconds)
           $tsIp = $null
           for ($i = 0; $i -lt 12; $i++) {
             $tsIp = (& 'C:\Program Files\Tailscale\tailscale.exe' ip -4 2>$null | Select-Object -First 1)
             if ($tsIp) { break }
             Start-Sleep -Seconds 5
           }
-          if (-not $tsIp) { throw 'Không lấy được Tailscale IP' }
+          if (-not $tsIp) { throw 'Could not get Tailscale IP' }
 
           $tsDns = 'n/a'
           try {
@@ -132,7 +149,7 @@ jobs:
 
       - name: Send Private Credentials via Telegram Bot
         if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           function Escape-Html([string]$s) {
@@ -165,8 +182,8 @@ jobs:
         if: ${{ env.TELEGRAM_BOT_TOKEN == '' || env.TELEGRAM_CHAT_ID == '' }}
         shell: powershell
         run: |
-          Write-Host 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID chưa được cấu hình trên Repository Secrets.'
-          Write-Host 'Thông tin đăng nhập sẽ KHÔNG được gửi qua bot - hãy cấu hình 2 secret trên để nhận DM riêng tư.'
+          Write-Host 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set in Repository Secrets.'
+          Write-Host 'Login details will NOT be sent. Configure both secrets to receive a private DM.'
 
       - name: Keep-Alive Integration Test Loop
         shell: powershell
@@ -177,14 +194,14 @@ jobs:
           if ($timeoutMinutes -lt 60)  { $timeoutMinutes = 60 }
           if ($timeoutMinutes -gt 360) { $timeoutMinutes = 360 }
 
-          Write-Host "Môi trường Integration Test đã sẵn sàng - thời gian chạy: $timeoutMinutes phút"
-          Write-Host "Kết nối RDP qua Tailscale: mstsc /v:$env:TS_IP (user: $env:VM_USER)"
+          Write-Host "Environment ready - run time: $timeoutMinutes minutes"
+          Write-Host "RDP over Tailscale: mstsc /v:$env:TS_IP (user: $env:VM_USER)"
 
           for ($i = 1; $i -le $timeoutMinutes; $i++) {
             Start-Sleep -Seconds 60
             ping -n 1 1.1.1.1 | Out-Null
             if ($i % 15 -eq 0) {
-              Write-Host "Heartbeat OK: $i / $timeoutMinutes phút"
+              Write-Host "Heartbeat OK: $i / $timeoutMinutes minutes"
             }
           }
-          Write-Host "Đã hết thời gian chạy ($timeoutMinutes phút). Runner sẽ bị hủy."
+          Write-Host "Run time finished ($timeoutMinutes minutes). Runner will be destroyed."
