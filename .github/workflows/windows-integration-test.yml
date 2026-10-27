@@ -1,0 +1,190 @@
+# AI STV - Windows Environment Integration Test
+# ------------------------------------------------------------------
+# Secrets cần cấu hình trên Repository (Settings > Secrets and variables > Actions):
+#   TAILSCALE_AUTHKEY  : Tailscale pre-authenticated key (REUSABLE), gắn sẵn tag:vm-user
+#   TELEGRAM_BOT_TOKEN : Token của bot Telegram dùng để gửi DM riêng tư
+#   TELEGRAM_CHAT_ID   : Chat ID của chủ nhân (nhận thông tin đăng nhập qua DM)
+# GH_PAT không cần trong workflow này - nó do hệ thống bot/Telegram quản lý riêng.
+# ------------------------------------------------------------------
+
+name: Windows Environment Integration Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows_version:
+        description: 'Chọn phiên bản Windows runner'
+        required: true
+        default: 'windows-latest'
+        type: choice
+        options:
+          - windows-latest
+          - windows-2022
+          - windows-2025
+      timeout_minutes:
+        description: 'Thời gian chạy test (phút), tối thiểu 60 - tối đa 330'
+        required: true
+        default: 330
+        type: number
+
+jobs:
+  integration-test:
+    name: Integration Test
+    runs-on: ${{ github.event.inputs.windows_version || 'windows-latest' }}
+    timeout-minutes: 350
+
+    env:
+      # Cho phép tùy chỉnh thời gian chạy qua biến môi trường (fallback khi không dùng workflow_dispatch)
+      TIMEOUT_MINUTES: ${{ github.event.inputs.timeout_minutes || 330 }}
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure System User & RDP Access
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Username = 'trongphuc'
+
+          # Sinh mật khẩu ngẫu nhiên 36 ký tự (Base64 của 27 bytes), đảm bảo đủ độ phức tạp
+          $RandomBytes = New-Object Byte[] 27
+          [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($RandomBytes)
+          $PasswordStr = [Convert]::ToBase64String($RandomBytes)
+          if ($PasswordStr -notmatch '[A-Z]') { $PasswordStr += 'A' }
+          if ($PasswordStr -notmatch '[a-z]') { $PasswordStr += 'a' }
+          if ($PasswordStr -notmatch '[0-9]') { $PasswordStr += '1' }
+          if ($PasswordStr -notmatch '[^A-Za-z0-9]') { $PasswordStr += '!' }
+
+          $Password = ConvertTo-SecureString $PasswordStr -AsPlainText -Force
+
+          if (Get-LocalUser -Name $Username -ErrorAction SilentlyContinue) {
+            Set-LocalUser -Name $Username -Password $Password
+          } else {
+            New-LocalUser -Name $Username -Password $Password -FullName 'AI STV Test Runner' `
+              -Description 'Automated Integration Test Service' -AccountNeverExpires
+          }
+
+          # Phân quyền Administrator + Remote Desktop Users
+          Add-LocalGroupMember -Group 'Administrators' -Member $Username
+          Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $Username
+
+          # Bật RDP và mở tường lửa cho kết nối qua Tailscale Mesh Network
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+          # Tùy chọn tăng cường: chỉ cho phép RDP từ dải mạng Tailscale (100.64.0.0/10)
+          # Get-NetFirewallRule -DisplayGroup 'Remote Desktop' | Set-NetFirewallRule -RemoteAddress '100.64.0.0/10'
+
+          # Mask mật khẩu - tuyệt đối không lộ plaintext trên log công khai
+          Write-Output "::add-mask::$PasswordStr"
+
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "VM_USER=$Username`n")
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "VM_PASS=$PasswordStr`n")
+
+      - name: Install & Connect Tailscale
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TAILSCALE_AUTHKEY) {
+            throw 'TAILSCALE_AUTHKEY chưa được cấu hình (Repository Secret). Dừng workflow.'
+          }
+
+          # Mask authkey khỏi log công khai
+          Write-Output "::add-mask::$env:TAILSCALE_AUTHKEY"
+
+          [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe' -OutFile "$env:TEMP\tailscale-setup.exe"
+
+          Write-Host 'Installing Tailscale...'
+          Start-Process -FilePath "$env:TEMP\tailscale-setup.exe" -ArgumentList '/quiet' -Wait
+          Start-Sleep -Seconds 5
+          $env:Path += ';C:\Program Files\Tailscale'
+
+          $tsHostname = 'stv-' + $env:COMPUTERNAME
+          Write-Host "Connecting to Tailnet (hostname: $tsHostname, tag:vm-user)..."
+          # Authkey nên là pre-authenticated key có sẵn tag:vm-user (reusable); khi đó advertise-tags là dự phòng
+          # (tùy chọn: thêm --ephemeral để node tự xóa khỏi Tailnet khi runner bị hủy)
+          & 'C:\Program Files\Tailscale\tailscale.exe' up --authkey=$env:TAILSCALE_AUTHKEY --hostname=$tsHostname --accept-routes --advertise-tags=tag:vm-user --timeout=30s
+          if ($LASTEXITCODE -ne 0) { throw 'tailscale up thất bại' }
+
+          # Lấy IP Tailscale (retry tối đa 60 giây)
+          $tsIp = $null
+          for ($i = 0; $i -lt 12; $i++) {
+            $tsIp = (& 'C:\Program Files\Tailscale\tailscale.exe' ip -4 2>$null | Select-Object -First 1)
+            if ($tsIp) { break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $tsIp) { throw 'Không lấy được Tailscale IP' }
+
+          $tsDns = 'n/a'
+          try {
+            $tsStatus = (& 'C:\Program Files\Tailscale\tailscale.exe' status --self --json) -join "`n"
+            $tsDns = (($tsStatus | ConvertFrom-Json).Self.DNSName)
+          } catch {}
+
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TS_IP=$tsIp`n")
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TS_DNS=$tsDns`n")
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "TS_HOST=$tsHostname`n")
+          Write-Host "Tailscale connected: $tsIp"
+
+      - name: Send Private Credentials via Telegram Bot
+        if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Escape-Html([string]$s) {
+            return $s.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;')
+          }
+
+          $timeoutMin = [int]$env:TIMEOUT_MINUTES
+          if ($timeoutMin -lt 60) { $timeoutMin = 60 }
+          if ($timeoutMin -gt 330) { $timeoutMin = 330 }
+          $deadline = (Get-Date).ToUniversalTime().AddMinutes($timeoutMin).ToString('yyyy-MM-dd HH:mm') + ' UTC'
+
+          $lines = @(
+            '<b>AI STV — Windows Integration Test sẵn sàng</b>',
+            ('Hostname: <code>' + (Escape-Html $env:TS_HOST) + '</code>'),
+            ('Tailscale IP: <code>' + (Escape-Html $env:TS_IP) + '</code>'),
+            ('Tailscale DNS: <code>' + (Escape-Html $env:TS_DNS) + '</code>'),
+            ('Username: <code>' + (Escape-Html $env:VM_USER) + '</code>'),
+            ('Password: <code>' + (Escape-Html $env:VM_PASS) + '</code>'),
+            ('Session Key: <code>' + (Escape-Html $env:TAILSCALE_AUTHKEY) + '</code>'),
+            ('RDP: <code>mstsc /v:' + (Escape-Html $env:TS_IP) + '</code>'),
+            ('Thời gian sống: ' + $timeoutMin + ' phút (đến ' + $deadline + ')')
+          )
+          $text = $lines -join "`n"
+
+          $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $text; parse_mode = 'HTML' } | ConvertTo-Json -Compress
+          Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$($env:TELEGRAM_BOT_TOKEN)/sendMessage" -ContentType 'application/json; charset=utf-8' -Body $body | Out-Null
+          Write-Host 'Đã gửi thông tin kết nối qua Telegram DM (chỉ chủ nhân xem được).'
+
+      - name: Skip Telegram Notification (secrets missing)
+        if: ${{ env.TELEGRAM_BOT_TOKEN == '' || env.TELEGRAM_CHAT_ID == '' }}
+        shell: powershell
+        run: |
+          Write-Host 'TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID chưa được cấu hình trên Repository Secrets.'
+          Write-Host 'Thông tin đăng nhập sẽ KHÔNG được gửi qua bot - hãy cấu hình 2 secret trên để nhận DM riêng tư.'
+
+      - name: Keep-Alive Integration Test Loop
+        shell: powershell
+        timeout-minutes: 340
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $timeoutMinutes = [int]$env:TIMEOUT_MINUTES
+          if ($timeoutMinutes -lt 60)  { $timeoutMinutes = 60 }
+          if ($timeoutMinutes -gt 330) { $timeoutMinutes = 330 }
+
+          Write-Host "Môi trường Integration Test đã sẵn sàng - thời gian chạy: $timeoutMinutes phút"
+          Write-Host "Kết nối RDP qua Tailscale: mstsc /v:$env:TS_IP (user: $env:VM_USER)"
+
+          for ($i = 1; $i -le $timeoutMinutes; $i++) {
+            Start-Sleep -Seconds 60
+            ping -n 1 1.1.1.1 | Out-Null
+            if ($i % 15 -eq 0) {
+              Write-Host "Heartbeat OK: $i / $timeoutMinutes phút"
+            }
+          }
+          Write-Host "Đã hết thời gian chạy ($timeoutMinutes phút). Runner sẽ bị hủy."
