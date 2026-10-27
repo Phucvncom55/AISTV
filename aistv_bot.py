@@ -1230,6 +1230,63 @@ export default tool({
 })
 '''
 
+# Tool dựng lời giải dài thành ảnh từng trang A4 (có số trang) và gửi Telegram.
+PAGES_TOOL_JS = r'''import { tool } from "@opencode-ai/plugin"
+
+export default tool({
+  description: [
+    "Render a long or formula-heavy answer as paginated A4 page images and send them to Telegram.",
+    "Use it when the solution is longer than about 25 lines, or when fractions, systems, matrices, vectors",
+    "or many symbols would be hard to read as plain chat text. Pass the complete solution in markdown",
+    "(Vietnamese, Unicode math is fine). The bot splits it into numbered pages ('Trang 1/N'), sends the",
+    "images, and then you only write 1-2 short lines telling the user the pages were sent.",
+    "Do NOT paste the whole solution again in chat afterwards.",
+  ].join(" "),
+  args: {
+    text: tool.schema.string()
+      .describe("Full solution/explanation in markdown, including every step and conclusion"),
+    title: tool.schema.string().optional()
+      .describe("Short title printed on every page, e.g. 'Hình học 9 — Câu 3'"),
+    format: tool.schema.string().optional()
+      .describe("'photo' (default, easy to swipe/zoom in chat) or 'document' (sharpest PNG for dense formulas)"),
+  },
+  async execute(args) {
+    const url = process.env.AISTV_ASK_URL
+    const token = process.env.AISTV_TOOL_TOKEN || ""
+    const chat = process.env.AISTV_CHAT_ID || ""
+    if (!url) {
+      return "render_pages is unavailable. Answer in chat as usual."
+    }
+    const text = String(args.text || "").trim()
+    if (!text) {
+      return "render_pages needs the full solution text."
+    }
+    const fmt = String(args.format || "photo").toLowerCase() === "document" ? "document" : "photo"
+    let res, data
+    try {
+      res = await fetch(url.replace(/\/$/, "") + "/pages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-aistv-token": token },
+        body: JSON.stringify({
+          chat_id: Number(chat) || 0,
+          text,
+          title: String(args.title || ""),
+          format: fmt,
+        }),
+      })
+      data = await res.json()
+    } catch (e) {
+      return "render_pages failed: " + e + ". Answer in chat as usual."
+    }
+    if (!res.ok || !data.ok) {
+      return "render_pages error: " + (data.error || ("HTTP " + res.status)) +
+        ". Answer in chat as usual."
+    }
+    return "Đã gửi " + data.count + " trang ảnh cho người dùng. Giờ chỉ nhắn 1-2 dòng ngắn, không dán lại lời giải."
+  },
+})
+'''
+
 # Tool hỏi lại Gemini (mắt + tai) về ảnh/video vừa gửi — DeepSeek vẫn là người trả lời chính.
 ASK_GEMINI_TOOL_JS = r'''import { tool } from "@opencode-ai/plugin"
 
@@ -1369,6 +1426,7 @@ def bootstrap_workspace() -> None:
         SKILLS_DIR / "nghien-cuu" / "SKILL.md": SKILL_RESEARCH,
         WORKSPACE / ".opencode" / "tools" / "ask_user.js": ASK_TOOL_JS,
         WORKSPACE / ".opencode" / "tools" / "generate_image.js": IMAGE_TOOL_JS,
+        WORKSPACE / ".opencode" / "tools" / "render_pages.js": PAGES_TOOL_JS,
         WORKSPACE / ".opencode" / "tools" / "ask_gemini.js": ASK_GEMINI_TOOL_JS,
         WORKSPACE / ".opencode" / "tools" / "github_login.js": GITHUB_LOGIN_TOOL_JS,
     }
@@ -1945,7 +2003,7 @@ class _AskHandler(BaseHTTPRequestHandler):
 
     def _handle_post(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
-        if path not in ("/ask", "/image", "/vision", "/github-login", "/github-login-status"):
+        if path not in ("/ask", "/image", "/pages", "/vision", "/github-login", "/github-login-status"):
             self._json(404, {"error": "not found"})
             return
         got = self.headers.get("x-aistv-token", "")
@@ -1990,6 +2048,27 @@ class _AskHandler(BaseHTTPRequestHandler):
                 return
             ok, answer, detail = _vision_followup(source, question, kind)
             self._json(200, {"ok": ok, "answer": answer, "error": detail})
+            return
+
+        if path == "/pages":                 # agent gọi tool render_pages
+            text = str(data.get("text") or "").strip()
+            if not text or chat_id <= 0:
+                self._json(400, {"error": "missing text/chat_id"})
+                return
+            if len(text) > 120_000:
+                self._json(200, {"ok": False, "error": "nội dung quá dài (giới hạn 120.000 ký tự)"})
+                return
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    _tool_pages_job(chat_id, text,
+                                    str(data.get("title") or "").strip(),
+                                    str(data.get("format") or "photo").strip().lower()),
+                    BOT_LOOP)
+                result = fut.result(timeout=180)
+            except Exception as e:
+                self._json(500, {"error": oneline(_redact_secrets(str(e)), 400)})
+                return
+            self._json(200, result)
             return
 
         if path == "/image":                 # agent gọi tool generate_image
@@ -2674,6 +2753,10 @@ MATH_STYLE_MD = """## QUY TẮC TRÌNH BÀY BÀI GIẢI TOÁN / LÝ / HOÁ / SIN
    - **Xét / Ta có:** nêu giả thiết hoặc tính chất đang áp dụng.
    - **Mà / Suy ra:** lập luận logic trung gian.
    - **Kết luận:** khẳng định điều cần chứng minh.
+5. **Bài dài → ảnh từng trang:** nếu lời giải dài hơn ~25 dòng, có nhiều phân số lồng nhau,
+   hệ phương trình, ma trận hoặc quá nhiều ký hiệu khó đọc trên khung chat, hãy gọi tool
+   `render_pages` với TOÀN BỘ lời giải (markdown, tiếng Việt) để bot gửi ảnh A4 từng trang
+   có ghi "Trang 1/N". Sau đó chỉ nhắn 1–2 dòng xác nhận, KHÔNG dán lại lời giải vào chat.
 Ví dụ mẫu:
 **Câu a — Tứ giác ADFE là hình gì? Vì sao?**
 * **Xét** tứ giác ADFE, ta có:
@@ -2947,6 +3030,7 @@ _TOOL_INFO = {
     "task": ("🤖", "Giao việc phụ"),
     "todowrite": ("📋", "Cập nhật kế hoạch"),
     "ask_user": ("❓", "Hỏi bạn"),
+    "render_pages": ("📄", "Dựng ảnh trang"),
 }
 
 
@@ -6357,6 +6441,104 @@ async def send_generated_image(chat_id: int, data: dict) -> None:
             await BOT_OBJ.send_document(chat_id, document=f, caption=caption, parse_mode="HTML")
 
 
+# ── Lời giải dài → các trang ảnh A4 có số trang ─────────────────────
+def _math_for_pages(m, dollar: bool = False) -> str:
+    raw = m.group(1) if m.group(1) is not None else m.group(2)
+    if dollar and m.group(1) is not None and not _looks_math(raw):
+        return m.group(0)
+    return latex_to_unicode(raw)
+
+
+def pages_plain_text(md: str) -> str:
+    """Markdown cho ảnh: đổi công thức sang Unicode, giữ nguyên code block."""
+    stash: list = []
+
+    def hold(s: str) -> str:
+        stash.append(s)
+        return f"\x00{len(stash) - 1}\x00"
+
+    text = _FENCE.sub(lambda m: hold(m.group(0)), str(md or ""))
+    text = _ICODE.sub(lambda m: hold(m.group(0)), text)
+    text = _MATH_BLOCK.sub(_math_for_pages, text)
+    text = _MATH_INLINE.sub(lambda m: _math_for_pages(m, dollar=True), text)
+    return re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], text)
+
+
+def render_pages_ready(md: str, title: str = "") -> dict:
+    import aistv_image
+    return aistv_image.render_text_pages(pages_plain_text(md), title=title)
+
+
+async def _send_page_images(chat_id: int, paths: list, title: str,
+                            as_document: bool = False) -> None:
+    from telegram import InputMediaDocument, InputMediaPhoto
+    total = len(paths)
+    head = esc(_clip(title, 160))
+    for start in range(0, total, 10):
+        chunk = paths[start:start + 10]
+        handles, media = [], []
+        try:
+            for offset, path in enumerate(chunk):
+                idx = start + offset + 1
+                caption = f"📄 <b>Trang {idx}/{total}</b>"
+                if idx == 1 and head:
+                    caption += "\n" + head
+                fh = path.open("rb")
+                handles.append(fh)
+                cls = InputMediaDocument if as_document else InputMediaPhoto
+                extra = {"filename": path.name} if as_document else {}
+                media.append(cls(fh, caption=caption, parse_mode=HTML, **extra))
+            await BOT_OBJ.send_media_group(chat_id, media)
+        except Exception as e:
+            log.warning("Gửi nhóm trang lỗi (%s) — gửi từng ảnh", oneline(str(e), 160))
+            for fh in handles:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+            handles = []
+            for offset, path in enumerate(chunk):
+                idx = start + offset + 1
+                caption = f"📄 <b>Trang {idx}/{total}</b>"
+                try:
+                    with path.open("rb") as fh:
+                        if as_document:
+                            await BOT_OBJ.send_document(chat_id, document=fh, filename=path.name,
+                                                        caption=caption, parse_mode=HTML)
+                        else:
+                            await BOT_OBJ.send_photo(chat_id, photo=fh, caption=caption,
+                                                     parse_mode=HTML)
+                except Exception as e2:
+                    log.warning("Gửi trang %s lỗi: %s", idx, oneline(str(e2), 160))
+        finally:
+            for fh in handles:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
+
+async def _tool_pages_job(chat_id: int, md: str, title: str = "", fmt: str = "photo") -> dict:
+    if BOT_OBJ is None:
+        return {"ok": False, "error": "bot chưa sẵn sàng"}
+    try:
+        result = await asyncio.to_thread(render_pages_ready, md, title)
+    except Exception as e:
+        log.warning("render_pages lỗi: %s", oneline(str(e), 200))
+        return {"ok": False,
+                "error": oneline(_redact_secrets(str(e)), 400) or "không dựng được ảnh"}
+    paths = [Path(p) for p in (result.get("pages") or []) if Path(p).is_file()]
+    if not paths:
+        return {"ok": False, "error": "không dựng được trang nào"}
+    try:
+        await _send_page_images(chat_id, paths, str(result.get("title") or title),
+                                fmt == "document")
+    except Exception as e:
+        log.warning("Gửi trang ảnh lỗi: %s", oneline(str(e), 200))
+        return {"ok": False, "error": oneline(str(e), 300)}
+    return {"ok": True, "count": len(paths)}
+
+
 async def _tool_image_job(chat_id: int, prompt: str, style: str = "",
                           aspect: str = "1:1", kind: str = "image",
                           model: str = "") -> None:
@@ -6639,6 +6821,38 @@ async def cmd_mindmap(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Dùng: <code>/mindmap Kế hoạch học Python</code>", parse_mode=HTML)
         return
     await _image_generate_reply(update, topic, "", "1:1", "mindmap")
+
+
+@guard()
+async def cmd_pages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dựng tin nhắn dài (hoặc nội dung gõ kèm) thành ảnh từng trang A4."""
+    msg = update.effective_message
+    if msg is None:
+        return
+    text = " ".join(context.args or []).strip()
+    reply = msg.reply_to_message
+    if not text and reply is not None:
+        text = (reply.text or reply.caption or "").strip()
+    if not text:
+        await msg.reply_text(
+            "Dùng: trả lời tin nhắn dài rồi gửi <code>/pages</code>, hoặc "
+            "<code>/pages &lt;nội dung&gt;</code> — bot dựng thành ảnh từng trang có số trang.",
+            parse_mode=HTML)
+        return
+    if len(text) > 120_000:
+        await msg.reply_text("Nội dung quá dài (giới hạn 120.000 ký tự).", parse_mode=HTML)
+        return
+    status = await msg.reply_text("📄 <i>Đang dựng thành ảnh từng trang…</i>", parse_mode=HTML)
+    title = oneline(next((ln.strip("#*_•- ") for ln in text.splitlines() if ln.strip()), ""), 70)
+    res = await _tool_pages_job(msg.chat_id, text, title, "photo")
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    if not res.get("ok"):
+        await msg.reply_text(
+            f"⚠️ Không dựng được ảnh: {esc(res.get('error') or 'lỗi không rõ')}",
+            parse_mode=HTML)
 
 
 @guard()
@@ -8283,7 +8497,8 @@ COMMANDS = [
     ("remind", "Hẹn nhắc việc"), ("task", "Việc tự chạy theo lịch"), ("reminders", "Danh sách nhắc việc"),
     ("unremind", "Xoá nhắc việc"), ("watch", "Theo dõi repo/log"), ("cloud", "Trí nhớ đám mây"),
     ("image", "Tạo ảnh / sơ đồ tư duy"), ("see", "Đọc ảnh bằng Gemini"),
-    ("mindmap", "Vẽ sơ đồ tư duy"), ("video", "Xem video bằng Gemini"),
+    ("mindmap", "Vẽ sơ đồ tư duy"), ("pages", "Lời giải dài → ảnh từng trang"),
+    ("video", "Xem video bằng Gemini"),
     ("summary", "Tóm tắt hội thoại vào trí nhớ"), ("email", "Đọc / gửi email"),
     ("github", "Kết nối / quản lý GitHub"), ("update", "Cập nhật bot từ GitHub"),
     ("push", "Đẩy code lên GitHub (đồng bộ sang Windows)"),
@@ -8562,6 +8777,7 @@ def main() -> None:
                       (["image", "img", "draw", "ve", "taoanh"], cmd_image),
                       (["see", "vision", "docanh"], cmd_see),
                       (["mindmap", "sodotuduy"], cmd_mindmap),
+                      (["pages", "trang"], cmd_pages),
                       (["video"], cmd_video),
                       (["summary", "summarize"], cmd_summary), (["email", "mail"], cmd_email),
                       (["github"], cmd_github), (["update"], cmd_update), (["push"], cmd_push),

@@ -1394,12 +1394,473 @@ def make_chart(subject: str, out: str = "") -> dict:
             "series": outline["series"], "bytes": path.stat().st_size}
 
 
+# ════════════════════════════════════════════════════════════════════
+# DỰNG BÀI GIẢI DÀI THÀNH CÁC TRANG ẢNH A4 (Toán / Lý / Hoá / Sinh)
+# ════════════════════════════════════════════════════════════════════
+PAGE_W, PAGE_H = 1240, 1754       # A4 @150 DPI
+PAGE_M = 92                       # lề trái/phải
+PAGE_TOP = 150                    # bắt đầu phần thân
+PAGE_BOTTOM = 120                 # chừa chỗ số trang
+PAGE_MAX = 20
+PAPER = "#FCFBF6"
+PAGE_INK = "#111827"
+PAGE_MUTED = "#64748B"
+PAGE_ACCENT = "#1D4ED8"
+PAGE_RULE = "#E2E8F0"
+PAGE_CODE_BG = "#EEF2F7"
+PAGE_BOX = "#EAE6DA"
+
+_PAGE_FONTS: dict = {}
+_PAGE_FILES: dict = {}
+_PAGE_CELLS: dict = {}
+_PAGE_NOTDEF: dict = {}
+
+
+def _page_font_files(bold: bool, mono: bool = False) -> list:
+    key = "mono" if mono else ("bold" if bold else "regular")
+    if key in _PAGE_FILES:
+        return _PAGE_FILES[key]
+    primary = FONT_DIR / ("NotoSans-Bold.ttf" if bold else "NotoSans-Regular.ttf")
+    paths = []
+    if mono:
+        paths += [Path("C:/Windows/Fonts/consola.ttf"),
+                  Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")]
+    paths.append(primary)
+    paths += [Path("C:/Windows/Fonts/seguisym.ttf"),          # ký hiệu toán trên Windows
+              Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+              Path("/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf"),
+              Path("/usr/share/fonts/truetype/noto/NotoSansMath-Regular.ttf"),
+              Path("C:/Windows/Fonts/cambria.ttc"),
+              Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf")]
+    _PAGE_FILES[key] = [p for p in paths if p.is_file()]
+    return _PAGE_FILES[key]
+
+
+def _page_ttf(path: Path, size: int):
+    key = (str(path), size)
+    if key in _PAGE_FONTS:
+        return _PAGE_FONTS[key]
+    try:
+        from PIL import ImageFont
+        font = ImageFont.truetype(str(path), size)
+    except Exception:
+        font = None
+    _PAGE_FONTS[key] = font
+    return font
+
+
+def _page_glyph_ok(font, ch: str) -> bool:
+    """Glyph có thật hay chỉ là ô vuông .notdef?"""
+    try:
+        key = (getattr(font, "path", ""), getattr(font, "size", 0))
+        notdef = _PAGE_NOTDEF.get(key)
+        if notdef is None:
+            notdef = bytes(font.getmask("\u0378"))
+            _PAGE_NOTDEF[key] = notdef
+        return bytes(font.getmask(ch)) != notdef
+    except Exception:
+        return True
+
+
+def _page_cell(ch: str, size: int, bold: bool = False, mono: bool = False):
+    key = (ch, size, bold, mono)
+    if key in _PAGE_CELLS:
+        return _PAGE_CELLS[key]
+    font = None
+    files = _page_font_files(bold, mono)
+    if ch.isspace() and files:
+        font = _page_ttf(files[0], size)
+    else:
+        for path in files:
+            trial = _page_ttf(path, size)
+            if trial is not None and _page_glyph_ok(trial, ch):
+                font = trial
+                break
+    if font is None:
+        try:
+            from PIL import ImageFont
+            font = ImageFont.load_default()
+        except Exception:
+            raise ImageError("cần cài Pillow: pip install pillow") from None
+    try:
+        width = float(font.getlength(ch))
+    except Exception:
+        width = float(size) * 0.5
+    _PAGE_CELLS[key] = (font, width)
+    return font, width
+
+
+def _page_measure(text: str, size: int, bold: bool = False, mono: bool = False) -> float:
+    return sum(_page_cell(ch, size, bold, mono)[1] for ch in str(text))
+
+
+def _page_segments(text: str, size: int, bold: bool = False, mono: bool = False):
+    out = []
+    for ch in str(text):
+        font = _page_cell(ch, size, bold, mono)[0]
+        if out and out[-1][1] is font:
+            out[-1][0] += ch
+        else:
+            out.append([ch, font])
+    return [(s, f) for s, f in out]
+
+
+def _page_draw_text(draw, x: float, y: float, text: str, size: int,
+                    bold: bool = False, color: str = PAGE_INK,
+                    mono: bool = False) -> float:
+    for seg, font in _page_segments(text, size, bold, mono):
+        draw.text((x, y), seg, font=font, fill=color)
+        x += font.getlength(seg)
+    return x
+
+
+def _page_ellipsis(text: str, size: int, bold: bool, avail: float) -> str:
+    text = str(text)
+    if _page_measure(text, size, bold) <= avail:
+        return text
+    while text and _page_measure(text + "…", size, bold) > avail:
+        text = text[:-1]
+    return text + "…"
+
+
+_PAGE_INLINE = re.compile(
+    r"\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__"
+    r"|`([^`\n]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)")
+_PAGE_TAGS = re.compile(
+    r"</?(?:b|strong|i|em|u|s|code|pre|a|span|blockquote|tg-spoiler)(?:\s[^>]*)?>", re.I)
+
+
+def _page_clean(text: str) -> str:
+    text = _PAGE_TAGS.sub("", str(text or ""))
+    text = (text.replace("&lt;", "<").replace("&gt;", ">")
+            .replace("&quot;", '"').replace("&#39;", "'").replace("&amp;", "&"))
+    text = re.sub(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])", r"\1", text)
+    text = re.sub(r"(?<![\w_])_(?=\S)([^_\n]+?)(?<=\S)_(?![\w_])", r"\1", text)
+    return text
+
+
+def _page_runs(text: str, bold: bool = False, color: str = PAGE_INK,
+               mono: bool = False) -> list:
+    text = _page_clean(text)
+    runs, pos = [], 0
+    for m in _PAGE_INLINE.finditer(text):
+        if m.start() > pos:
+            runs.append((text[pos:m.start()], bold, color, mono))
+        if m.group(1) is not None or m.group(2) is not None:
+            runs.append((m.group(1) or m.group(2), True, color, False))
+        elif m.group(3) is not None:
+            runs.append((m.group(3), bold, PAGE_ACCENT, True))
+        else:
+            runs.append((m.group(4), bold, PAGE_ACCENT, False))
+        pos = m.end()
+    if pos < len(text):
+        runs.append((text[pos:], bold, color, mono))
+    return runs or [(text, bold, color, mono)]
+
+
+def _page_tokens(runs: list) -> list:
+    tokens, space = [], False
+    for text, bold, color, mono in runs:
+        for piece in re.findall(r"\s+|\S+", str(text)):
+            if piece.isspace():
+                space = True
+                continue
+            tokens.append({"text": piece, "bold": bool(bold), "color": color,
+                           "mono": bool(mono), "space": space})
+            space = False
+    return tokens
+
+
+def _page_wrap(runs: list, size: int, avail: float, rest_indent: float = 0) -> list:
+    tokens = _page_tokens(runs)
+    lines, cur, cur_w, indent = [], [], 0.0, 0.0
+    space_w = _page_measure(" ", size)
+
+    def push():
+        nonlocal cur, cur_w, indent
+        if cur:
+            lines.append({"tokens": cur, "indent": indent})
+        cur, cur_w, indent = [], 0.0, rest_indent
+
+    for tok in tokens:
+        w = _page_measure(tok["text"], size, tok["bold"], tok["mono"])
+        lead = space_w if (cur and tok["space"]) else 0.0
+        if cur and cur_w + lead + w > avail - indent + 0.5:
+            push()
+            lead = 0.0
+        if not cur and w > avail - indent:
+            piece, piece_w = "", 0.0
+            for ch in tok["text"]:
+                cw = _page_measure(ch, size, tok["bold"], tok["mono"])
+                if piece and piece_w + cw > avail - indent:
+                    cur = [dict(tok, text=piece)]
+                    cur_w = piece_w
+                    push()
+                    piece, piece_w = "", 0.0
+                piece += ch
+                piece_w += cw
+            if piece:
+                cur = [dict(tok, text=piece)]
+                cur_w = piece_w
+            continue
+        cur.append(tok)
+        cur_w += lead + w
+    push()
+    return lines or [{"tokens": [], "indent": 0}]
+
+
+def _page_hard_lines(text: str, size: int, mono: bool, avail: float) -> list:
+    out, cur = [], ""
+    for ch in str(text):
+        if cur and _page_measure(cur + ch, size, False, mono) > avail:
+            out.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    out.append(cur or " ")
+    return out
+
+
+def _page_blocks(text: str) -> list:
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks, i = [], 0
+    while i < len(lines):
+        raw = lines[i].rstrip()
+        s = raw.strip()
+        if s.startswith("```"):
+            code = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code.append(lines[i].rstrip())
+                i += 1
+            i += 1
+            blocks.append({"kind": "code", "lines": code or [""]})
+            continue
+        if not s:
+            blocks.append({"kind": "space"})
+            i += 1
+            continue
+        if re.fullmatch(r"(?:[-*_]\s*){3,}", s):
+            blocks.append({"kind": "rule"})
+            i += 1
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", s)
+        if m:
+            blocks.append({"kind": "h1" if len(m.group(1)) <= 2 else "h2",
+                           "text": m.group(2)})
+            i += 1
+            continue
+        if s.startswith(">"):
+            blocks.append({"kind": "quote", "text": s.lstrip("> ").strip()})
+            i += 1
+            continue
+        if s.startswith("|") and s.endswith("|") and s.count("|") >= 2:
+            rows = []
+            while i < len(lines):
+                row = lines[i].strip()
+                if not (row.startswith("|") and row.endswith("|")):
+                    break
+                cells = [c.strip() for c in row.strip("|").split("|")]
+                if not all(re.fullmatch(r":?-{2,}:?", c) for c in cells):
+                    rows.append(cells)
+                i += 1
+            for ri, cells in enumerate(rows):
+                blocks.append({"kind": "table", "header": ri == 0,
+                               "text": "   │   ".join(cells)})
+            continue
+        m = re.match(r"^(\s*)[-*+•]\s+(.*)$", raw)
+        if m:
+            blocks.append({"kind": "bullet", "text": m.group(2),
+                           "level": min(len(m.group(1).expandtabs(4)) // 2, 3)})
+            i += 1
+            continue
+        m = re.match(r"^(\s*)(\d{1,3})[.)]\s+(.*)$", raw)
+        if m:
+            blocks.append({"kind": "num", "text": m.group(3), "num": m.group(2),
+                           "level": min(len(m.group(1).expandtabs(4)) // 2, 3)})
+            i += 1
+            continue
+        if s.startswith("**") and s.endswith("**") and s.count("**") == 2 and len(s) > 6:
+            blocks.append({"kind": "h3", "text": s[2:-2]})
+            i += 1
+            continue
+        blocks.append({"kind": "p", "text": s})
+        i += 1
+    return blocks
+
+
+def _page_visual(blocks: list) -> list:
+    avail = PAGE_W - 2 * PAGE_M
+    vis = []
+
+    def add(runs, size, gap, indent, rest, kind="p", color=PAGE_INK):
+        for j, ln in enumerate(_page_wrap(runs, size, avail, rest)):
+            vis.append({"kind": kind, "tokens": ln["tokens"],
+                        "indent": indent + ln["indent"], "size": size,
+                        "height": size + 16, "gap": gap if j == 0 else 0,
+                        "color": color})
+
+    for b in blocks:
+        k = b["kind"]
+        if k == "space":
+            if vis:
+                vis[-1]["gap"] = min(vis[-1]["gap"] + 16, 44)
+        elif k == "rule":
+            vis.append({"kind": "rule", "height": 24, "gap": 18})
+        elif k == "code":
+            for j, ln in enumerate(b["lines"]):
+                for ci, chunk in enumerate(_page_hard_lines(ln, 24, True, avail - 24)):
+                    vis.append({"kind": "code", "size": 24, "height": 38, "indent": 10,
+                                "gap": 14 if (j == 0 and ci == 0) else 0,
+                                "color": PAGE_INK,
+                                "tokens": [{"text": chunk, "bold": False, "mono": True,
+                                            "color": PAGE_INK, "space": False}]})
+        elif k == "h1":
+            add(_page_runs(b["text"], True, PAGE_ACCENT), 40, 30, 0, 0, "h1")
+        elif k == "h2":
+            add(_page_runs(b["text"], True, PAGE_ACCENT), 36, 26, 0, 0, "h2")
+        elif k == "h3":
+            add(_page_runs(b["text"], True), 33, 22, 0, 0, "h3")
+        elif k == "quote":
+            add(_page_runs(b["text"], False, PAGE_MUTED), 29, 10, 20, 20, "quote")
+        elif k == "bullet":
+            ind = 28 * b["level"]
+            prefix = "• "
+            add([(prefix, True, PAGE_ACCENT, False)] + _page_runs(b["text"]),
+                30, 6, ind, ind + _page_measure(prefix, 30, True), "bullet")
+        elif k == "num":
+            ind = 28 * b["level"]
+            prefix = f"{b['num']}. "
+            add([(prefix, True, PAGE_ACCENT, False)] + _page_runs(b["text"]),
+                30, 6, ind, ind + _page_measure(prefix, 30, True), "num")
+        elif k == "table":
+            add(_page_runs(b["text"], b.get("header")), 26, 6, 0, 0, "table")
+        else:
+            add(_page_runs(b["text"]), 30, 12, 0, 0)
+    return vis
+
+
+def _page_paginate(vis: list) -> list:
+    pages, cur, used = [], [], 0.0
+    limit = PAGE_H - PAGE_BOTTOM - PAGE_TOP
+    for line in vis:
+        gap = line.get("gap", 0) if cur else 0
+        need = gap + line["height"]
+        if cur and used + need > limit:
+            pages.append(cur)
+            cur, used, gap = [], 0.0, 0
+            need = line["height"]
+        if (cur and line["kind"] in ("h1", "h2", "h3")
+                and used + need + line["height"] + 30 > limit):
+            pages.append(cur)
+            cur, used, gap = [], 0.0, 0
+            need = line["height"]
+        item = dict(line)
+        item["gap"] = gap
+        cur.append(item)
+        used += need
+    if cur:
+        pages.append(cur)
+    return pages or [[]]
+
+
+def _page_draw_tokens(draw, x: float, y: float, tokens: list, size: int,
+                      color: str) -> float:
+    for i, tok in enumerate(tokens):
+        if i and tok.get("space"):
+            x += _page_measure(" ", size)
+        x = _page_draw_text(draw, x, y, tok["text"], size, tok.get("bold"),
+                            tok.get("color") or color, tok.get("mono"))
+    return x
+
+
+def _page_render(lines: list, index: int, total: int, title: str):
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (PAGE_W, PAGE_H), PAPER)
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([12, 12, PAGE_W - 12, PAGE_H - 12], radius=16,
+                           outline=PAGE_BOX, width=2)
+    x = _page_draw_text(draw, PAGE_M, 36, "AI STV", 22, True, PAGE_ACCENT)
+    if title:
+        shown = _page_ellipsis(title, 21, False, PAGE_W - PAGE_M - x - 34)
+        _page_draw_text(draw, x + 12, 38, shown, 21, False, PAGE_MUTED)
+    draw.line([(PAGE_M, 96), (PAGE_W - PAGE_M, 96)], fill=PAGE_RULE, width=2)
+    draw.line([(PAGE_M, PAGE_H - 98), (PAGE_W - PAGE_M, PAGE_H - 98)],
+              fill=PAGE_RULE, width=1)
+    if total > 1:
+        label = f"Trang {index}/{total}"
+        width = _page_measure(label, 20)
+        _page_draw_text(draw, (PAGE_W - width) / 2, PAGE_H - 72, label,
+                        20, False, PAGE_MUTED)
+    y = PAGE_TOP - 16
+    for line in lines:
+        y += line.get("gap", 0)
+        h = line["height"]
+        if line["kind"] == "rule":
+            draw.line([(PAGE_M, y + h // 2), (PAGE_W - PAGE_M, y + h // 2)],
+                      fill=PAGE_RULE, width=2)
+            y += h
+            continue
+        if line["kind"] == "code":
+            draw.rounded_rectangle([PAGE_M + line["indent"] - 12, y - 3,
+                                    PAGE_W - PAGE_M + 4, y + h - 6],
+                                   radius=8, fill=PAGE_CODE_BG)
+        elif line["kind"] == "quote":
+            draw.rectangle([PAGE_M + line["indent"] - 16, y + 2,
+                            PAGE_M + line["indent"] - 11, y + h - 6],
+                           fill=PAGE_ACCENT)
+        _page_draw_tokens(draw, PAGE_M + line["indent"], y, line["tokens"],
+                          line["size"], line.get("color", PAGE_INK))
+        y += h
+    return img
+
+
+def _page_title(title: str, text: str) -> str:
+    value = re.sub(r"\s+", " ", _page_clean(title or "")).strip()
+    if not value:
+        for line in str(text).splitlines():
+            value = re.sub(r"\s+", " ", _page_clean(line)).strip().lstrip("#•-* ").strip()
+            if value:
+                break
+    return value[:90] or "Bài giải"
+
+
+def _page_slug(title: str) -> str:
+    raw = unicodedata.normalize("NFKD", title)
+    raw = "".join(c for c in raw if not unicodedata.combining(c))
+    raw = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-").lower()
+    return (raw or "bai-giai")[:40]
+
+
+def render_text_pages(text: str, title: str = "", out_dir: str = "") -> dict:
+    """Markdown (đã đổi LaTeX sang Unicode) → các trang PNG A4 có số trang."""
+    src = str(text or "").strip()
+    if not src:
+        raise ImageError("nội dung trống")
+    title = _page_title(title, src)
+    pages = _page_paginate(_page_visual(_page_blocks(src)))
+    if len(pages) > PAGE_MAX:
+        raise ImageError(f"nội dung quá dài ({len(pages)} trang, tối đa {PAGE_MAX}) — hãy chia nhỏ bớt")
+    folder = (Path(out_dir) if out_dir
+              else OUT_DIR / "pages" / f"{_page_slug(title)}-{int(time.time())}")
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for i, lines in enumerate(pages, 1):
+        path = folder / f"page-{i:02d}.png"
+        _page_render(lines, i, len(pages), title).save(path, "PNG")
+        paths.append(path)
+    return {"ok": True, "count": len(paths), "pages": [str(p) for p in paths],
+            "title": title, "width": PAGE_W, "height": PAGE_H, "dir": str(folder)}
+
+
 def main():
     ap = argparse.ArgumentParser(description="Tạo ảnh / sơ đồ / biểu đồ cho AI STV")
     ap.add_argument("prompt", nargs="?", default="", help="mô tả ảnh hoặc chủ đề")
     ap.add_argument("--mindmap", metavar="TOPIC", default="", help="vẽ sơ đồ tư duy cho chủ đề")
     ap.add_argument("--infographic", metavar="TOPIC", default="", help="vẽ infographic cho chủ đề")
     ap.add_argument("--chart", metavar="DATA", default="", help="vẽ biểu đồ từ dữ liệu/mô tả")
+    ap.add_argument("--pages", metavar="FILE", default="", help="dựng file markdown thành các trang ảnh A4 (dùng - để đọc stdin)")
+    ap.add_argument("--title", default="", help="tiêu đề trang cho --pages")
     ap.add_argument("--style", default="", help="anime, 3d, watercolor, pixel, minimal, ...")
     ap.add_argument("--aspect", default="1:1", help="1:1, 16:9, 9:16, 4:3, 3:4")
     ap.add_argument("--ref", default="", help="ảnh tham chiếu (chỉ Gemini)")
@@ -1417,7 +1878,11 @@ def main():
         return 0
 
     try:
-        if args.mindmap:
+        if args.pages:
+            text = (sys.stdin.read() if args.pages == "-"
+                    else Path(args.pages).read_text("utf-8"))
+            res = render_text_pages(text, args.title, args.out)
+        elif args.mindmap:
             res = make_mindmap(args.mindmap, args.out)
         elif args.infographic:
             res = make_infographic(args.infographic, args.out)
@@ -1427,7 +1892,7 @@ def main():
             res = generate(args.prompt, args.style, args.aspect, args.ref,
                            args.provider, args.out, args.size, model=args.model)
         else:
-            ap.error("cần mô tả ảnh, hoặc dùng --mindmap / --infographic / --chart")
+            ap.error("cần mô tả ảnh, hoặc dùng --mindmap / --infographic / --chart / --pages")
     except Exception as e:
         if args.json:
             print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
@@ -1437,6 +1902,8 @@ def main():
 
     if args.json:
         print(json.dumps(res, ensure_ascii=False))
+    elif res.get("pages"):
+        print("\n".join(res["pages"]))
     else:
         print(res["path"])
     return 0

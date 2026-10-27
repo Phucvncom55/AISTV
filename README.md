@@ -61,6 +61,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 - **Trí nhớ dài hạn:** `/remember`, `/memory`, `/forget`; tự tóm tắt hội thoại cũ vào `MEMORY.md`; lưu cloud nên restart vẫn còn. Lịch sử chat, trí nhớ, nhắc việc và watch trên cloud đều **mã hoá bằng token bot** — đọc DB cũng không thấy nội dung.
 - **Nhắc việc & tự động:** `/remind +30m uống nước`, `/task daily 9:00 kiểm tra repo`, `/watch git owner/repo`, `/watch log <file>`, `/watch file <đường dẫn>`.
 - **Ảnh:** gửi ảnh kèm câu hỏi → Gemini mô tả, OCR, đọc biểu đồ. `/see <url>`, `/image <mô tả>` tạo ảnh (nhiều style, tỉ lệ), `/mindmap <chủ đề>` vẽ sơ đồ tư duy.
+- **Lời giải dài → ảnh:** bài Toán/Lý/Hoá/Sinh nhiều công thức được dựng thành ảnh A4 sạch, tự chia trang và ghi "Trang 1/N" — dùng `/pages` (hoặc reply tin nhắn) khi chat khó đọc công thức.
 - **Video:** `/video <link|file>` xem video dưới 45 phút (hình + tiếng, kèm mốc thời gian). Gửi file ≤ 20MB; dài hơn thì gửi link.
 - **YouTube / Facebook / TikTok:** tìm, lấy thông tin, phụ đề, tải video/âm thanh (TikTok không watermark).
 - **Tin nhắn thoại:** gửi voice → chép lời rồi xử lý như tin chữ.
@@ -81,6 +82,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 | `/remember` `/memory` | Trí nhớ dài hạn |
 | `/remind` `/reminders` `/task` | Nhắc việc · việc định kỳ |
 | `/see` `/video` `/image` `/mindmap` | Ảnh · video · tạo ảnh · sơ đồ tư duy |
+| `/pages` `/trang` | Lời giải dài → ảnh A4 từng trang (reply tin nhắn chứa bài) |
 | `/skills` `/skill` | Kỹ năng |
 | `/github` | Đăng nhập, chọn/tạo repo, push |
 | `/email` | Đọc / gửi email |
