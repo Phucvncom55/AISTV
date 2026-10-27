@@ -58,7 +58,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 ## 3. Bot làm được gì
 
 - **Sửa code như agent:** sửa file trong workspace, chạy lệnh, báo diff. `/plan <yêu cầu>` chia 2–8 bước, tự chạy – tự kiểm chứng – tự sửa. `/undo` hoàn tác, nút ⬆️ Push để đẩy lên GitHub (mặc định không tự push).
-- **Trí nhớ dài hạn:** `/remember`, `/memory`, `/forget`; tự tóm tắt hội thoại cũ vào `MEMORY.md`; lưu cloud nên restart vẫn còn.
+- **Trí nhớ dài hạn:** `/remember`, `/memory`, `/forget`; tự tóm tắt hội thoại cũ vào `MEMORY.md`; lưu cloud nên restart vẫn còn. Lịch sử chat, trí nhớ, nhắc việc và watch trên cloud đều **mã hoá bằng token bot** — đọc DB cũng không thấy nội dung.
 - **Nhắc việc & tự động:** `/remind +30m uống nước`, `/task daily 9:00 kiểm tra repo`, `/watch git owner/repo`, `/watch log <file>`, `/watch file <đường dẫn>`.
 - **Ảnh:** gửi ảnh kèm câu hỏi → Gemini mô tả, OCR, đọc biểu đồ. `/see <url>`, `/image <mô tả>` tạo ảnh (nhiều style, tỉ lệ), `/mindmap <chủ đề>` vẽ sơ đồ tư duy.
 - **Video:** `/video <link|file>` xem video dưới 45 phút (hình + tiếng, kèm mốc thời gian). Gửi file ≤ 20MB; dài hơn thì gửi link.
