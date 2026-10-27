@@ -1,6 +1,6 @@
 # CODEMAP — bản đồ code AISTV
 
-> Tự sinh bởi `scripts/code_map.py` · 33 file Python · 26726 dòng. Đừng sửa tay: chỉnh code rồi chạy lại `python scripts/code_map.py`.
+> Tự sinh bởi `scripts/code_map.py` · 33 file Python · 26734 dòng. Đừng sửa tay: chỉnh code rồi chạy lại `python scripts/code_map.py`.
 
 ## Cách dùng cho agent
 
@@ -13,7 +13,7 @@
 
 | File | Dòng | Mục đích |
 |---|---:|---|
-| `aistv_bot.py` | 10698 | AI STV AGENT — Telegram × OpenCode (dán 1 ô Colab là chạy) |
+| `aistv_bot.py` | 10706 | AI STV AGENT — Telegram × OpenCode (dán 1 ô Colab là chạy) |
 | `aistv_browser.py` | 251 | aistv_browser.py — Điều khiển trình duyệt thật bằng Playwright. |
 | `aistv_cloudflare.py` | 506 | aistv_cloudflare.py — Cloudflare API wrapper cho bot AI STV. |
 | `aistv_config.py` | 784 | AI STV - đồng bộ cấu hình (token / API key) cho MỌI môi trường. |
@@ -376,90 +376,90 @@ L8537  @guard() async def cmd_pages(update: Update, context: ContextTypes.DEFAUL
 L8571  @guard() async def cmd_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
 L8575  async def _on_ask_button(q, data: str)
 L8616  async def _on_gh_repo_button(q, data: str)
-L8723  @guard() async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L8800  async def on_error(update, context: ContextTypes.DEFAULT_TYPE)
-L8828  def _cloud_path(path: str)
-L8832  def _fb_url(path: str)
-L8847  def _personal_path(path: str)
-L8851  def _is_sealed(value)
-L8856  def _seal_node(data)
-L8862  def _open_node(value)  — Giải mã node; dữ liệu thô kiểu cũ (trước khi mã hoá) trả nguyên trạng.
-L8883  def fb_call(method: str, path: str, data=None, timeout: int=20, raw: bool=False)  — REST tới Firebase RTDB (đồng bộ). Không bao giờ ném lỗi ra ngoài.
-L8915  async def fb(method: str, path: str, data=None)
-L8919  async def fb_raw_get(path: str)  — GET nguyên bản (không giải mã) — dùng để phát hiện node cũ còn dạng thô.
-L8924  async def cloud_encrypt_existing()  — Mã hoá các node cá nhân bản cũ còn nằm dạng thô trên cloud (mỗi phiên 1 lần).
-L8953  def _save_json(path: Path, data)
-L8960  def _load_json(path: Path)
-L8971  def _secret_master_key()
-L8978  def _keystream(key: bytes, nonce: bytes, size: int)
-L8987  def _seal(data)
-L8998  def _open(blob: str)
-L9012  def encrypt_secrets(data: dict)
-L9016  def decrypt_secrets(blob: str)
-L9021  def _local_secret_values()
-L9047  async def cloud_push_secrets()
-L9068  async def cloud_restore_secrets()  — Máy mới: giải mã bí mật trên cloud và ghi vào config.env (không ghi đè cái đã có).
-L9134  async def cloud_merge_memory()  — Gộp MEMORY.md cục bộ với bản trên cloud (giữ thứ tự, không trùng).
-L9154  async def cloud_push_memory()
-L9159  async def cloud_push_history(chat_id: int)
-L9164  async def cloud_pull_history(chat_id: int)
-L9176  async def ensure_history(chat_id: int)  — Máy mới / Colab reset: lấy lại hội thoại của chat này từ cloud.
-L9185  async def cloud_restore_all()
-L9217  async def cloud_loop()  — Gom thay đổi rồi đẩy lên Firebase (tránh gọi mạng mỗi lần append).
-L9240  def add_memory_lines(lines: list)
-L9259  async def ask_model_once(prompt: str, timeout: int=300)  — Gọi OpenCode 1 lần, không tool, không đụng state hội thoại.
-L9282  async def summarize_chat(chat_id: int, force: bool=False)  — Cô đọng các lượt cũ thành gạch đầu dòng trong MEMORY.md rồi cắt lịch sử.
-L9321  def maybe_schedule_summary(chat_id: int)
-L9347  def _new_id(prefix: str)
-L9351  def _when_str(ts)
-L9359  def _in_str(ts)
-L9373  def _next_at(hh: int, mm: int, add_days: int=0)
-L9383  def parse_schedule(text: str)  — Trả (epoch|None, kiểu lặp, phần nội dung còn lại).
-L9419  async def rem_save(push: bool=True)
-L9425  def _prune_reminders(records: dict, now_ts: float | None=None)  — Lọc nhắc việc: bỏ mục hỏng, đánh dấu quá hạn, bỏ mục quá cũ (>30 ngày).
-L9445  async def rem_restore()
-L9457  def build_reminders()
-L9476  async def send_plain(app, chat_id: int, text: str, html_ok: bool=False, markup=None)
-L9498  async def _run_scheduled_task_guarded(app, rec: dict)
-L9512  async def _run_scheduled_task(app, rec: dict)
-L9527  async def tick_reminders(app)
-L9583  def _norm_repo(s: str)
-L9588  def _path_digest(p: Path)
-L9605  async def watch_save()
-L9611  async def watch_restore()
-L9621  async def _watch_git(app, w: dict)
-L9645  async def _watch_log(app, w: dict)
-L9680  async def _watch_file(app, w: dict)
-L9691  async def tick_watches(app)
-L9708  def build_watches()
-L9725  async def install_self_watch()
-L9740  async def _scheduler_loop(app)
-L9758  @guard() async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9763  @guard() async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9767  async def _add_schedule(update, context, kind: str)
-L9792  @guard() async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9797  @guard() async def cmd_unremind(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9815  @guard() async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9873  @guard() async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9883  def build_cloud(chat_id: int)
-L9914  @guard() async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L9964  def _email_fp(cfg: dict)  — Vân tay cấu hình: đổi email/mật khẩu/host → kết quả test cũ không còn giá trị.
-L9971  def _clean_app_password(parts)  — Gmail hiển thị App Password dạng 'abcd efgh ijkl mnop' — bỏ hết khoảng trắng.
-L9979  def _email_pw_label(cfg: dict)
-L9988  def build_email()
-L10021 def _parse_email_read(chat_id: int, key: str)
-L10034 @guard() async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L10159 async def _web2api_loop()  — Giữ cookie/server luôn mới: dán cookie.txt là tự chạy, máy mới tự kéo.
-L10179 @guard(owner_only=True) async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Bật/tắt và chặn khách khi nhóm spam (chỉ chủ bot).
-L10285 @guard() async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Quản lý Gemini dự phòng (chỉ chủ bot).
-L10395 def _merge_env_file(path: Path, text: str)  — Thêm các biến còn thiếu từ text vào path; không ghi đè giá trị đang có.
-L10438 def _remote_config_text()  — Tải config.env từ AISTV_ENV_URL hoặc repo private (dự phòng cho bản cũ).
-L10485 def _bootstrap_remote_config()  — Máy mới: tự nạp token/API key từ config.env dùng chung trên GitHub.
-L10506 def _valid_bot_token(value: str)  — Token BotFather: 123456789:AAH... — chan dan nham lenh khac vao prompt.
-L10511 def get_token()
-L10569 def _startup_github()
-L10580 async def post_init(app)
-L10624 def main()
+L8723  @guard(allow_guest=True) async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L8808  async def on_error(update, context: ContextTypes.DEFAULT_TYPE)
+L8836  def _cloud_path(path: str)
+L8840  def _fb_url(path: str)
+L8855  def _personal_path(path: str)
+L8859  def _is_sealed(value)
+L8864  def _seal_node(data)
+L8870  def _open_node(value)  — Giải mã node; dữ liệu thô kiểu cũ (trước khi mã hoá) trả nguyên trạng.
+L8891  def fb_call(method: str, path: str, data=None, timeout: int=20, raw: bool=False)  — REST tới Firebase RTDB (đồng bộ). Không bao giờ ném lỗi ra ngoài.
+L8923  async def fb(method: str, path: str, data=None)
+L8927  async def fb_raw_get(path: str)  — GET nguyên bản (không giải mã) — dùng để phát hiện node cũ còn dạng thô.
+L8932  async def cloud_encrypt_existing()  — Mã hoá các node cá nhân bản cũ còn nằm dạng thô trên cloud (mỗi phiên 1 lần).
+L8961  def _save_json(path: Path, data)
+L8968  def _load_json(path: Path)
+L8979  def _secret_master_key()
+L8986  def _keystream(key: bytes, nonce: bytes, size: int)
+L8995  def _seal(data)
+L9006  def _open(blob: str)
+L9020  def encrypt_secrets(data: dict)
+L9024  def decrypt_secrets(blob: str)
+L9029  def _local_secret_values()
+L9055  async def cloud_push_secrets()
+L9076  async def cloud_restore_secrets()  — Máy mới: giải mã bí mật trên cloud và ghi vào config.env (không ghi đè cái đã có).
+L9142  async def cloud_merge_memory()  — Gộp MEMORY.md cục bộ với bản trên cloud (giữ thứ tự, không trùng).
+L9162  async def cloud_push_memory()
+L9167  async def cloud_push_history(chat_id: int)
+L9172  async def cloud_pull_history(chat_id: int)
+L9184  async def ensure_history(chat_id: int)  — Máy mới / Colab reset: lấy lại hội thoại của chat này từ cloud.
+L9193  async def cloud_restore_all()
+L9225  async def cloud_loop()  — Gom thay đổi rồi đẩy lên Firebase (tránh gọi mạng mỗi lần append).
+L9248  def add_memory_lines(lines: list)
+L9267  async def ask_model_once(prompt: str, timeout: int=300)  — Gọi OpenCode 1 lần, không tool, không đụng state hội thoại.
+L9290  async def summarize_chat(chat_id: int, force: bool=False)  — Cô đọng các lượt cũ thành gạch đầu dòng trong MEMORY.md rồi cắt lịch sử.
+L9329  def maybe_schedule_summary(chat_id: int)
+L9355  def _new_id(prefix: str)
+L9359  def _when_str(ts)
+L9367  def _in_str(ts)
+L9381  def _next_at(hh: int, mm: int, add_days: int=0)
+L9391  def parse_schedule(text: str)  — Trả (epoch|None, kiểu lặp, phần nội dung còn lại).
+L9427  async def rem_save(push: bool=True)
+L9433  def _prune_reminders(records: dict, now_ts: float | None=None)  — Lọc nhắc việc: bỏ mục hỏng, đánh dấu quá hạn, bỏ mục quá cũ (>30 ngày).
+L9453  async def rem_restore()
+L9465  def build_reminders()
+L9484  async def send_plain(app, chat_id: int, text: str, html_ok: bool=False, markup=None)
+L9506  async def _run_scheduled_task_guarded(app, rec: dict)
+L9520  async def _run_scheduled_task(app, rec: dict)
+L9535  async def tick_reminders(app)
+L9591  def _norm_repo(s: str)
+L9596  def _path_digest(p: Path)
+L9613  async def watch_save()
+L9619  async def watch_restore()
+L9629  async def _watch_git(app, w: dict)
+L9653  async def _watch_log(app, w: dict)
+L9688  async def _watch_file(app, w: dict)
+L9699  async def tick_watches(app)
+L9716  def build_watches()
+L9733  async def install_self_watch()
+L9748  async def _scheduler_loop(app)
+L9766  @guard() async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9771  @guard() async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9775  async def _add_schedule(update, context, kind: str)
+L9800  @guard() async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9805  @guard() async def cmd_unremind(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9823  @guard() async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9881  @guard() async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9891  def build_cloud(chat_id: int)
+L9922  @guard() async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L9972  def _email_fp(cfg: dict)  — Vân tay cấu hình: đổi email/mật khẩu/host → kết quả test cũ không còn giá trị.
+L9979  def _clean_app_password(parts)  — Gmail hiển thị App Password dạng 'abcd efgh ijkl mnop' — bỏ hết khoảng trắng.
+L9987  def _email_pw_label(cfg: dict)
+L9996  def build_email()
+L10029 def _parse_email_read(chat_id: int, key: str)
+L10042 @guard() async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L10167 async def _web2api_loop()  — Giữ cookie/server luôn mới: dán cookie.txt là tự chạy, máy mới tự kéo.
+L10187 @guard(owner_only=True) async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Bật/tắt và chặn khách khi nhóm spam (chỉ chủ bot).
+L10293 @guard() async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Quản lý Gemini dự phòng (chỉ chủ bot).
+L10403 def _merge_env_file(path: Path, text: str)  — Thêm các biến còn thiếu từ text vào path; không ghi đè giá trị đang có.
+L10446 def _remote_config_text()  — Tải config.env từ AISTV_ENV_URL hoặc repo private (dự phòng cho bản cũ).
+L10493 def _bootstrap_remote_config()  — Máy mới: tự nạp token/API key từ config.env dùng chung trên GitHub.
+L10514 def _valid_bot_token(value: str)  — Token BotFather: 123456789:AAH... — chan dan nham lenh khac vao prompt.
+L10519 def get_token()
+L10577 def _startup_github()
+L10588 async def post_init(app)
+L10632 def main()
 ```
 
 ## aistv_browser.py

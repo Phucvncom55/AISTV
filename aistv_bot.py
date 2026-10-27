@@ -8719,13 +8719,21 @@ async def _on_gh_repo_button(q, data: str) -> None:
         return
 
 
-@guard()
+@guard(allow_guest=True)
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if q is None or not q.data:
         return
     chat_id = q.message.chat_id if q.message else (q.from_user.id if q.from_user else 0)
     data = q.data
+    user = q.from_user
+    chat = update.effective_chat
+    if not (user and chat and authorized(user.id, chat.type)):
+        if data.startswith("vm:g"):          # khách: chỉ nút máy ảo của chính họ
+            await _on_guest_vm_button(q, data)
+        else:
+            await _deny_guest(update, context)
+        return
     if data.startswith("plan:"):
         await _on_plan_button(q, data)
         return
