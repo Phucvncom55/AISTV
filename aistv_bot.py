@@ -1076,8 +1076,9 @@ AGENTS_RULES_25_32 = """25. Repo chính (code bot) là thư mục chứa `aistv_
     `0.41.0`, chạy offline (`HEADROOM_OFFLINE=1`, không beacon). Dùng khi tool output/log/JSON/RAG quá lớn;
     KHÔNG tự `wrap`/`unwrap` hay đổi config opencode — muốn bật hỏi người dùng trước. Skill `headroom`.
 33. Người dùng muốn tạo máy ảo Windows cho Integration Test (Windows runner + Tailscale + RDP) → gọi tool
-    `create_vm` với PAT GitHub của tài khoản sẽ chạy máy ảo và Tailscale auth key (nếu đã lưu trước bằng
-    /vm token, /vm key thì bỏ trống tham số). KHÔNG in lại token/key ra chat/log, KHÔNG ghi chúng vào file.
+    `create_vm` với PAT GitHub của tài khoản sẽ chạy máy ảo và Tailscale auth key (nếu bot đã đăng nhập
+    GitHub hoặc đã lưu bằng /vm token, /vm key thì bỏ trống tham số — KHÔNG hỏi lại người dùng).
+    KHÔNG in lại token/key ra chat/log, KHÔNG ghi chúng vào file.
     Mặc định windows-latest, 360 phút (60–360). Thông tin đăng nhập do workflow gửi qua Telegram DM.
      Máy ảo có bảng nút /vm (chọn Windows, thời gian, nhập khoá, tạo) — hướng dẫn người dùng bấm nút.
 """
@@ -1632,8 +1633,9 @@ def bootstrap_workspace() -> None:
             if "create_vm" not in old:
                 old = old.rstrip() + (
                     "\n33. Người dùng muốn tạo máy ảo Windows cho Integration Test → gọi tool `create_vm` "
-                    "với PAT GitHub của tài khoản sẽ chạy máy ảo + Tailscale auth key (bỏ trống nếu đã lưu "
-                    "qua /vm token, /vm key). Không in lại token/key, không ghi vào file. "
+                    "với PAT GitHub của tài khoản sẽ chạy máy ảo + Tailscale auth key (bỏ trống nếu bot đã "
+                    "đăng nhập GitHub hoặc đã lưu qua /vm token, /vm key — không hỏi lại). Không in lại "
+                    "token/key, không ghi vào file. "
                     "Mặc định windows-latest, 360 phút (60–360); thông tin đăng nhập gửi qua Telegram DM. "
                     "Hướng dẫn người dùng mở /vm và bấm nút.\n"
                 )
@@ -2297,7 +2299,7 @@ class _AskHandler(BaseHTTPRequestHandler):
             creds = load_vm_creds()
             self._json(200, {
                 "ok": True,
-                "has_pat": bool(creds.get("pat")),
+                "has_pat": bool(creds.get("pat") or github_token()),
                 "has_key": bool(creds.get("tailscale_key")),
                 "windows": creds.get("windows") or "windows-latest",
                 "minutes": int(creds.get("minutes") or 360),
@@ -2311,7 +2313,8 @@ class _AskHandler(BaseHTTPRequestHandler):
                              "error": "chỉ tạo máy ảo từ chat riêng (private) với bot"})
             return
         creds = load_vm_creds()
-        pat = str(data.get("github_token") or "").strip() or str(creds.get("pat") or "")
+        explicit_pat = str(data.get("github_token") or "").strip()
+        pat = explicit_pat or str(creds.get("pat") or "") or github_token()
         key = (str(data.get("tailscale_authkey") or "").strip()
                or str(creds.get("tailscale_key") or ""))
         win = str(data.get("windows_version") or "").strip() or str(creds.get("windows") or "")
@@ -2321,7 +2324,8 @@ class _AskHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json(200, {"ok": False, "error": oneline(_redact_secrets(str(e)), 400)})
             return
-        save_vm_creds(pat=pat, tskey=key, windows=res["windows"], minutes=res["minutes"])
+        save_vm_creds(pat=explicit_pat or None, tskey=key,
+                      windows=res["windows"], minutes=res["minutes"])
         self._json(200, {
             "ok": True,
             "login": res["login"],
@@ -2609,14 +2613,24 @@ def vm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def vm_pat() -> str:
+    """PAT cho máy ảo: ưu tiên PAT đã lưu, không có thì dùng token GitHub của bot."""
+    pat = str(load_vm_creds().get("pat") or "").strip()
+    return pat or github_token()
+
+
 def vm_status_text() -> str:
     if vm_lib is None:
         return "⚠️ Module aistv_vm chưa có trên máy này."
     creds = load_vm_creds()
-    pat = str(creds.get("pat") or "")
+    saved_pat = str(creds.get("pat") or "")
+    pat = saved_pat or github_token()
     key = str(creds.get("tailscale_key") or "")
-    pat_line = (f"<code>{esc(vm_lib.mask_value(pat))}</code>" if pat
-                else "<b>chưa lưu</b>")
+    if pat:
+        masked = vm_lib.mask_value(pat) if vm_lib else "***"
+        pat_line = f"<code>{esc(masked)}</code>" + ("" if saved_pat else " <i>(token bot)</i>")
+    else:
+        pat_line = "<b>chưa lưu</b>"
     key_line = (f"<code>{esc(vm_lib.mask_value(key))}</code>" if key
                 else "<b>chưa lưu</b>")
     win, minutes = vm_defaults()
@@ -2624,10 +2638,17 @@ def vm_status_text() -> str:
              f"• PAT GitHub: {pat_line}",
              f"• Tailscale key: {key_line}",
              f"• Runner: {esc(win)} · {minutes} phút"]
-    lines.append("• Sẵn sàng — bấm 🚀 Tạo máy ảo" if (pat and key)
-                 else "• Cần nhập PAT và Tailscale key bằng nút bên dưới")
+    if pat and key:
+        lines.append("• Sẵn sàng — bấm 🚀 Tạo máy ảo")
+    elif pat:
+        lines.append("• Còn thiếu Tailscale key — bấm 🔑 Nhập Tailscale key")
+    elif key:
+        lines.append("• Còn thiếu PAT — bấm 🔑 Nhập PAT (hoặc /github login)")
+    else:
+        lines.append("• Cần nhập PAT và Tailscale key bằng nút bên dưới")
     lines += ["", "Thông tin đăng nhập (IP, user, mật khẩu) gửi qua Telegram DM.",
-              "PAT + key được lưu và đồng bộ mã hoá lên Firebase."]
+              ("PAT + key được mã hoá, đồng bộ Firebase." if CLOUD_ENABLED
+               else "⚠️ Cloud đang tắt — chỉ lưu máy này. Gửi /cloud url &lt;URL&gt; để đồng bộ.")]
     return "\n".join(lines)
 
 
@@ -5348,7 +5369,7 @@ HELP_TEXT = (
     "<b>Hội thoại</b>\n/new — cuộc trò chuyện mới\n/stop — huỷ tác vụ đang chạy\n/status — trạng thái\n\n"
     "<b>Trí nhớ &amp; Skills</b>\n/remember &lt;nội dung&gt; — ghi nhớ dài hạn\n/memory — xem trí nhớ\n"
     "/forget &lt;số|all&gt; — xoá trí nhớ\n/summary — cô đọng hội thoại vào trí nhớ\n"
-    "/cloud [sync] — trạng thái / đồng bộ trí nhớ đám mây\n"
+    "/cloud [sync] · /cloud url &lt;URL&gt; — trạng thái / bật đồng bộ Firebase\n"
     "/skills — danh sách skills\n/skill &lt;tên&gt; &lt;yêu cầu&gt; — chạy theo skill\n"
     "/skill add &lt;github-url|owner/repo/path&gt; — cài skill mới (chủ bot)\n\n"
     "<b>Email</b>\n/email — trạng thái · /email test — kiểm tra kết nối\n"
@@ -5721,9 +5742,10 @@ async def _gh_poll_task(bot, chat_id: int, device: dict) -> None:
         await bot.send_message(
             chat_id,
             f"✅ <b>Đã lưu token GitHub</b> · tài khoản <b>{esc(login)}</b>\n"
-            f"• Lưu tại: <code>{esc(GITHUB_TOKEN_FILE)}</code>\n\n"
-            "Lần sau (kể cả Colab khác) bot tự dùng lại. Để chắc chắn 100%, thêm secret "
-            "<code>GITHUB_TOKEN</code> trong Colab Secrets hoặc bật Google Drive.",
+            f"• Lưu tại: <code>{esc(GITHUB_TOKEN_FILE)}</code>\n"
+            + ("• ☁️ Đã mã hoá, đồng bộ Firebase — máy khác tự dùng lại.\n"
+               if CLOUD_ENABLED else
+               "• ⚠️ Cloud đang tắt — gửi /cloud url &lt;URL&gt; để không phải đăng nhập lại.\n"),
             parse_mode=HTML)
         await _github_connected(bot, chat_id, info, tok)
         return
@@ -5797,6 +5819,9 @@ async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   f"• Lưu tại: <code>{esc(GITHUB_TOKEN_FILE)}</code>"]
     else:
         lines += ["• Trạng thái: <b>chưa kết nối</b>"]
+    lines.append("• Lưu cloud: " + (
+        "✅ Firebase — tự khôi phục trên máy khác" if CLOUD_ENABLED
+        else "⚪ chưa bật — gửi /cloud url &lt;URL&gt;"))
     rd = repo_dir()
     if rd:
         _, branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], rd)
@@ -6003,7 +6028,7 @@ async def _on_vm_button(q, data: str) -> None:
         return
     if act == "create":
         creds = load_vm_creds()
-        if not creds.get("pat") or not creds.get("tailscale_key"):
+        if not (creds.get("pat") or github_token()) or not creds.get("tailscale_key"):
             await q.answer("Cần nhập PAT và Tailscale key trước.", show_alert=True)
             return
         await q.answer("Đang tạo máy ảo…")
@@ -6018,8 +6043,9 @@ async def _vm_create_flow(bot, chat_id: int, pat: str, key: str,
     if vm_lib is None:
         await bot.send_message(chat_id, "⚠️ Module aistv_vm chưa có trên máy này — cập nhật bot rồi thử lại.")
         return
+    explicit_pat = (pat or "").strip()
     creds = load_vm_creds()
-    pat = (pat or "").strip() or str(creds.get("pat") or "")
+    pat = explicit_pat or str(creds.get("pat") or "") or github_token()
     key = (key or "").strip() or str(creds.get("tailscale_key") or "")
     if not pat or not key:
         await bot.send_message(
@@ -6039,7 +6065,8 @@ async def _vm_create_flow(bot, chat_id: int, pat: str, key: str,
         except Exception:
             await bot.send_message(chat_id, text)
         return
-    save_vm_creds(pat=pat, tskey=key, windows=res["windows"], minutes=res["minutes"])
+    save_vm_creds(pat=explicit_pat or None, tskey=key,
+                  windows=res["windows"], minutes=res["minutes"])
     state_note = "fork mới" if res["repo_state"] == "forked" else "có sẵn"
     text = (
         f"✅ <b>Đã kích hoạt máy ảo</b>\n"
@@ -9257,8 +9284,12 @@ def build_cloud(chat_id: int) -> str:
     else:
         state = "🔴 lỗi"
     at = f"{int(time.time() - st['at'])}s trước" if st["at"] else "—"
+    host = urllib.parse.urlparse(FIREBASE_URL).netloc if FIREBASE_URL else "—"
+    hint = ("" if CLOUD_ENABLED else
+            "Bật: <code>/cloud url https://&lt;db&gt;.firebaseio.com</code>\n")
     return ("☁️ <b>Trí nhớ đám mây (Firebase)</b>\n"
             f"• Trạng thái: {state}\n"
+            f"• URL: <code>{esc(host)}</code>\n"
             f"• Namespace: <code>{esc(CLOUD_NS)}</code>\n"
             f"• Lần cuối: {esc(st['last'] or '—')} · {esc(at)}\n"
             f"• Đã đẩy: {st['up']} · Lỗi: {st['err']}\n"
@@ -9267,14 +9298,46 @@ def build_cloud(chat_id: int) -> str:
             f"• Nhắc việc: {len(REMINDERS)} · Theo dõi: {len(WATCHES)}\n"
             f"• Bí mật đồng bộ: {sum(1 for n in SECRET_SYNC_KEYS if get_secret(n))} mục (mã hoá bằng token bot)\n"
             f"• Tóm tắt tự động: {'bật' if AUTO_SUMMARY else 'tắt'} sau {SUMMARY_MIN_ITEMS} lượt\n\n"
+            + hint +
             "Đồng bộ ngay: <code>/cloud sync</code>\n"
             "⚠️ Rules của database đang mở (ai biết URL cũng đọc/ghi được) — nên siết lại.")
 
 
 @guard()
 async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global FIREBASE_URL, CLOUD_ENABLED
     msg, chat_id = update.effective_message, update.effective_chat.id
-    if context.args and context.args[0].lower() in ("sync", "dong-bo", "đồng-bộ"):
+    args = context.args or []
+    sub = args[0].lower() if args else ""
+    if sub in ("url", "db", "set"):
+        if not (update.effective_user and is_owner(update.effective_user.id)):
+            await msg.reply_text("Chỉ chủ bot đổi được URL cloud.")
+            return
+        url = args[1].strip().rstrip("/") if len(args) > 1 else ""
+        if not re.match(r"^https://[A-Za-z0-9._-]+\.(?:firebaseio\.com|firebasedatabase\.app)$",
+                        url):
+            await msg.reply_text(
+                "Dùng: <code>/cloud url https://&lt;db&gt;.firebaseio.com</code>",
+                parse_mode=HTML)
+            return
+        FIREBASE_URL = url
+        CLOUD_ENABLED = True
+        try:
+            save_env_var("AISTV_FIREBASE_URL", url)
+        except Exception as e:
+            log.warning("Không ghi được AISTV_FIREBASE_URL: %s", oneline(str(e), 120))
+        restored = await cloud_restore_secrets()
+        ok = await cloud_push_secrets()
+        await msg.reply_text(
+            "☁️ <b>Đã bật đồng bộ Firebase</b>\n"
+            f"• URL: <code>{esc(url)}</code>\n"
+            + (f"• Khôi phục {restored} mục từ cloud.\n" if restored else "")
+            + ("• Đã đẩy bí mật (GitHub token, PAT/key máy ảo, API key) lên cloud."
+               if ok else
+               "• ⚠️ Chưa đẩy được — kiểm tra mạng/rules rồi gửi /cloud sync."),
+            parse_mode=HTML)
+        return
+    if sub in ("sync", "dong-bo", "đồng-bộ"):
         await cloud_push_memory()
         await cloud_push_history(chat_id)
         await rem_save()
