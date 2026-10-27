@@ -266,6 +266,11 @@ try:
 except Exception:                       # thiếu module → tắt /plan, bot vẫn chạy
     planner = None
 
+try:
+    import aistv_vm as vm_lib          # tạo máy ảo Windows (GitHub Actions + Tailscale)
+except Exception:                       # thiếu module → tắt /vm, bot vẫn chạy
+    vm_lib = None
+
 CLEAN_INSTALL = os.getenv("AISTV_CLEAN_INSTALL", "0") != "0"   # 1 = xoá & cài lại OpenCode; 0 = giữ bản đã cài
 USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google Drive (sống sót khi Colab reset)
 FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
@@ -787,6 +792,7 @@ ARCHIVE = HOME / "archive"
 SECRETS_DIR = HOME / ".secrets"
 GITHUB_TOKEN_FILE = SECRETS_DIR / "github_token"
 GITHUB_REPO_FILE = SECRETS_DIR / "github_repo"      # owner/name đang dùng (đổi bằng /github repo)
+VM_CREDS_FILE = SECRETS_DIR / "vm_creds.json"       # PAT + Tailscale key cho /vm (chỉ lưu máy này, không đẩy cloud)
 STATE_FILE = HOME / "state.json"
 LOG_DIR = HOME / "logs"
 LOG_FILE = LOG_DIR / "aistv.log"
@@ -1069,6 +1075,10 @@ AGENTS_RULES_25_32 = """25. Repo chính (code bot) là thư mục chứa `aistv_
     MCP `headroom mcp serve` (tool `headroom_compress`/`headroom_retrieve`/`headroom_stats`) — headroom-ai
     `0.41.0`, chạy offline (`HEADROOM_OFFLINE=1`, không beacon). Dùng khi tool output/log/JSON/RAG quá lớn;
     KHÔNG tự `wrap`/`unwrap` hay đổi config opencode — muốn bật hỏi người dùng trước. Skill `headroom`.
+33. Người dùng muốn tạo máy ảo Windows cho Integration Test (Windows runner + Tailscale + RDP) → gọi tool
+    `create_vm` với PAT GitHub của tài khoản sẽ chạy máy ảo và Tailscale auth key (nếu đã lưu trước bằng
+    /vm token, /vm key thì bỏ trống tham số). KHÔNG in lại token/key ra chat/log, KHÔNG ghi chúng vào file.
+    Mặc định windows-latest, 330 phút (60–330). Thông tin đăng nhập do workflow gửi qua Telegram DM.
 """
 AGENTS_MD = """# AGENTS — Quy tắc làm việc
 1. Thư mục hiện tại là workspace của bạn. File bạn tạo phải nằm ở đây, tên rõ ràng, có đuôi file.
@@ -1443,6 +1453,65 @@ export default tool({
 '''
 
 
+# Tool tạo máy ảo Windows: bot tự fork repo, ghi secrets và kích hoạt workflow.
+CREATE_VM_TOOL_JS = r'''import { tool } from "@opencode-ai/plugin"
+
+export default tool({
+  description: [
+    "Create a Windows VM (GitHub Actions runner) for integration tests on the user's account:",
+    "the bot forks the AISTV repo if needed, stores the Tailscale key as a repo secret, and",
+    "dispatches the Windows integration-test workflow. The workflow connects to Tailscale",
+    "(tag:vm-user), opens RDP and sends the login details (IP, username, password) to the user",
+    "via private Telegram DM. Pass the GitHub PAT and Tailscale auth key the user gave you;",
+    "omit them to reuse credentials saved earlier. Never print the token/key back to the user",
+    "and never write them into files.",
+  ].join(" "),
+  args: {
+    github_token: tool.schema.string().optional()
+      .describe("GitHub PAT of the account that will run the VM (ghp_... or github_pat_...). Omit to reuse the saved one."),
+    tailscale_authkey: tool.schema.string().optional()
+      .describe("Tailscale auth key (tskey-...). Omit to reuse the saved one."),
+    windows_version: tool.schema.string().optional()
+      .describe("windows-latest (default) | windows-2022 | windows-2025"),
+    timeout_minutes: tool.schema.number().optional()
+      .describe("Run time in minutes, 60-330 (default 330)"),
+  },
+  async execute(args) {
+    const url = process.env.AISTV_ASK_URL
+    const token = process.env.AISTV_TOOL_TOKEN || ""
+    const chat = Number(process.env.AISTV_CHAT_ID || 0)
+    if (!url) {
+      return "create_vm is unavailable. Tell the user to send /vm create."
+    }
+    if (!chat || chat <= 0) {
+      return "create_vm only works in a private chat with the bot. Ask the user to DM the bot."
+    }
+    let res
+    try {
+      res = await fetch(url.replace(/\/$/, "") + "/vm-create", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-aistv-token": token },
+        body: JSON.stringify({
+          chat_id: chat,
+          github_token: String(args.github_token || ""),
+          tailscale_authkey: String(args.tailscale_authkey || ""),
+          windows_version: String(args.windows_version || ""),
+          timeout_minutes: Number(args.timeout_minutes || 0),
+        }),
+      })
+    } catch (e) {
+      return "create_vm failed: " + e
+    }
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || !data.ok) {
+      return "create_vm error: " + (data.error || ("HTTP " + res.status))
+    }
+    return String(data.message || "VM creation started.")
+  },
+})
+'''
+
+
 def bootstrap_workspace() -> None:
     files = {
         WORKSPACE / "SOUL.md": SOUL_MD,
@@ -1455,6 +1524,7 @@ def bootstrap_workspace() -> None:
         WORKSPACE / ".opencode" / "tools" / "render_pages.js": PAGES_TOOL_JS,
         WORKSPACE / ".opencode" / "tools" / "ask_gemini.js": ASK_GEMINI_TOOL_JS,
         WORKSPACE / ".opencode" / "tools" / "github_login.js": GITHUB_LOGIN_TOOL_JS,
+        WORKSPACE / ".opencode" / "tools" / "create_vm.js": CREATE_VM_TOOL_JS,
     }
     for path, content in files.items():
         if not path.exists():
@@ -1556,6 +1626,14 @@ def bootstrap_workspace() -> None:
                     "\n24. Người dùng muốn đăng nhập/kết nối GitHub, hoặc cần GitHub mà chưa có token → "
                     "gọi tool `github_login` (bot tự gửi mã vào chat; bạn chờ tới khi người dùng Authorize "
                     "rồi làm tiếp). Không bảo người dùng dán token/PAT vào chat.\n"
+                )
+                changed = True
+            if "create_vm" not in old:
+                old = old.rstrip() + (
+                    "\n33. Người dùng muốn tạo máy ảo Windows cho Integration Test → gọi tool `create_vm` "
+                    "với PAT GitHub của tài khoản sẽ chạy máy ảo + Tailscale auth key (bỏ trống nếu đã lưu "
+                    "qua /vm token, /vm key). Không in lại token/key, không ghi vào file. "
+                    "Mặc định windows-latest, 330 phút (60–330); thông tin đăng nhập gửi qua Telegram DM.\n"
                 )
                 changed = True
             # Quy tắc 25–31 (đường dẫn repo, CODEMAP, verify, plan, cổng review, checkpoint).
@@ -2029,7 +2107,8 @@ class _AskHandler(BaseHTTPRequestHandler):
 
     def _handle_post(self):
         path = urllib.parse.urlparse(self.path).path.rstrip("/")
-        if path not in ("/ask", "/image", "/pages", "/vision", "/github-login", "/github-login-status"):
+        if path not in ("/ask", "/image", "/pages", "/vision", "/github-login",
+                        "/github-login-status", "/vm-create", "/vm-status"):
             self._json(404, {"error": "not found"})
             return
         got = self.headers.get("x-aistv-token", "")
@@ -2048,6 +2127,10 @@ class _AskHandler(BaseHTTPRequestHandler):
 
         if path in ("/github-login", "/github-login-status"):
             self._handle_github_login(path, data)
+            return
+
+        if path in ("/vm-create", "/vm-status"):
+            self._handle_vm(path, data)
             return
 
         if path == "/vision":                # agent hỏi lại Gemini về ảnh/video vừa gửi
@@ -2204,6 +2287,54 @@ class _AskHandler(BaseHTTPRequestHandler):
             return
         self._json(200, {"ok": True, "id": rid, "code": state.get("code"),
                          "url": state.get("url"), "expires_in": state.get("expires_in")})
+
+    def _handle_vm(self, path: str, data: dict) -> None:
+        """Tool create_vm của agent: trạng thái creds đã lưu / tạo máy ảo Windows."""
+        chat_id = int(data.get("chat_id") or 0)
+        if path == "/vm-status":
+            creds = load_vm_creds()
+            self._json(200, {
+                "ok": True,
+                "has_pat": bool(creds.get("pat")),
+                "has_key": bool(creds.get("tailscale_key")),
+                "windows": creds.get("windows") or "windows-latest",
+                "minutes": int(creds.get("minutes") or 330),
+            })
+            return
+        if vm_lib is None:
+            self._json(200, {"ok": False, "error": "thiếu module aistv_vm trên máy này"})
+            return
+        if chat_id <= 0:
+            self._json(200, {"ok": False,
+                             "error": "chỉ tạo máy ảo từ chat riêng (private) với bot"})
+            return
+        creds = load_vm_creds()
+        pat = str(data.get("github_token") or "").strip() or str(creds.get("pat") or "")
+        key = (str(data.get("tailscale_authkey") or "").strip()
+               or str(creds.get("tailscale_key") or ""))
+        win = str(data.get("windows_version") or "").strip() or str(creds.get("windows") or "")
+        minutes = data.get("timeout_minutes") or creds.get("minutes") or ""
+        try:
+            res = vm_lib.create_vm(pat, key, BOT_TOKEN, chat_id, win, minutes)
+        except Exception as e:
+            self._json(200, {"ok": False, "error": oneline(_redact_secrets(str(e)), 400)})
+            return
+        save_vm_creds(pat=pat, tskey=key, windows=res["windows"], minutes=res["minutes"])
+        self._json(200, {
+            "ok": True,
+            "login": res["login"],
+            "repo": res["repo"],
+            "windows": res["windows"],
+            "minutes": res["minutes"],
+            "run_url": res["run_url"],
+            "workflow_url": res["workflow_url"],
+            "message": (
+                f"Đã kích hoạt máy ảo trên account {res['login']} ({res['repo']}, "
+                f"{res['windows']}, {res['minutes']} phút). Theo dõi: "
+                f"{res['run_url'] or res['workflow_url']}. "
+                "Thông tin đăng nhập sẽ được gửi qua Telegram DM khi máy ảo sẵn sàng (~2-3 phút)."
+            ),
+        })
 
 
 class _AskServer(ThreadingHTTPServer):
@@ -2401,6 +2532,68 @@ def clear_github_token() -> None:
     GH_TOKEN_CACHE = ""
     STATE["github_user"] = ""
     save_state()
+
+
+# ── Máy ảo Windows: thông tin đã lưu (PAT + Tailscale key) ──────────
+def load_vm_creds() -> dict:
+    try:
+        data = json.loads(VM_CREDS_FILE.read_text("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_vm_creds(pat: Optional[str] = None, tskey: Optional[str] = None,
+                  windows: Optional[str] = None, minutes: Optional[int] = None) -> dict:
+    creds = load_vm_creds()
+    if pat is not None:
+        creds["pat"] = (pat or "").strip()
+    if tskey is not None:
+        creds["tailscale_key"] = (tskey or "").strip()
+    if windows:
+        creds["windows"] = windows
+    if minutes:
+        creds["minutes"] = int(minutes)
+    SECRETS_DIR.mkdir(parents=True, exist_ok=True)
+    VM_CREDS_FILE.write_text(json.dumps(creds), "utf-8")
+    try:
+        VM_CREDS_FILE.chmod(0o600)
+    except Exception:
+        pass
+    return creds
+
+
+def clear_vm_creds() -> None:
+    try:
+        VM_CREDS_FILE.unlink()
+    except Exception:
+        pass
+
+
+def vm_status_text() -> str:
+    if vm_lib is None:
+        return "⚠️ Module aistv_vm chưa có trên máy này."
+    creds = load_vm_creds()
+    pat = str(creds.get("pat") or "")
+    key = str(creds.get("tailscale_key") or "")
+    pat_line = (f"<code>{esc(vm_lib.mask_value(pat))}</code>" if pat
+                else "<b>chưa lưu</b>")
+    key_line = (f"<code>{esc(vm_lib.mask_value(key))}</code>" if key
+                else "<b>chưa lưu</b>")
+    lines = ["🖥 <b>Máy ảo Windows (Integration Test)</b>",
+             f"• PAT GitHub: {pat_line}",
+             f"• Tailscale key: {key_line}",
+             f"• Runner: {esc(creds.get('windows') or 'windows-latest')} · "
+             f"{int(creds.get('minutes') or 330)} phút"]
+    if pat and key:
+        lines.append("• Sẵn sàng: <code>/vm create</code>")
+    lines += ["", "<b>Lệnh</b>",
+              "/vm token &lt;PAT&gt; — lưu PAT của tài khoản sẽ chạy máy ảo",
+              "/vm key &lt;tskey&gt; — lưu Tailscale auth key (tag:vm-user)",
+              "/vm create [windows] [phút] — tạo máy ảo (60–330 phút)",
+              "/vm &lt;PAT&gt; &lt;tskey&gt; — lưu cả hai rồi tạo luôn",
+              "/vm forget — xoá thông tin đã lưu"]
+    return "\n".join(lines)
 
 
 # ── Quét repo của tài khoản đang dùng token & chọn repo đích ──
@@ -5138,6 +5331,8 @@ HELP_TEXT = (
     "/github repos — quét repo của tài khoản, bấm nút để chọn repo đích\n"
     "/github repo use owner/name — đặt repo đích · /github repo create tên [private]\n"
     "/github status · /github repo · /github logout\n"
+    "/vm token &lt;PAT&gt; — lưu PAT cho máy ảo (chủ bot)\n"
+    "/vm key &lt;tskey&gt; · /vm create [windows] [phút] — tạo máy ảo Windows integration test\n"
     "/push — đẩy code lên GitHub ngay (Windows chạy run.bat là có bản mới)\n"
     "/update — pull bản mới trên GitHub rồi khởi động lại\n/restart — khởi động lại bot\n\n"
     "<b>Hệ thống (chủ bot)</b>\n/model [provider/tên] — xem/đổi model\n/models — danh sách model\n/allow &lt;id&gt; · /deny &lt;id&gt; — cấp/thu hồi quyền"
@@ -5573,6 +5768,119 @@ async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows.append([InlineKeyboardButton("📦 Repo hiện tại", callback_data="ghr:cur")])
         kb = InlineKeyboardMarkup(rows)
     await msg.reply_text("\n".join(lines), parse_mode=HTML, reply_markup=kb)
+
+
+@guard(owner_only=True)
+async def cmd_vm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat = update.effective_message, update.effective_chat
+    if chat.type != "private":
+        await msg.reply_text("⚠️ /vm chỉ dùng trong chat riêng — thông tin đăng nhập gửi qua DM.")
+        return
+    args = [a.strip() for a in (context.args or []) if a.strip()]
+    sub = args[0].lower() if args else "status"
+
+    if sub in ("forget", "clear", "xoa"):
+        clear_vm_creds()
+        await msg.reply_text("🧹 Đã xoá PAT + Tailscale key đã lưu trên máy này.")
+        return
+    if sub in ("token", "pat"):
+        pat = args[1] if len(args) > 1 else ""
+        if not pat:
+            await msg.reply_text("Dùng: /vm token &lt;PAT&gt;", parse_mode=HTML)
+            return
+        try:
+            login = await asyncio.to_thread(vm_lib.whoami, pat) if vm_lib else "?"
+        except Exception as e:
+            await msg.reply_text("❌ " + oneline(_redact_secrets(str(e)), 300))
+            return
+        save_vm_creds(pat=pat)
+        try:
+            await msg.delete()          # xoá tin nhắn chứa PAT
+        except Exception:
+            pass
+        await msg.reply_text(
+            f"✅ Đã lưu PAT cho account <b>{esc(login)}</b> (chỉ trên máy này).\n"
+            "Bước tiếp: <code>/vm key &lt;tskey&gt;</code> rồi <code>/vm create</code>.",
+            parse_mode=HTML)
+        return
+    if sub in ("key", "tskey"):
+        key = args[1] if len(args) > 1 else ""
+        if not key:
+            await msg.reply_text("Dùng: /vm key &lt;tskey-…&gt;", parse_mode=HTML)
+            return
+        save_vm_creds(tskey=key)
+        mask = vm_lib.mask_value(key) if vm_lib else "***"
+        try:
+            await msg.delete()          # xoá tin nhắn chứa key
+        except Exception:
+            pass
+        await msg.reply_text(
+            f"✅ Đã lưu Tailscale key <code>{esc(mask)}</code>.\n"
+            "Tạo máy ảo: <code>/vm create [windows-latest|windows-2022|windows-2025] [60–330]</code>",
+            parse_mode=HTML)
+        return
+    if sub in ("create", "tao", "new"):
+        win = args[1] if len(args) > 1 else ""
+        minutes = args[2] if len(args) > 2 else ""
+        await _vm_create_flow(context, chat.id, "", "", win, minutes)
+        return
+
+    # /vm <PAT> <tskey> [windows] [phút] — lưu cả hai rồi tạo luôn
+    if len(args) >= 2:
+        win = args[2] if len(args) > 2 else ""
+        minutes = args[3] if len(args) > 3 else ""
+        try:
+            await msg.delete()          # xoá tin nhắn chứa PAT + key
+        except Exception:
+            pass
+        await _vm_create_flow(context, chat.id, args[0], args[1], win, minutes)
+        return
+    await msg.reply_text(vm_status_text(), parse_mode=HTML)
+
+
+async def _vm_create_flow(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                          pat: str, key: str, win: str, minutes) -> None:
+    """Tạo máy ảo từ creds truyền vào hoặc creds đã lưu; báo kết quả vào chat."""
+    bot = context.bot
+    if vm_lib is None:
+        await bot.send_message(chat_id, "⚠️ Module aistv_vm chưa có trên máy này — cập nhật bot rồi thử lại.")
+        return
+    creds = load_vm_creds()
+    pat = (pat or "").strip() or str(creds.get("pat") or "")
+    key = (key or "").strip() or str(creds.get("tailscale_key") or "")
+    if not pat or not key:
+        await bot.send_message(
+            chat_id,
+            "⚠️ Thiếu PAT GitHub hoặc Tailscale key.\n"
+            "Lưu trước: <code>/vm token &lt;PAT&gt;</code> · <code>/vm key &lt;tskey&gt;</code>",
+            parse_mode=HTML)
+        return
+    wait = await bot.send_message(chat_id, "⏳ Đang tạo máy ảo… (fork repo, ghi secrets, kích hoạt workflow)")
+    try:
+        res = await asyncio.to_thread(
+            vm_lib.create_vm, pat, key, BOT_TOKEN, chat_id,
+            win or str(creds.get("windows") or ""), minutes or creds.get("minutes") or "")
+    except Exception as e:
+        text = "❌ " + oneline(_redact_secrets(str(e)), 500)
+        try:
+            await wait.edit_text(text)
+        except Exception:
+            await bot.send_message(chat_id, text)
+        return
+    save_vm_creds(pat=pat, tskey=key, windows=res["windows"], minutes=res["minutes"])
+    state_note = "fork mới" if res["repo_state"] == "forked" else "có sẵn"
+    text = (
+        f"✅ <b>Đã kích hoạt máy ảo</b>\n"
+        f"• Account: <b>{esc(res['login'])}</b>\n"
+        f"• Repo: <code>{esc(res['repo'])}</code> ({state_note})\n"
+        f"• Runner: {esc(res['windows'])} · {res['minutes']} phút\n"
+        f"• Theo dõi: {esc(res['run_url'] or res['workflow_url'])}\n\n"
+        "🔐 IP Tailscale, user, mật khẩu sẽ được gửi qua <b>Telegram DM</b> khi máy ảo sẵn sàng (~2–3 phút)."
+    )
+    try:
+        await wait.edit_text(text, parse_mode=HTML)
+    except Exception:
+        await bot.send_message(chat_id, text, parse_mode=HTML)
 
 
 @guard(owner_only=True)
@@ -6668,6 +6976,9 @@ def _redact_secrets(text: str) -> str:
     text = re.sub(r"\bAIza[0-9A-Za-z_-]{20,}\b", "***", text)
     text = re.sub(r"\bAQ\.[0-9A-Za-z_-]{15,}\b", "***", text)
     text = re.sub(r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b", "***", text)
+    text = re.sub(r"\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{20,}\b", "***", text)
+    text = re.sub(r"\bgithub_pat_[0-9A-Za-z_]{20,}\b", "***", text)
+    text = re.sub(r"\btskey-[0-9A-Za-z_-]{10,}\b", "***", text)
     return text
 
 
@@ -9198,7 +9509,8 @@ COMMANDS = [
     ("mindmap", "Vẽ sơ đồ tư duy"), ("pages", "Lời giải dài → ảnh từng trang"),
     ("video", "Xem video bằng Gemini"),
     ("summary", "Tóm tắt hội thoại vào trí nhớ"), ("email", "Đọc / gửi email"),
-    ("github", "Kết nối / quản lý GitHub"), ("update", "Cập nhật bot từ GitHub"),
+    ("github", "Kết nối / quản lý GitHub"), ("vm", "Tạo máy ảo Windows (test)"),
+    ("update", "Cập nhật bot từ GitHub"),
     ("push", "Đẩy code lên GitHub (đồng bộ sang Windows)"),
     ("restart", "Khởi động lại bot"),
     ("key", "Xem / đặt API key"),
@@ -9480,7 +9792,8 @@ def main() -> None:
                       (["pages", "trang"], cmd_pages),
                       (["video"], cmd_video),
                       (["summary", "summarize"], cmd_summary), (["email", "mail"], cmd_email),
-                      (["github"], cmd_github), (["update"], cmd_update), (["push"], cmd_push),
+                      (["github"], cmd_github), (["vm"], cmd_vm),
+                      (["update"], cmd_update), (["push"], cmd_push),
                       (["restart"], cmd_restart),
                       (["files"], cmd_files), (["get"], cmd_get), (["allow"], cmd_allow), (["deny"], cmd_deny),
                       (["key", "keys"], cmd_key),
