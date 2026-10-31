@@ -188,31 +188,44 @@ jobs:
           if ($timeoutMin -gt 360) { $timeoutMin = 360 }
           $deadline = (Get-Date).ToUniversalTime().AddMinutes($timeoutMin).ToString('yyyy-MM-dd HH:mm') + ' UTC'
 
+          function Add-Field($list, [string]$label, [string]$value) {
+            $list.Add('<b>' + $label + '</b>')
+            $list.Add('<pre>' + (Escape-Html (OneLine $value)) + '</pre>')
+          }
+
           $lines = [System.Collections.Generic.List[string]]::new()
-          $lines.Add('🖥 <b>AI STV · Máy ảo Windows đã sẵn sàng</b>')
+          $lines.Add('🖥 <b>Máy ảo Windows đã sẵn sàng</b>')
           if ($env:REQ_BY) {
             $lines.Add('👤 Yêu cầu bởi: <b>' + (Escape-Html (OneLine $env:REQ_BY)) + '</b>')
           }
           $lines.Add('')
-          $lines.Add('<b>1 · Thông tin kết nối</b>')
-          $lines.Add('<pre>' + (@(
-              'Máy      : ' + $env:TS_HOST,
-              'Tailnet  : ' + $env:TS_DNS,
-              'IP       : ' + $env:TS_IP,
-              'User     : ' + $env:VM_USER,
-              'Password : ' + $env:VM_PASS
-            ) -join "`n") + '</pre>')
-          $lines.Add('⏱ Hạn dùng: <b>' + $timeoutMin + ' phút</b> (đến ' + $deadline + ')')
+          $lines.Add('━━━━━━━━━━━━━━━━━━━━')
+          $lines.Add('<b>THÔNG TIN ĐĂNG NHẬP</b>')
           $lines.Add('')
-          $lines.Add('<b>2 · Cách vào máy</b>')
-          $lines.Add('1) Cài Tailscale cho Windows: https://tailscale.com/download/windows')
-          $lines.Add('2) Mở PowerShell và đăng nhập tailnet bằng key của máy này:')
+          Add-Field $lines 'Username' $env:VM_USER
+          Add-Field $lines 'IP (Tailscale)' $env:TS_IP
+          Add-Field $lines 'Password' $env:VM_PASS
+          $lines.Add('')
+          $lines.Add('<b>Máy</b>')
+          $lines.Add('<pre>' + (Escape-Html (OneLine $env:TS_HOST)) + '</pre>')
+          $lines.Add('')
+          $lines.Add('⏱ <b>Thời hạn:</b> ' + $timeoutMin + ' phút · đến <b>' + $deadline + '</b>')
+          $lines.Add('')
+          $lines.Add('━━━━━━━━━━━━━━━━━━━━')
+          $lines.Add('<b>KẾT NỐI</b>')
+          $lines.Add('')
+          $lines.Add('<b>1. Cài Tailscale</b>')
+          $lines.Add('https://tailscale.com/download/windows')
+          $lines.Add('<b>2. Tham gia tailnet</b>')
           $lines.Add('<pre>tailscale up --authkey=' + (Escape-Html $env:TAILSCALE_AUTHKEY) + ' --accept-routes</pre>')
-          $lines.Add('3) Mở Remote Desktop (mstsc) và kết nối:')
-          $lines.Add('<pre>mstsc /v:' + (Escape-Html $env:TS_IP) + '</pre>')
-          $lines.Add('4) Đăng nhập bằng <b>User</b> và <b>Password</b> ở mục 1.')
+          $lines.Add('<b>3. Remote Desktop (RDP)</b>')
+          $lines.Add('<pre>mstsc /v:' + (Escape-Html (OneLine $env:TS_IP)) + '</pre>')
+          $lines.Add('Đăng nhập bằng Username và Password ở trên.')
+          $lines.Add('<b>4. SSH</b> (chỉ khi máy bật OpenSSH Server)')
+          $lines.Add('<pre>ssh ' + (Escape-Html (OneLine $env:VM_USER)) + '@' + (Escape-Html (OneLine $env:TS_IP)) + '</pre>')
           $lines.Add('')
-          $lines.Add('<b>3 · Lưu ý</b>')
+          $lines.Add('━━━━━━━━━━━━━━━━━━━━')
+          $lines.Add('<b>LƯU Ý</b>')
           $lines.Add('• Key Tailscale chỉ dùng cho máy này — không chia sẻ ra ngoài.')
           $lines.Add('• Máy tự huỷ sau ' + $timeoutMin + ' phút; dừng sớm: /vm → 🛑 Dừng máy ảo.')
           $text = $lines -join "`n"

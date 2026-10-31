@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Kiểm tra đọc/ghi cấu hình dùng chung (aistv_config.py)."""
+import json
 import os
 import shutil
 import sys
@@ -179,6 +180,64 @@ class VaultTest(unittest.TestCase):
         self.assertEqual(got["GITHUB_TOKEN"], "gho_x")
         self.assertEqual(got["GEMINI_API_KEY"], "AIza")
         self.assertNotIn("TELEGRAM_BOT_TOKEN", got)
+
+
+class ConfigJsonTest(unittest.TestCase):
+    """config.json trong repo: ưu tiên hơn .env, lỗi JSON không làm sập bot."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        self.cfg_dir = self.tmp / "cfg"
+
+    def _read(self, cwd=None):
+        patches = [
+            mock.patch.dict(os.environ, {"AISTV_CONFIG_DIR": str(self.cfg_dir)}),
+            mock.patch("pathlib.Path.home", return_value=self.tmp / "home"),
+        ]
+        if cwd is not None:
+            patches.append(mock.patch("pathlib.Path.cwd", return_value=cwd))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return cfg.read_files(self.repo)
+
+    def test_config_json_wins_over_dotenv(self):
+        (self.repo / ".env").write_text(
+            "TELEGRAM_BOT_TOKEN=" + GOOD_TOKEN + "\nK=env\n", "utf-8")
+        (self.repo / "config.json").write_text(
+            json.dumps({"TELEGRAM_BOT_TOKEN": "111111:AAA" + "z" * 30, "K": "json"}),
+            "utf-8")
+        values, sources = self._read()
+        self.assertEqual(values["K"], "json")
+        self.assertEqual(values["TELEGRAM_BOT_TOKEN"], "111111:AAA" + "z" * 30)
+        self.assertEqual(sources["K"], self.repo / "config.json")
+
+    def test_repo_config_json_wins_over_cwd(self):
+        cwd = self.tmp / "cwd"
+        cwd.mkdir()
+        (cwd / "config.json").write_text(json.dumps({"K": "cwd"}), "utf-8")
+        (self.repo / "config.json").write_text(json.dumps({"K": "repo"}), "utf-8")
+        values, sources = self._read(cwd=cwd)
+        self.assertEqual(values["K"], "repo")
+        self.assertEqual(sources["K"], self.repo / "config.json")
+
+    def test_invalid_json_is_skipped(self):
+        (self.repo / "config.json").write_text("{not json", "utf-8")
+        (self.repo / ".env").write_text("K=env\n", "utf-8")
+        values, _ = self._read()
+        self.assertEqual(values["K"], "env")
+
+    def test_describe_reports_missing_and_bad_json(self):
+        (self.repo / "config.json").write_text("{bad", "utf-8")
+        with mock.patch.dict(os.environ, {"AISTV_CONFIG_DIR": str(self.cfg_dir)}), \
+                mock.patch("pathlib.Path.home", return_value=self.tmp / "home"):
+            lines = "\n".join(cfg.describe_config_sources(self.repo))
+        self.assertIn("JSON lỗi", lines)
+        self.assertIn("không có", lines)
+        self.assertIn("env TELEGRAM_BOT_TOKEN", lines)
 
 
 if __name__ == "__main__":

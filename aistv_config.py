@@ -64,6 +64,7 @@ except Exception:
 
 DEFAULT_REPO = "Phucvncom55/AISTV-secrets"
 DEFAULT_PATH = "config.env"
+CONFIG_JSON_NAME = "config.json"
 CORE_KEYS = ("TELEGRAM_BOT_TOKEN",)
 HTTP_TIMEOUT = 20
 USER_AGENT = "aistv-config/1.0"
@@ -139,6 +140,73 @@ def env_files(repo: Path = None) -> list:
     return out
 
 
+def config_json_files(repo: Path = None) -> list:
+    """File config.json, ưu tiên repo > thư mục hiện tại > config_dir."""
+    override = (os.getenv("AISTV_CONFIG_JSON") or "").strip()
+    if override:
+        return [Path(override).expanduser()]
+    repo = Path(repo or repo_dir())
+    files = [repo / CONFIG_JSON_NAME,
+             Path.cwd() / CONFIG_JSON_NAME,
+             config_dir() / CONFIG_JSON_NAME]
+    seen, out = set(), []
+    for path in files:
+        try:
+            key = str(path.resolve())
+        except Exception:
+            key = str(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def parse_config_json(text: str) -> dict:
+    """Đọc config.json dạng phẳng: {"TELEGRAM_BOT_TOKEN": "..."}."""
+    data = json.loads((text or "").lstrip("\ufeff"))
+    if not isinstance(data, dict):
+        return {}
+    values = {}
+    for name, value in data.items():
+        if not isinstance(name, str) or not _KEY_RE.match(name):
+            continue
+        if value is None or isinstance(value, (dict, list, bool)):
+            continue
+        value = str(value).strip()
+        if value:
+            values[name] = value
+    return values
+
+
+def config_source_paths(repo: Path = None) -> list:
+    """Các nguồn cấu hình theo thứ tự ưu tiên giảm dần (để chẩn đoán)."""
+    return config_json_files(repo) + env_files(repo)
+
+
+def describe_config_sources(repo: Path = None) -> list:
+    """Mô tả từng nguồn: tồn tại/đọc được/JSON hợp lệ hay không."""
+    repo = Path(repo or repo_dir())
+    env_set = bool((os.getenv("TELEGRAM_BOT_TOKEN") or "").strip())
+    lines = [f"  - env TELEGRAM_BOT_TOKEN: "
+             f"{'đã đặt' if env_set else 'không đặt'}"]
+    for path in config_source_paths(repo):
+        try:
+            if not path.is_file():
+                lines.append(f"  - {path}: không có")
+                continue
+            text = path.read_text("utf-8", "replace")
+            if path.suffix.lower() == ".json":
+                try:
+                    parse_config_json(text)
+                except Exception as e:
+                    lines.append(f"  - {path}: JSON lỗi ({e})")
+                    continue
+            lines.append(f"  - {path}: có")
+        except OSError as e:
+            lines.append(f"  - {path}: không đọc được ({e.strerror or e})")
+    return lines
+
+
 # ────────────────────────────────────────────────────────────────────
 # Đọc / ghi file .env
 # ────────────────────────────────────────────────────────────────────
@@ -173,13 +241,22 @@ def parse_env_text(text: str) -> dict:
 
 
 def read_files(repo: Path = None):
-    """Trả về (values, sources). Repo .env thắng config.env."""
+    """Trả về (values, sources).
+
+    Ưu tiên tăng dần: config.env dùng chung < .env home/STV/cwd < .env repo
+    < config.json (repo > cwd > config_dir). Biến môi trường do get_value xử lý.
+    """
     values, sources = {}, {}
-    for path in reversed(env_files(repo)):
+    data_paths = list(reversed(env_files(repo)))
+    data_paths += list(reversed(config_json_files(repo)))
+    for path in data_paths:
         try:
             if not path.is_file():
                 continue
-            for name, value in parse_env_text(path.read_text("utf-8", "replace")).items():
+            text = path.read_text("utf-8", "replace")
+            parsed = (parse_config_json(text) if path.suffix.lower() == ".json"
+                      else parse_env_text(text))
+            for name, value in parsed.items():
                 values[name] = value
                 sources[name] = path
         except Exception:
@@ -550,10 +627,14 @@ def prompt_bot_token(log=None) -> str:
     if not valid_bot_token(value):
         say("⚠ Token không đúng định dạng (phải dạng 123456:ABC...) — không lưu.")
         return ""
-    for path in (shared_config_path(), repo_dir() / ".env"):
-        write_env_var(path, "TELEGRAM_BOT_TOKEN", value)
     os.environ["TELEGRAM_BOT_TOKEN"] = value
-    say(f"✅ Đã lưu token vào {shared_config_path()} — lần sau không cần nhập lại.")
+    saved = [p for p in (shared_config_path(), repo_dir() / ".env")
+             if write_env_var(p, "TELEGRAM_BOT_TOKEN", value)]
+    if saved:
+        say("✅ Đã lưu token vào: " + ", ".join(str(p) for p in saved))
+        say("   Lần sau không cần nhập lại.")
+    else:
+        say("⚠ Không ghi được file cấu hình — token chỉ dùng cho lần chạy này.")
     return value
 
 
@@ -849,6 +930,10 @@ def sync(quiet: bool = False, repo: Path = None, offline: bool = False, protecte
         #    thay vì bắt đăng nhập GitHub bằng mã.
         if not vault_token(values) and not os.getenv("AISTV_TOKEN_ASKED"):
             os.environ["AISTV_TOKEN_ASKED"] = "1"
+            if not quiet:
+                log("[config] Chưa thấy TELEGRAM_BOT_TOKEN. Đã kiểm tra:")
+                for line in describe_config_sources(repo):
+                    log(line)
             if prompt_bot_token(log=log):
                 values["TELEGRAM_BOT_TOKEN"] = os.environ["TELEGRAM_BOT_TOKEN"]
         # 1) Kho cấu hình mã hoá: máy mới chỉ cần token bot là đủ.
@@ -904,9 +989,10 @@ def set_value(name: str, value: str, repo: Path = None) -> bool:
         return False
     if name == "TELEGRAM_BOT_TOKEN" and not valid_bot_token(value):
         return False
-    write_env_var(shared_config_path(), name, value)
-    write_env_var(Path(repo or repo_dir()) / ".env", name, value)
-    return True
+    wrote = False
+    for path in (shared_config_path(), Path(repo or repo_dir()) / ".env"):
+        wrote = write_env_var(path, name, value) or wrote
+    return wrote
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -927,6 +1013,11 @@ def cmd_doctor(repo: Path = None) -> int:
           f"({'có' if shared_config_path().is_file() else 'chưa có'})")
     print(f".env của repo   : {repo / '.env'} "
           f"({'có' if (repo / '.env').is_file() else 'chưa có'})")
+    print(f"config.json     : {repo / CONFIG_JSON_NAME} "
+          f"({'có' if (repo / CONFIG_JSON_NAME).is_file() else 'chưa có'})")
+    print("Nguồn cấu hình (ưu tiên giảm dần):")
+    for line in describe_config_sources(repo):
+        print(line)
     tokens = github_tokens(values)
     print("Token GitHub    : " + (", ".join(s for s, _ in tokens) if tokens else "không có"))
     print(f"AISTV_ENV_URL   : {'có' if _pick('AISTV_ENV_URL', values) else 'chưa đặt'}")
