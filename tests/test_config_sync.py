@@ -145,5 +145,41 @@ class EnvFileTest(unittest.TestCase):
                          "gho_TEST_TOKEN")
 
 
+class VaultTest(unittest.TestCase):
+    """Kho cấu hình mã hoá: máy mới chỉ cần token bot, không cần mã GitHub."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.token = GOOD_TOKEN
+        self.data = {"GITHUB_TOKEN": "gho_x", "GEMINI_API_KEY": "AIza",
+                     "ALLOWED_USER_IDS": "1,2"}
+
+    def test_encrypt_decrypt_roundtrip(self):
+        blob = cfg.vault_encrypt(self.data, self.token)
+        self.assertEqual(cfg.vault_decrypt(blob, self.token), self.data)
+        self.assertNotIn("gho_x", blob)
+
+    def test_wrong_token_rejected(self):
+        blob = cfg.vault_encrypt(self.data, self.token)
+        with self.assertRaises(ValueError):
+            cfg.vault_decrypt(blob, "987654321:AAH" + "y" * 32)
+
+    def test_restore_needs_bot_token(self):
+        with mock.patch.dict(os.environ, {"AISTV_VAULT": "1"}, clear=False):
+            os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+            self.assertEqual(cfg.vault_restore({"AISTV_VAULT_URL": "https://x"}), {})
+
+    def test_restore_returns_values(self):
+        blob = cfg.vault_encrypt(self.data, self.token)
+        payload = {"v": 1, "at": 0, "blob": blob}
+        with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": self.token}), \
+                mock.patch.object(cfg, "_http_json", return_value=payload):
+            got = cfg.vault_restore({"AISTV_VAULT_URL": "https://example.firebaseio.com"})
+        self.assertEqual(got["GITHUB_TOKEN"], "gho_x")
+        self.assertEqual(got["GEMINI_API_KEY"], "AIza")
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", got)
+
+
 if __name__ == "__main__":
     unittest.main()

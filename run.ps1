@@ -263,26 +263,18 @@ if ($importCheck.Code -ne 0) {
 }
 Say "Thu vien Python OK"
 
-# -- 4. Dong bo cau hinh tu GitHub / URL (giong run.bat / run.sh) -----
-# AISTV_ENV_URL -> repo private (AISTV_CONFIG_TOKEN / GH_TOKEN / gh auth token /
-# Colab Secrets). Nho vay token da co tren GitHub thi khong hoi lai.
+# -- 4. Token: hoi truoc khi dong bo ------------------------------------
+# Kho cau hinh ma hoa chi can TELEGRAM_BOT_TOKEN -> may moi khong phai nhap
+# ma GitHub. Hoi token truoc (5 giay) thay vi cho ma 10 phut.
 $configScript = Join-Path $script:AppDir "aistv_config.py"
-if (Test-Path -LiteralPath $configScript) {
-    Reset-FileEnv
-    Invoke-Py $configScript "sync"
-    Import-EnvFiles
-    $env:AISTV_CONFIG_SYNCED = "1"
-}
-
-# -- 5. Token: hoi lan cuoi neu GitHub/URL cung khong co ----------------
 if (-not $env:TELEGRAM_BOT_TOKEN) {
     $canPrompt = $true
     try { $canPrompt = -not [Console]::IsInputRedirected } catch { $canPrompt = $true }
     if ($canPrompt) {
         Write-Host ""
-        Write-Host "x Chua co Telegram Bot Token trong .env / config.env / GitHub." -ForegroundColor Red
-        Write-Host "  * Kiem tra nguon: $script:PyExe $configScript doctor"
-        Write-Host "  * Tao bot: nhan @BotFather -> /newbot -> lay token 123456:ABC..."
+        Write-Host "x Chua co Telegram Bot Token trong .env / config.env / Colab Secrets." -ForegroundColor Red
+        Write-Host "  * Bot da tao: t.me/BotFather -> /mybots -> API Token"
+        Write-Host "  * Dan token mot lan: cac key con lai (GitHub, Gemini, Cloudflare...) tu khoi phuc."
         Write-Host ""
         try {
             $secure = Read-Host "Dan Telegram Bot Token (Enter de bo qua)" -AsSecureString
@@ -301,9 +293,17 @@ if (-not $env:TELEGRAM_BOT_TOKEN) {
     }
 }
 
+# -- 5. Dong bo cau hinh: kho ma hoa -> AISTV_ENV_URL -> repo private ----
+if (Test-Path -LiteralPath $configScript) {
+    Reset-FileEnv
+    Invoke-Py $configScript "sync"
+    Import-EnvFiles
+    $env:AISTV_CONFIG_SYNCED = "1"
+}
+
 if (-not $env:TELEGRAM_BOT_TOKEN) {
-    Fail "Thieu TELEGRAM_BOT_TOKEN. Da thu .env, config.env, GitHub (gh/PAT) va Colab Secrets.
-  * Dang nhap GitHub: gh auth login   (hoac dat AISTV_CONFIG_TOKEN)
+    Fail "Thieu TELEGRAM_BOT_TOKEN. Da thu .env, config.env, kho cau hinh ma hoa va Colab Secrets.
+  * Dan token bot mot lan: $script:PyExe $configScript set TELEGRAM_BOT_TOKEN --stdin
   * Hoac them TELEGRAM_BOT_TOKEN vao Colab Secrets / .env roi chay lai.
   * Kiem tra: $script:PyExe $configScript doctor"
 }

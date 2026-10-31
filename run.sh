@@ -95,24 +95,38 @@ _load_env_file() {
   set +a
 }
 
-# ── 2a. Nạp cấu hình từ xa: MỘT implementation dùng chung ─────────────
+# ── 2a. Nạp cấu hình: file cục bộ → token bot → kho mã hoá → GitHub ──
 # aistv_config.py giống hệt run.bat / run.ps1 / aistv_bot.py:
-#   AISTV_ENV_URL → repo private AISTV_CONFIG_REPO
-#   (AISTV_CONFIG_TOKEN / GH_TOKEN / GITHUB_TOKEN / gh auth token / Colab Secrets).
-# Nhờ vậy token đã có trên GitHub thì không hỏi lại ở bất kỳ môi trường nào.
+#   1. kho cấu hình mã hoá (Firebase) — chỉ cần TELEGRAM_BOT_TOKEN là mở được
+#   2. AISTV_ENV_URL → repo private AISTV_CONFIG_REPO
+#      (AISTV_CONFIG_TOKEN / GH_TOKEN / GITHUB_TOKEN / gh auth token / Colab Secrets)
+# Nhờ vậy máy mới KHÔNG phải nhập mã GitHub: token bot (đã có trong .env /
+# config.env / Colab Secrets / dòng lệnh) là đủ để khôi phục toàn bộ cấu hình.
 export AISTV_CONFIG_DIR="$CONFIG_DIR"
-if [[ -f "$APP_DIR/aistv_config.py" ]]; then
-  "$PY" "$APP_DIR/aistv_config.py" sync || true
-  export AISTV_CONFIG_SYNCED=1
-fi
-
 _load_env_file "$CONFIG_FILE"
 _load_env_file "$ENV_FILE"
+
+# Token đặt sẵn trong máy ảnh / Drive / home → không hỏi, không mã GitHub.
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  for _bf in "${AISTV_BOOTSTRAP_TOKEN_FILE:-}" "$CONFIG_DIR/token" \
+             "/content/stv_agent/.secrets/bootstrap_token" \
+             "$HOME/.aistv_token" "/content/.aistv_token" \
+             "/content/drive/MyDrive/aistv/token"; do
+    [[ -n "$_bf" && -f "$_bf" ]] || continue
+    _bt="$(head -n1 "$_bf" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$_bt" =~ ^[0-9]{6,}:[A-Za-z0-9_-]{30,}$ ]]; then
+      TELEGRAM_BOT_TOKEN="$_bt"
+      export TELEGRAM_BOT_TOKEN
+      say "Đã lấy Telegram Bot Token từ $_bf."
+      break
+    fi
+  done
+  unset _bf _bt
+fi
 
 [[ -n "$_ENV_TOKEN" ]] && TELEGRAM_BOT_TOKEN="$_ENV_TOKEN" && export TELEGRAM_BOT_TOKEN
 [[ -n "$_ENV_IDS" ]]   && ALLOWED_USER_IDS="$_ENV_IDS"     && export ALLOWED_USER_IDS
 [[ -n "$_ENV_GEMINI" ]] && GEMINI_API_KEY="$_ENV_GEMINI"   && export GEMINI_API_KEY
-unset _ENV_TOKEN _ENV_IDS _ENV_GEMINI
 
 # Ghi bí mật vào .env của repo VÀ config.env dùng chung (quyền 600), không in ra.
 persist_secret() {
@@ -179,10 +193,13 @@ fi
 # Hỏi token một lần, có giới hạn thời gian để không bao giờ treo ở prompt.
 ask_token() {
   [[ -t 0 ]] || return 1
+  export AISTV_TOKEN_ASKED=1
   cat <<'EOF'
 🔑 Chưa có Telegram Bot Token.
-   1) Mở https://t.me/BotFather → gõ /newbot → đặt tên cho bot
-   2) Copy token dạng 123456789:AAH... rồi dán vào đây
+   • Bot đã tạo: https://t.me/BotFather → /mybots → chọn bot → API Token
+   • Tạo mới   : /newbot → đặt tên → copy token dạng 123456789:AAH...
+   Dán token một lần: các key còn lại (GitHub, Gemini, Cloudflare…) tự khôi
+   phục từ kho mã hoá — KHÔNG cần nhập mã GitHub, không mở trình duyệt.
 EOF
   local line=""
   printf '   Token (Enter để bỏ qua): '
@@ -206,17 +223,28 @@ if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
   ask_token || true
 fi
 
+# Đồng bộ sau khi đã có token bot: kho mã hoá mở được → không hỏi mã GitHub.
+if [[ -f "$APP_DIR/aistv_config.py" ]]; then
+  "$PY" "$APP_DIR/aistv_config.py" sync || true
+  export AISTV_CONFIG_SYNCED=1
+  _load_env_file "$CONFIG_FILE"
+  _load_env_file "$ENV_FILE"
+  [[ -n "$_ENV_TOKEN" ]]  && TELEGRAM_BOT_TOKEN="$_ENV_TOKEN"
+  [[ -n "$_ENV_IDS" ]]    && ALLOWED_USER_IDS="$_ENV_IDS"
+  [[ -n "$_ENV_GEMINI" ]] && GEMINI_API_KEY="$_ENV_GEMINI"
+  export TELEGRAM_BOT_TOKEN ALLOWED_USER_IDS GEMINI_API_KEY
+fi
+unset _ENV_TOKEN _ENV_IDS _ENV_GEMINI
+
 if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
   cat <<EOF >&2
 
 ✖ Chưa có Telegram Bot Token.
-  Đã thử: biến môi trường, .env, $CONFIG_FILE, GitHub/URL.
-  • Nhanh nhất: mở https://t.me/BotFather → /newbot → copy token, rồi chạy lại:
+  Đã thử: biến môi trường, .env, $CONFIG_FILE, kho cấu hình mã hoá, GitHub/URL.
+  • Nhanh nhất: mở https://t.me/BotFather → /mybots → API Token, rồi chạy lại:
         TELEGRAM_BOT_TOKEN=123456:ABC... bash run.sh
-    Token được lưu vào $CONFIG_FILE cho các lần sau, không phải nhập lại.
-  • Máy đã đăng nhập gh: runner tự lấy token từ repo AISTV-secrets.
-  • Chưa có gh: đặt AISTV_CONFIG_TOKEN (PAT đọc repo AISTV-secrets) hoặc thêm
-    TELEGRAM_BOT_TOKEN vào 🔑 Colab Secrets (bật Notebook access).
+    Các key còn lại (GitHub, Gemini, Cloudflare…) tự khôi phục — không cần mã GitHub.
+  • Hoặc thêm TELEGRAM_BOT_TOKEN vào 🔑 Colab Secrets (bật Notebook access).
   • Kiểm tra nguồn: python aistv_config.py doctor
 
 EOF

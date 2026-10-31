@@ -164,9 +164,9 @@ if errorlevel 1 goto pip_fail
 if errorlevel 1 goto import_fail
 echo [AI STV] Thu vien Python OK
 
-rem -- 4. Dong bo cau hinh tu GitHub / URL (giong run.ps1, run.sh) ------
-rem Thu tu: AISTV_ENV_URL -> repo private (AISTV_CONFIG_TOKEN / GH_TOKEN /
-rem gh auth token / Colab Secrets). Nho vay token da co tren GitHub thi khong hoi.
+rem -- 4. Dong bo cau hinh: kho ma hoa -> AISTV_ENV_URL -> GitHub ---------
+rem Chua co token bot thi KHONG cho ma GitHub o buoc nay (tranh cho 10 phut);
+rem hoi token truoc o buoc 5 roi dong bo lai.
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 if exist "%APP_DIR%\aistv_config.py" (
@@ -174,7 +174,9 @@ if exist "%APP_DIR%\aistv_config.py" (
     set "TELEGRAM_BOT_TOKEN="
     set "ALLOWED_USER_IDS="
   )
+  set "AISTV_DEVICE_LOGIN=0"
   "%PYEXE%" %PYPRE% "%APP_DIR%\aistv_config.py" sync
+  set "AISTV_DEVICE_LOGIN="
   if not defined HAD_ENV_TOKEN call :load_config
   set "AISTV_CONFIG_SYNCED=1"
 )
@@ -201,6 +203,12 @@ if not defined TELEGRAM_BOT_TOKEN (
   )
 )
 if not defined TELEGRAM_BOT_TOKEN echo [AI STV] Chua co token - bot se dung va huong dan them.
+
+rem -- 5b. Dong bo lai: da co token bot -> mo kho cau hinh ma hoa --------
+if exist "%APP_DIR%\aistv_config.py" (
+  "%PYEXE%" %PYPRE% "%APP_DIR%\aistv_config.py" sync
+  call :load_config
+)
 
 rem -- 6. Seed workspace lan dau (khong ghi de du lieu da co) ----------
 set "WS=%USERPROFILE%\stv_agent\workspace"

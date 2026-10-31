@@ -148,6 +148,7 @@ SECRET_SYNC_KEYS = (
     "AISTV_IMAGE_MODEL", "AISTV_IMAGE_FALLBACKS", "AISTV_IMAGE_PROVIDER",
     "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN",
     "TOGETHER_API_KEY", "HF_TOKEN", "HUGGINGFACE_API_KEY",
+    "AISTV_FIREBASE_URL", "AISTV_FIREBASE_SECRET",
 )
 
 
@@ -9032,7 +9033,7 @@ def _local_secret_values() -> dict:
         val = get_secret(name)
         if val:
             data[name] = val
-    gh = github_token()
+    gh = github_token() or (get_secret("AISTV_CONFIG_TOKEN") or "").strip()
     if gh:
         data["GITHUB_TOKEN"] = gh
     vm = load_vm_creds()
@@ -9070,6 +9071,13 @@ async def cloud_push_secrets() -> bool:
         return False
     await fb("PUT", "secrets", {"v": 1, "at": int(time.time()), "blob": blob})
     SECRETS_DIRTY = False
+    # Giữ kho cấu hình của aistv_config.py đồng bộ: máy mới mở kho là có ngay
+    # key vừa đổi bằng /key (không phải nhập lại / không chạy device login).
+    if config_lib:
+        try:
+            await asyncio.to_thread(config_lib.vault_push, data)
+        except Exception as e:
+            log.warning("Không cập nhật được kho cấu hình: %s", oneline(str(e), 120))
     return True
 
 
@@ -9912,6 +9920,7 @@ def build_cloud(chat_id: int) -> str:
             f"• Hội thoại chat này: {len(load_history(chat_id))} lượt\n"
             f"• Nhắc việc: {len(REMINDERS)} · Theo dõi: {len(WATCHES)}\n"
             f"• Bí mật đồng bộ: {sum(1 for n in SECRET_SYNC_KEYS if get_secret(n))} mục (mã hoá bằng token bot)\n"
+            "• Máy mới: chỉ cần <code>TELEGRAM_BOT_TOKEN</code> — tự khôi phục, không hỏi mã GitHub\n"
             f"• Tóm tắt tự động: {'bật' if AUTO_SUMMARY else 'tắt'} sau {SUMMARY_MIN_ITEMS} lượt\n\n"
             + hint +
             "Đồng bộ ngay: <code>/cloud sync</code>\n"
@@ -10516,9 +10525,40 @@ def _valid_bot_token(value: str) -> bool:
     return bool(re.match(r"^\d{6,}:[A-Za-z0-9_-]{30,}$", (value or "").strip()))
 
 
+def _prompt_bot_token() -> str:
+    """Hỏi token bot ngay (trước khi đồng bộ) để mở được kho cấu hình mã hoá."""
+    try:
+        if not sys.stdin.isatty():
+            return ""
+    except Exception:
+        return ""
+    os.environ["AISTV_TOKEN_ASKED"] = "1"
+    for _attempt in range(3):
+        try:
+            entered = getpass.getpass("🔑 Dán Telegram Bot Token (lấy từ @BotFather): ").strip()
+        except (EOFError, OSError):
+            entered = ""
+        if not entered:
+            break
+        if not _valid_bot_token(entered):
+            print("❌ Token không đúng định dạng (phải dạng 123456:ABC...). Không lưu.")
+            continue
+        try:
+            path = save_env_var("TELEGRAM_BOT_TOKEN", entered)
+            print(f"✅ Đã lưu token vào {path} — lần sau không cần nhập lại.")
+        except Exception:
+            pass
+        return entered
+    return ""
+
+
 def get_token() -> str:
     # Runner (run.bat / run.ps1 / run.sh) đã đồng bộ trước khi chạy bot → bỏ qua.
     if not os.getenv("AISTV_CONFIG_SYNCED"):
+        # Hỏi token TRƯỚC khi đồng bộ: kho cấu hình mã hoá chỉ cần token bot,
+        # nên không phải đăng nhập GitHub bằng mã trên máy mới.
+        if not get_secret("TELEGRAM_BOT_TOKEN") and os.getenv("AISTV_ASK_TOKEN_FIRST", "1") != "0":
+            _prompt_bot_token()
         if config_lib is not None:
             try:
                 # Chỉ bảo vệ biến do người dùng đặt thật; key đọc từ file thì
@@ -10544,28 +10584,12 @@ def get_token() -> str:
         print("⚠ TELEGRAM_BOT_TOKEN hiện có sai định dạng — bỏ qua, sẽ hỏi lại.")
         tok = ""
     if not tok:
-        for _attempt in range(3):
-            try:
-                entered = getpass.getpass("🔑 Dán Telegram Bot Token (lấy từ @BotFather): ").strip()
-            except (EOFError, OSError):
-                entered = ""
-            if not entered:
-                break
-            if not _valid_bot_token(entered):
-                print("❌ Token không đúng định dạng (phải dạng 123456:ABC...). Không lưu.")
-                continue
-            tok = entered
-            try:
-                path = save_env_var("TELEGRAM_BOT_TOKEN", tok)
-                print(f"✅ Đã lưu token vào {path} — lần sau không cần nhập lại.")
-            except Exception:
-                pass
-            break
+        tok = _prompt_bot_token()
     if not tok:
         raise SystemExit(
             "❌ Thiếu TELEGRAM_BOT_TOKEN.\n"
-            "   • Chạy run.bat / run.ps1 / run.sh — tự lấy từ GitHub nếu máy đã đăng nhập gh\n"
-            "     hoặc có AISTV_CONFIG_TOKEN (PAT đọc repo AISTV-secrets).\n"
+            "   • Chạy run.bat / run.ps1 / run.sh — dán token bot một lần, các key còn lại\n"
+            "     (GitHub, Gemini, Cloudflare…) tự khôi phục từ kho cấu hình mã hoá.\n"
             "   • Hoặc thêm TELEGRAM_BOT_TOKEN vào Colab Secrets (bật Notebook access).\n"
             "   • Hoặc tạo file .env trong thư mục AISTV với dòng:\n"
             "       TELEGRAM_BOT_TOKEN=123456:ABC...\n"

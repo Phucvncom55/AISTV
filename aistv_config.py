@@ -16,7 +16,14 @@ Thứ tự ưu tiên khi đọc:
      • Linux   : ~/.config/aistv/config.env
      • Colab   : /content/drive/MyDrive/aistv/config.env (nếu đã mount Drive)
 
-Nguồn tải từ xa (khi có):
+Nguồn tải từ xa (theo thứ tự):
+  0. Kho cấu hình mã hoá (mặc định Firebase RTDB `aistv/secrets`, khoá là
+     TELEGRAM_BOT_TOKEN) — máy mới chỉ cần token bot là khôi phục đủ GitHub PAT,
+     Gemini, Cloudflare, email… KHÔNG phải đăng nhập GitHub bằng mã.
+     Tắt: AISTV_VAULT=0 · đổi nơi lưu: AISTV_VAULT_URL
+     Token bot có thể đặt sẵn (không nhập tay) ở: AISTV_BOOTSTRAP_TOKEN,
+     $STV_HOME/.secrets/bootstrap_token, ~/.config/aistv/token, ~/.aistv_token,
+     /content/.aistv_token, /content/drive/MyDrive/aistv/token (xem bootstrap_token).
   1. AISTV_ENV_URL      - URL công khai trả về nội dung config.env
   2. AISTV_CONFIG_REPO  - repo private, mặc định Phucvncom55/AISTV-secrets
      Xác thực bằng (theo thứ tự): AISTV_CONFIG_TOKEN → GH_TOKEN / GITHUB_TOKEN
@@ -29,10 +36,14 @@ Lệnh:
   python aistv_config.py check            # im lặng, exit 0/2
   python aistv_config.py get KEY          # in giá trị (script khác dùng)
   python aistv_config.py set KEY --from-env VAR | --stdin
+  python aistv_config.py vault status|push|pull   # kho cấu hình mã hoá
   python aistv_config.py doctor           # xem nguồn cấu hình (không in bí mật)
 """
 
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -62,6 +73,17 @@ GH_CLIENT_ID = os.getenv("AISTV_GH_CLIENT_ID", "178c6fc778ccc68e1d6a")
 GH_SCOPES = os.getenv("AISTV_GH_SCOPES", "repo workflow read:user")
 DEVICE_TIMEOUT = int(os.getenv("AISTV_DEVICE_TIMEOUT", "600") or 600)
 _DEVICE_ATTEMPTED = False
+
+# ── Kho cấu hình mã hoá (khôi phục trên máy mới, KHÔNG cần mã GitHub) ──
+# Bot đẩy các bí mật đã mã hoá bằng TELEGRAM_BOT_TOKEN lên Firebase RTDB.
+# Máy mới chỉ cần token bot (env / .env / Colab Secrets) là đọc lại được
+# toàn bộ: GitHub PAT, Gemini key, Cloudflare, email, Firebase URL…
+# Endpoint công khai chỉ trả blob đã mã hoá; thiếu token bot thì không mở được.
+# Ghi đè bằng biến môi trường AISTV_VAULT_URL nếu đổi database.
+VAULT_DEFAULT_URL = "https://sever-login-ae5cc-default-rtdb.firebaseio.com"
+VAULT_PATH = "aistv/secrets.json"
+VAULT_SALT = b"aistv-secrets-v1"
+VAULT_ITER = 120_000
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -261,6 +283,39 @@ def colab_secret(name: str) -> str:
         return ""
 
 
+def bootstrap_token() -> str:
+    """Token bot đặt sẵn trong máy ảnh / ổ đĩa dùng chung (không cần nhập tay).
+
+    Tìm theo thứ tự: biến môi trường AISTV_BOOTSTRAP_TOKEN → file token trong
+    thư mục cấu hình / home / Drive. Chỉ nhận token đúng định dạng BotFather.
+    """
+    value = (os.getenv("AISTV_BOOTSTRAP_TOKEN") or "").strip()
+    if valid_bot_token(value):
+        return value
+    candidates = []
+    stv = (os.getenv("STV_HOME") or "").strip()
+    if stv:
+        candidates.append(Path(stv).expanduser() / ".secrets" / "bootstrap_token")
+    candidates += [
+        Path("/content/stv_agent/.secrets/bootstrap_token"),
+        config_dir() / "token",
+        Path.home() / ".aistv_token",
+        Path("/content/.aistv_token"),
+        Path("/content/drive/MyDrive/aistv/token"),
+    ]
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            first = path.read_text("utf-8", "replace").strip().splitlines()
+            value = (first[0] if first else "").strip()
+            if valid_bot_token(value):
+                return value
+        except Exception:
+            continue
+    return ""
+
+
 def _pick(name: str, values: dict) -> str:
     return ((os.getenv(name) or "").strip()
             or (values or {}).get(name, "").strip()
@@ -450,13 +505,12 @@ def _persist_warning(log=None) -> None:
         return
     shared = str(shared_config_path())
     if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
-        log("[config] ⚠ Railway không giữ file khi redeploy: đặt AISTV_CONFIG_TOKEN vào "
-            "Variables (`python aistv_railway.py var-set AISTV_CONFIG_TOKEN=<PAT> --deploy`) "
-            "để không phải đăng nhập lại.")
+        log("[config] ⚠ Railway không giữ file khi redeploy: đặt TELEGRAM_BOT_TOKEN "
+            "trong Variables — máy mới chỉ cần token bot là tự khôi phục phần còn lại.")
     elif Path("/content").is_dir() and not shared.startswith("/content/drive"):
-        log("[config] ⚠ Colab không giữ file giữa các phiên: mount Drive "
-            "(from google.colab import drive; drive.mount('/content/drive')) "
-            "hoặc đặt AISTV_CONFIG_TOKEN trong 🔑 Secrets để không phải đăng nhập lại.")
+        log("[config] ⚠ Colab không giữ file giữa các phiên: đặt TELEGRAM_BOT_TOKEN trong "
+            "🔑 Secrets (bật Notebook access) là đủ — các key khác tự khôi phục từ kho mã hoá. "
+            "Muốn giữ cả file: mount Drive.")
 
 
 def normalize_repo(repo: str) -> str:
@@ -467,6 +521,176 @@ def normalize_repo(repo: str) -> str:
     if repo.endswith(".git"):
         repo = repo[:-4]
     return repo
+
+
+def prompt_bot_token(log=None) -> str:
+    """Hỏi token bot khi chưa có nguồn nào (Colab: input() hiện ô nhập).
+
+    Chỉ chạy khi có terminal hoặc đang ở Colab — CI/daemon không bị treo.
+    """
+    if os.getenv("AISTV_ASK_TOKEN", "1").strip().lower() in ("0", "off", "false", "no"):
+        return ""
+    try:
+        interactive = sys.stdin.isatty()
+    except Exception:
+        interactive = False
+    if not interactive and not _colab_available():
+        return ""
+    say = lambda message: print(message, flush=True)   # luôn hiện: đây là prompt
+    say("🔑 Chưa có Telegram Bot Token.")
+    say("   • Bot đã tạo: https://t.me/BotFather → /mybots → API Token")
+    say("   • Tạo mới   : /newbot → đặt tên → copy token")
+    say("   Dán một lần: GitHub/Gemini/Cloudflare… tự khôi phục, KHÔNG cần mã GitHub.")
+    try:
+        value = re.sub(r"\s+", "", input("   Token (Enter để bỏ qua): "))
+    except (EOFError, OSError, KeyboardInterrupt):
+        return ""
+    if not value:
+        return ""
+    if not valid_bot_token(value):
+        say("⚠ Token không đúng định dạng (phải dạng 123456:ABC...) — không lưu.")
+        return ""
+    for path in (shared_config_path(), repo_dir() / ".env"):
+        write_env_var(path, "TELEGRAM_BOT_TOKEN", value)
+    os.environ["TELEGRAM_BOT_TOKEN"] = value
+    say(f"✅ Đã lưu token vào {shared_config_path()} — lần sau không cần nhập lại.")
+    return value
+
+
+def _vault_base(values: dict = None) -> str:
+    """Endpoint kho cấu hình (không phải bí mật — dữ liệu trong đó đã mã hoá)."""
+    values = values or {}
+    return ((os.getenv("AISTV_VAULT_URL") or "").strip()
+            or str(values.get("AISTV_VAULT_URL") or "").strip()
+            or VAULT_DEFAULT_URL).rstrip("/")
+
+
+def _vault_endpoint(values: dict = None) -> str:
+    base = _vault_base(values)
+    if not base:
+        return ""
+    url = f"{base}/{VAULT_PATH.lstrip('/')}"
+    secret = ((os.getenv("AISTV_FIREBASE_SECRET") or "").strip()
+              or str((values or {}).get("AISTV_FIREBASE_SECRET") or "").strip())
+    if secret:
+        url += "?auth=" + urllib.parse.quote(secret)
+    return url
+
+
+def _vault_keys(token: str) -> tuple:
+    master = hashlib.pbkdf2_hmac("sha256", token.encode("utf-8"), VAULT_SALT, VAULT_ITER)
+    return (hmac.new(master, b"enc", hashlib.sha256).digest(),
+            hmac.new(master, b"mac", hashlib.sha256).digest())
+
+
+def _vault_stream(key: bytes, nonce: bytes, size: int) -> bytes:
+    out = bytearray()
+    block = 0
+    while len(out) < size:
+        out += hmac.new(key, nonce + block.to_bytes(8, "big"), hashlib.sha256).digest()
+        block += 1
+    return bytes(out[:size])
+
+
+def vault_encrypt(data: dict, token: str) -> str:
+    """Mã hoá JSON bằng token bot — cùng định dạng blob của aistv_bot._seal."""
+    enc, mac = _vault_keys(token)
+    raw = json.dumps(data, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    nonce = os.urandom(16)
+    ct = bytes(a ^ b for a, b in zip(raw, _vault_stream(enc, nonce, len(raw))))
+    tag = hmac.new(mac, nonce + ct, hashlib.sha256).digest()
+    return base64.b64encode(nonce + tag + ct).decode("ascii")
+
+
+def vault_decrypt(blob: str, token: str) -> dict:
+    raw = base64.b64decode(blob)
+    if len(raw) < 48:
+        raise ValueError("dữ liệu quá ngắn")
+    nonce, tag, ct = raw[:16], raw[16:48], raw[48:]
+    enc, mac = _vault_keys(token)
+    if not hmac.compare_digest(tag, hmac.new(mac, nonce + ct, hashlib.sha256).digest()):
+        raise ValueError("sai khoá hoặc dữ liệu bị sửa")
+    plain = bytes(a ^ b for a, b in zip(ct, _vault_stream(enc, nonce, len(ct))))
+    data = json.loads(plain.decode("utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def _http_json(url: str, data=None, method: str = "GET", timeout: int = HTTP_TIMEOUT):
+    body = json.dumps(data).encode("utf-8") if data is not None else None
+    req = urllib.request.Request(url, data=body, method=method, headers={
+        "User-Agent": USER_AGENT, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    return json.loads(raw) if raw.strip() else None
+
+
+def vault_token(values: dict = None) -> str:
+    """Token bot dùng làm khoá mã hoá kho cấu hình."""
+    values = values or {}
+    token = ((os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+             or str(values.get("TELEGRAM_BOT_TOKEN") or "").strip()
+             or colab_secret("TELEGRAM_BOT_TOKEN")
+             or bootstrap_token())
+    return token if valid_bot_token(token) else ""
+
+
+def vault_restore(values: dict = None, log=None) -> dict:
+    """Đọc + giải mã kho cấu hình. Không có token bot / lỗi mạng → {}."""
+    values = values or {}
+    token = vault_token(values)
+    url = _vault_endpoint(values)
+    if not token or not url:
+        return {}
+    try:
+        payload = _http_json(url)
+    except urllib.error.HTTPError as e:
+        if log:
+            log(f"[config] Kho cấu hình: HTTP {e.code} — bỏ qua, dùng nguồn khác.")
+        return {}
+    except Exception:
+        return {}
+    if not isinstance(payload, dict) or not payload.get("blob"):
+        return {}
+    try:
+        data = vault_decrypt(str(payload["blob"]), token)
+    except Exception:
+        if log:
+            log("[config] Kho cấu hình không giải mã được (token bot đã đổi?) — bỏ qua.")
+        return {}
+    out = {}
+    for name, value in data.items():
+        name, value = str(name), str(value or "").strip()
+        if name == "TELEGRAM_BOT_TOKEN" or not value or not _KEY_RE.match(name):
+            continue
+        out[name] = value
+    if out and log:
+        log(f"[config] Khôi phục {len(out)} mục từ kho cấu hình mã hoá "
+            "(không cần đăng nhập GitHub).")
+    return out
+
+
+def vault_push(values: dict = None, token: str = "", log=None) -> bool:
+    """Mã hoá + ghi kho cấu hình. Không in giá trị bí mật."""
+    values = dict(values or {})
+    token = token or vault_token(values)
+    url = _vault_endpoint(values)
+    if not token or not url:
+        return False
+    data = {k: v for k, v in values.items()
+            if v and _KEY_RE.match(k)
+            and k not in ("TELEGRAM_BOT_TOKEN", "AISTV_VAULT_URL")}
+    if not data:
+        return False
+    blob = vault_encrypt(data, token)
+    try:
+        _http_json(url, {"v": 1, "at": int(time.time()), "blob": blob}, "PUT")
+    except Exception as e:
+        if log:
+            log(f"[config] Không ghi được kho cấu hình: {type(e).__name__}.")
+        return False
+    if log:
+        log(f"[config] Đã cập nhật kho cấu hình ({len(data)} mục, mã hoá bằng token bot).")
+    return True
 
 
 def fetch_url(url: str) -> str:
@@ -588,7 +812,8 @@ def _have_token(values: dict = None) -> bool:
     values = values or {}
     token = ((os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
              or (values.get("TELEGRAM_BOT_TOKEN") or "").strip()
-             or colab_secret("TELEGRAM_BOT_TOKEN"))
+             or colab_secret("TELEGRAM_BOT_TOKEN")
+             or bootstrap_token())
     return valid_bot_token(token)
 
 
@@ -618,9 +843,28 @@ def sync(quiet: bool = False, repo: Path = None, offline: bool = False, protecte
 
     added, labels = 0, []
     remote = {}
+    vault = {}
+    if not offline:
+        # 0) Chưa có token bot ở đâu cả → hỏi một lần (Colab hiện ô nhập),
+        #    thay vì bắt đăng nhập GitHub bằng mã.
+        if not vault_token(values) and not os.getenv("AISTV_TOKEN_ASKED"):
+            os.environ["AISTV_TOKEN_ASKED"] = "1"
+            if prompt_bot_token(log=log):
+                values["TELEGRAM_BOT_TOKEN"] = os.environ["TELEGRAM_BOT_TOKEN"]
+        # 1) Kho cấu hình mã hoá: máy mới chỉ cần token bot là đủ.
+        if os.getenv("AISTV_VAULT", "1").strip().lower() not in ("0", "off", "false", "no"):
+            vault = vault_restore(values, log=log)
+        for name, value in vault.items():
+            if value and not values.get(name):
+                values[name] = value
+        if vault:
+            labels.append("kho cấu hình mã hoá")
     if not offline and os.getenv("AISTV_CONFIG_SYNC", "1").lower() not in ("0", "off", "false"):
-        remote, labels = fetch_remote(values, log=log)
+        remote, remote_labels = fetch_remote(values, log=log)
+        labels.extend(remote_labels)
     to_save = dict(colab_values)
+    if vault:
+        to_save.update({k: v for k, v in vault.items() if v and not to_save.get(k)})
     to_save.update({k: v for k, v in remote.items() if v})
     if remote.get("TELEGRAM_BOT_TOKEN") and not valid_bot_token(remote["TELEGRAM_BOT_TOKEN"]):
         log("[config] Cảnh báo: TELEGRAM_BOT_TOKEN trên GitHub sai định dạng — giữ token cũ.")
@@ -686,6 +930,32 @@ def cmd_doctor(repo: Path = None) -> int:
     tokens = github_tokens(values)
     print("Token GitHub    : " + (", ".join(s for s, _ in tokens) if tokens else "không có"))
     print(f"AISTV_ENV_URL   : {'có' if _pick('AISTV_ENV_URL', values) else 'chưa đặt'}")
+    base = _vault_base(values)
+    host = base.split("//")[-1] if base else ""
+    print(f"Kho cấu hình    : {host or '(chưa cấu hình)'}")
+    if base:
+        token = vault_token(values)
+        if not token:
+            print("  trạng thái    : cần TELEGRAM_BOT_TOKEN để mở kho")
+        else:
+            try:
+                payload = _http_json(_vault_endpoint(values))
+            except urllib.error.HTTPError as e:
+                payload, note = None, f"HTTP {e.code}"
+            except Exception:
+                payload, note = None, "lỗi mạng"
+            else:
+                note = ""
+            if isinstance(payload, dict) and payload.get("blob"):
+                try:
+                    count = len(vault_decrypt(str(payload["blob"]), token))
+                    age = int(time.time()) - int(payload.get("at") or 0)
+                    print(f"  trạng thái    : mở được · {count} mục · cập nhật "
+                          f"{max(0, age) // 60} phút trước")
+                except Exception:
+                    print("  trạng thái    : không giải mã được (token bot khác)")
+            else:
+                print(f"  trạng thái    : chưa có dữ liệu {('· ' + note) if note else ''}")
     repo = _pick("AISTV_CONFIG_REPO", values) or DEFAULT_REPO
     print(f"Repo cấu hình   : {repo}")
     path = _pick("AISTV_CONFIG_PATH", values) or DEFAULT_PATH
@@ -733,6 +1003,11 @@ def main(argv=None) -> int:
     p_doc = sub.add_parser("doctor", help="xem nguồn cấu hình")
     p_doc.add_argument("--json", action="store_true")
 
+    p_vault = sub.add_parser("vault", help="kho cấu hình mã hoá (khôi phục máy mới)")
+    p_vault.add_argument("action", nargs="?", default="status",
+                         choices=("status", "push", "pull"))
+    p_vault.add_argument("--quiet", action="store_true")
+
     args = parser.parse_args(argv)
     if not args.cmd:
         parser.print_help()
@@ -775,6 +1050,28 @@ def main(argv=None) -> int:
 
     if args.cmd == "doctor":
         return cmd_doctor()
+
+    if args.cmd == "vault":
+        values, _src = read_files()
+        if args.action == "status":
+            cmd_doctor()
+            return 0
+        if args.action == "push":
+            tokens = github_tokens(values)
+            if tokens and not values.get("GITHUB_TOKEN"):
+                values["GITHUB_TOKEN"] = tokens[0][1]
+            ok = vault_push(values, log=None if args.quiet else print)
+            return 0 if ok else 1
+        if args.action == "pull":
+            data = vault_restore(values, log=None if args.quiet else print)
+            if not data:
+                print("Không đọc được kho cấu hình (thiếu token bot hoặc chưa có dữ liệu).",
+                      file=sys.stderr)
+                return 1
+            changed = save_values(data, protected=set())
+            print(f"Đã khôi phục {len(data)} mục ({changed} mục thay đổi) → {shared_config_path()}")
+            return 0
+        return 0
 
     parser.print_help()
     return 0
