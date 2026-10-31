@@ -44,6 +44,25 @@ run.bat
 
 Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~/stv_agent` — cập nhật code không mất.
 
+### 1.1. Giấu mã nguồn trong repo riêng tư
+
+Cách chuẩn: **repo công khai chỉ chứa `bootstrap.sh`**, toàn bộ code nằm ở **repo riêng tư**.
+
+1. Đổi repo code (`Phucvncom55/AISTV`) sang **Private**.
+2. Tạo repo công khai mới, ví dụ `Phucvncom55/aistv-boot`, chỉ có `bootstrap.sh` (bản trong repo này).
+3. Tạo **fine-grained PAT** chỉ cấp cho repo riêng tư đó, quyền **Contents: Read** (thêm **Read and write** nếu muốn bot tự push).
+4. Lưu PAT một lần vào 🔑 **Colab Secrets** với tên `GITHUB_TOKEN`. Colab giữ secret theo tài khoản Google, nên **máy mới không phải nhập lại**.
+
+Lệnh chạy vẫn một dòng:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/aistv-boot/main/bootstrap.sh)
+```
+
+`bootstrap.sh` tự tìm token theo thứ tự: biến môi trường (`AISTV_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`) → Colab Secrets → file token (`~/.config/aistv/github_token`, `~/.aistv_token`, `$STV_HOME/.secrets/github_token`) → `gh auth token`. Token được lưu vào `~/.config/aistv/git-credentials` (quyền `600`) để `git pull` / `git push` sau đó không cần nhập lại; token không bao giờ được in ra hay ghi vào `.git/config`.
+
+Lưu ý: repo private dùng **Actions có tính phút** (2.000 phút/tháng, runner Windows tính gấp đôi) — workflow tạo máy ảo Windows chỉ nên dùng với repo public.
+
 ## 2. Cấu hình tối thiểu
 
 | Biến | Bắt buộc | Ý nghĩa |
