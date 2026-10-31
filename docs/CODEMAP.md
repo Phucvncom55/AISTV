@@ -1,6 +1,6 @@
 # CODEMAP — bản đồ code AISTV
 
-> Tự sinh bởi `scripts/code_map.py` · 35 file Python · 28416 dòng. Đừng sửa tay: chỉnh code rồi chạy lại `python scripts/code_map.py`.
+> Tự sinh bởi `scripts/code_map.py` · 35 file Python · 28511 dòng. Đừng sửa tay: chỉnh code rồi chạy lại `python scripts/code_map.py`.
 
 ## Cách dùng cho agent
 
@@ -16,7 +16,7 @@
 | `aistv_bot.py` | 11136 | AI STV AGENT — Telegram × OpenCode (dán 1 ô Colab là chạy) |
 | `aistv_browser.py` | 251 | aistv_browser.py — Điều khiển trình duyệt thật bằng Playwright. |
 | `aistv_cloudflare.py` | 506 | aistv_cloudflare.py — Cloudflare API wrapper cho bot AI STV. |
-| `aistv_config.py` | 1172 | AI STV - đồng bộ cấu hình (token / API key) cho MỌI môi trường. |
+| `aistv_config.py` | 1219 | AI STV - đồng bộ cấu hình (token / API key) cho MỌI môi trường. |
 | `aistv_docs.py` | 259 | aistv_docs.py — Đọc PDF / DOCX / ảnh scan (OCR) hoàn toàn LOCAL. |
 | `aistv_email.py` | 505 | Kết nối email IMAP/SMTP cho AI STV — chỉ dùng thư viện chuẩn. |
 | `aistv_facebook.py` | 468 | AI STV Facebook helper: đọc bài viết, xem/tải video, tìm kiếm. |
@@ -39,7 +39,7 @@
 | `scripts/code_map.py` | 207 | code_map.py — sinh bản đồ code (CODEMAP) để agent định vị nhanh. |
 | `scripts/verify.py` | 155 | verify.py — một lệnh kiểm chứng repo trước khi báo "xong". |
 | `tests/test_cloud_crypto.py` | 74 | Kiểm tra mã hoá dữ liệu cloud (envelope) trong aistv_bot. |
-| `tests/test_config_sync.py` | 244 | Kiểm tra đọc/ghi cấu hình dùng chung (aistv_config.py). |
+| `tests/test_config_sync.py` | 292 | Kiểm tra đọc/ghi cấu hình dùng chung (aistv_config.py). |
 | `tests/test_guest.py` | 198 | Kiểm tra chế độ khách: phân loại yêu cầu, giới hạn chống spam, tách dữ liệu. |
 | `tests/test_math_format.py` | 98 | Kiểm tra quy tắc trình bày Toán/Lý/Hoá/Sinh và đổi LaTeX → Unicode. |
 | `tests/test_media.py` | 97 | Kiểm tra chọn nguồn media cho Web2API (voice/video) và nhận diện patch. |
@@ -548,39 +548,41 @@ L274   def write_env_var(path: Path, name: str, value: str)  — Ghi/cập nhậ
 L310   def save_values(values: dict, repo: Path=None, protected=None)  — Ghi các giá trị vào config.env + .env của repo.
 L349   def _colab_available()
 L353   def colab_secret(name: str)
-L363   def bootstrap_token()  — Token bot đặt sẵn trong máy ảnh / ổ đĩa dùng chung (không cần nhập tay).
-L396   def _pick(name: str, values: dict)
-L402   def stored_github_token()  — Token bot đã lưu sau /github login — dùng được cả khi máy không có gh.
-L423   def github_tokens(values: dict=None)  — Các cặp (nguồn, token) có thể dùng để đọc repo private.
-L453   def _http_get(url: str, headers: dict=None)
-L459   def _post_form(url: str, data: dict)
-L471   def _copy_to_clipboard(text: str)
-L481   def github_device_login(timeout: int=None, log=None)  — Đăng nhập GitHub bằng mã (device flow) và trả về token.
-L544   def _remember_config_token(token: str, values: dict=None)  — Lưu token vừa đăng nhập để lần chạy sau không phải đăng nhập lại.
-L579   def _persist_warning(log=None)  — Cảnh báo khi thư mục cấu hình không sống qua lần chạy sau.
-L593   def normalize_repo(repo: str)
-L603   def prompt_bot_token(log=None)  — Hỏi token bot khi chưa có nguồn nào (Colab: input() hiện ô nhập).
-L641   def _vault_base(values: dict=None)  — Endpoint kho cấu hình (không phải bí mật — dữ liệu trong đó đã mã hoá).
-L649   def _vault_endpoint(values: dict=None)
-L661   def _vault_keys(token: str)
-L667   def _vault_stream(key: bytes, nonce: bytes, size: int)
-L676   def vault_encrypt(data: dict, token: str)  — Mã hoá JSON bằng token bot — cùng định dạng blob của aistv_bot._seal.
-L686   def vault_decrypt(blob: str, token: str)
-L699   def _http_json(url: str, data=None, method: str='GET', timeout: int=HTTP_TIMEOUT)
-L708   def vault_token(values: dict=None)  — Token bot dùng làm khoá mã hoá kho cấu hình.
-L718   def vault_restore(values: dict=None, log=None)  — Đọc + giải mã kho cấu hình. Không có token bot / lỗi mạng → {}.
-L753   def vault_push(values: dict=None, token: str='', log=None)  — Mã hoá + ghi kho cấu hình. Không in giá trị bí mật.
-L777   def fetch_url(url: str)
-L784   def fetch_github_status(repo: str, path: str, token: str='')  — Tải file trong repo → (nội dung, mã HTTP). Mã 0 = lỗi mạng.
-L817   def fetch_github(repo: str, path: str=DEFAULT_PATH, token: str='')
-L821   def fetch_remote(values: dict=None, log=None)  — Tải cấu hình từ xa → (values, nhãn nguồn).
-L892   def _have_token(values: dict=None)
-L901   def sync(quiet: bool=False, repo: Path=None, offline: bool=False, protected=None)  — Đọc file + tải cấu hình từ xa (nếu có) và ghi lại.
-L978   def get_value(name: str, repo: Path=None)
-L987   def set_value(name: str, value: str, repo: Path=None)
-L1001  def _mask(value: str)
-L1007  def cmd_doctor(repo: Path=None)
-L1075  def main(argv=None)
+L363   def bootstrap_token_files()  — Các file có thể chứa token bot đặt sẵn (theo thứ tự ưu tiên).
+L382   def bootstrap_token()  — Token bot đặt sẵn trong máy ảnh / ổ đĩa dùng chung (không cần nhập tay).
+L409   def repo_bot_token(values: dict=None)  — Lấy TELEGRAM_BOT_TOKEN trong repo cấu hình private bằng GitHub token có sẵn.
+L443   def _pick(name: str, values: dict)
+L449   def stored_github_token()  — Token bot đã lưu sau /github login — dùng được cả khi máy không có gh.
+L470   def github_tokens(values: dict=None)  — Các cặp (nguồn, token) có thể dùng để đọc repo private.
+L500   def _http_get(url: str, headers: dict=None)
+L506   def _post_form(url: str, data: dict)
+L518   def _copy_to_clipboard(text: str)
+L528   def github_device_login(timeout: int=None, log=None)  — Đăng nhập GitHub bằng mã (device flow) và trả về token.
+L591   def _remember_config_token(token: str, values: dict=None)  — Lưu token vừa đăng nhập để lần chạy sau không phải đăng nhập lại.
+L626   def _persist_warning(log=None)  — Cảnh báo khi thư mục cấu hình không sống qua lần chạy sau.
+L640   def normalize_repo(repo: str)
+L650   def prompt_bot_token(log=None)  — Hỏi token bot khi chưa có nguồn nào (Colab: input() hiện ô nhập).
+L688   def _vault_base(values: dict=None)  — Endpoint kho cấu hình (không phải bí mật — dữ liệu trong đó đã mã hoá).
+L696   def _vault_endpoint(values: dict=None)
+L708   def _vault_keys(token: str)
+L714   def _vault_stream(key: bytes, nonce: bytes, size: int)
+L723   def vault_encrypt(data: dict, token: str)  — Mã hoá JSON bằng token bot — cùng định dạng blob của aistv_bot._seal.
+L733   def vault_decrypt(blob: str, token: str)
+L746   def _http_json(url: str, data=None, method: str='GET', timeout: int=HTTP_TIMEOUT)
+L755   def vault_token(values: dict=None)  — Token bot dùng làm khoá mã hoá kho cấu hình.
+L765   def vault_restore(values: dict=None, log=None)  — Đọc + giải mã kho cấu hình. Không có token bot / lỗi mạng → {}.
+L800   def vault_push(values: dict=None, token: str='', log=None)  — Mã hoá + ghi kho cấu hình. Không in giá trị bí mật.
+L824   def fetch_url(url: str)
+L831   def fetch_github_status(repo: str, path: str, token: str='')  — Tải file trong repo → (nội dung, mã HTTP). Mã 0 = lỗi mạng.
+L864   def fetch_github(repo: str, path: str=DEFAULT_PATH, token: str='')
+L868   def fetch_remote(values: dict=None, log=None)  — Tải cấu hình từ xa → (values, nhãn nguồn).
+L939   def _have_token(values: dict=None)
+L948   def sync(quiet: bool=False, repo: Path=None, offline: bool=False, protected=None)  — Đọc file + tải cấu hình từ xa (nếu có) và ghi lại.
+L1025  def get_value(name: str, repo: Path=None)
+L1034  def set_value(name: str, value: str, repo: Path=None)
+L1048  def _mask(value: str)
+L1054  def cmd_doctor(repo: Path=None)
+L1122  def main(argv=None)
 ```
 
 ## aistv_docs.py
@@ -1364,6 +1366,14 @@ L185   class ConfigJsonTest  — config.json trong repo: ưu tiên hơn .env, l�
   L218   def test_repo_config_json_wins_over_cwd(self)
   L227   def test_invalid_json_is_skipped(self)
   L233   def test_describe_reports_missing_and_bad_json(self)
+L243   class BootstrapTokenTest  — Máy mới chỉ có GitHub token vẫn lấy được token bot từ repo private.
+  L246   def setUp(self)
+  L256   def tearDown(self)
+  L260   def _env(self, **extra)
+  L268   def test_reads_token_from_config_repo(self)
+  L274   def test_env_shortcut_wins(self)
+  L279   def test_repo_lookup_can_be_disabled(self)
+  L284   def test_bad_value_ignored(self)
 ```
 
 ## tests/test_guest.py

@@ -360,27 +360,37 @@ def colab_secret(name: str) -> str:
         return ""
 
 
+def bootstrap_token_files() -> list:
+    """Các file có thể chứa token bot đặt sẵn (theo thứ tự ưu tiên)."""
+    out = []
+    stv = (os.getenv("STV_HOME") or "").strip()
+    if stv:
+        out.append(Path(stv).expanduser() / ".secrets" / "bootstrap_token")
+    out += [
+        Path("/content/stv_agent/.secrets/bootstrap_token"),
+        config_dir() / "token",
+        repo_dir() / ".secrets" / "bootstrap_token",
+        Path.home() / ".secrets" / "bootstrap_token",
+        Path.home() / ".aistv_token",
+        Path("/content/.aistv_token"),
+        Path("/content/drive/MyDrive/aistv/token"),
+        Path("/content/drive/MyDrive/.aistv/token"),
+    ]
+    return out
+
+
 def bootstrap_token() -> str:
     """Token bot đặt sẵn trong máy ảnh / ổ đĩa dùng chung (không cần nhập tay).
 
     Tìm theo thứ tự: biến môi trường AISTV_BOOTSTRAP_TOKEN → file token trong
-    thư mục cấu hình / home / Drive. Chỉ nhận token đúng định dạng BotFather.
+    thư mục cấu hình / home / Drive → repo cấu hình private (nếu có GitHub
+    token). Chỉ nhận token đúng định dạng BotFather.
     """
-    value = (os.getenv("AISTV_BOOTSTRAP_TOKEN") or "").strip()
-    if valid_bot_token(value):
-        return value
-    candidates = []
-    stv = (os.getenv("STV_HOME") or "").strip()
-    if stv:
-        candidates.append(Path(stv).expanduser() / ".secrets" / "bootstrap_token")
-    candidates += [
-        Path("/content/stv_agent/.secrets/bootstrap_token"),
-        config_dir() / "token",
-        Path.home() / ".aistv_token",
-        Path("/content/.aistv_token"),
-        Path("/content/drive/MyDrive/aistv/token"),
-    ]
-    for path in candidates:
+    for name in ("AISTV_BOOTSTRAP_TOKEN", "AISTV_BOT_TOKEN"):
+        value = (os.getenv(name) or "").strip()
+        if valid_bot_token(value):
+            return value
+    for path in bootstrap_token_files():
         try:
             if not path.is_file():
                 continue
@@ -390,6 +400,43 @@ def bootstrap_token() -> str:
                 return value
         except Exception:
             continue
+    return repo_bot_token()
+
+
+_REPO_BOT_TOKEN = None
+
+
+def repo_bot_token(values: dict = None) -> str:
+    """Lấy TELEGRAM_BOT_TOKEN trong repo cấu hình private bằng GitHub token có sẵn.
+
+    Nhờ vậy máy mới chỉ cần MỘT bí mật duy nhất là GitHub token (đã cần sẵn để
+    clone repo code / đọc repo cấu hình) — không phải nhập lại token bot.
+    Không tự mở đăng nhập GitHub; không có token sẵn → trả về "".
+    """
+    global _REPO_BOT_TOKEN
+    if _REPO_BOT_TOKEN is not None:
+        return _REPO_BOT_TOKEN
+    _REPO_BOT_TOKEN = ""
+    if (os.getenv("AISTV_BOOT_REPO") or "1").strip().lower() in ("0", "off", "false", "no"):
+        return ""
+    values = values or {}
+    repo = _pick("AISTV_CONFIG_REPO", values) or DEFAULT_REPO
+    if repo.lower() in ("0", "off", "none", "false"):
+        return ""
+    path = _pick("AISTV_CONFIG_PATH", values) or DEFAULT_PATH
+    try:
+        tokens = github_tokens(values)[:4]
+    except Exception:
+        tokens = []
+    for _source, token in tokens:
+        try:
+            text, _status = fetch_github_status(repo, path, token)
+        except Exception:
+            continue
+        value = (parse_env_text(text).get("TELEGRAM_BOT_TOKEN") or "").strip()
+        if valid_bot_token(value):
+            _REPO_BOT_TOKEN = value
+            return value
     return ""
 
 

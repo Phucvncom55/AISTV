@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ════════════════════════════════════════════════════════════════════
-#  AI STV — bootstrap (v6)
+#  AI STV — bootstrap (v7)
 #  Tải/cập nhật mã nguồn rồi chạy run.sh trong repo, nhờ vậy không bị
 #  kẹt bản run.sh cũ do cache của raw.githubusercontent.com.
 #
@@ -19,6 +19,12 @@
 #      4. gh auth token
 #  Token được ghi vào ~/.config/aistv/git-credentials (quyền 600) để
 #  git pull/push về sau không cần token nữa. Token KHÔNG BAO GIỜ in ra.
+#
+#  Token bot Telegram: nhận từ AISTV_BOOTSTRAP_TOKEN / AISTV_BOT_TOKEN /
+#  TELEGRAM_BOT_TOKEN trong dòng lệnh, hoặc tự đọc trong repo cấu hình
+#  private bằng token GitHub ở trên (chỉ cần MỘT bí mật là GitHub token).
+#  Tìm thấy thì ghi lại vào $HOME/.config/aistv/token (và Drive nếu có) để
+#  các lần chạy sau không hỏi nữa.
 #
 #  Biến môi trường: AISTV_REPO, AISTV_BRANCH, AISTV_DIR (như run.sh).
 # ════════════════════════════════════════════════════════════════════
@@ -48,7 +54,7 @@ fail() { printf '\033[1;31m✖ %s\033[0m\n' "$*" >&2; exit 1; }
 
 command -v git >/dev/null 2>&1 || fail "Cần git. Debian/Ubuntu: sudo apt-get install -y git"
 
-say "AI STV bootstrap v6"
+say "AI STV bootstrap v7"
 
 # ── 1. Tìm token GitHub (không bắt người dùng nhập) ──────────────────
 valid_token() {
@@ -137,6 +143,60 @@ if [[ -n "$TOKEN" ]]; then
   say "Đã có token GitHub ($TOKEN_SRC) — dùng cho repo riêng tư"
 else
   say "Không thấy token GitHub — thử tải công khai"
+fi
+
+# ── 1b. Token bot Telegram: không bắt người dùng nhập ────────────────
+valid_bot() { [[ "${1:-}" =~ ^[0-9]{6,}:[A-Za-z0-9_-]{30,}$ ]]; }
+
+BOT_TOKEN=""
+pick_bot() {
+  if valid_bot "${1:-}"; then BOT_TOKEN="$1"; return 0; fi
+  return 1
+}
+
+pick_bot "${AISTV_BOOTSTRAP_TOKEN:-}" \
+  || pick_bot "${AISTV_BOT_TOKEN:-}" \
+  || pick_bot "${TELEGRAM_BOT_TOKEN:-}" || true
+
+if [[ -z "$BOT_TOKEN" ]]; then
+  for path in "$STATE_DIR/token" \
+    "${STV_HOME:+$STV_HOME/.secrets/bootstrap_token}" \
+    "/content/stv_agent/.secrets/bootstrap_token" \
+    "$HOME/.aistv_token" "/content/.aistv_token" \
+    "/content/drive/MyDrive/aistv/token"; do
+    [[ -n "$path" && -f "$path" ]] || continue
+    pick_bot "$(head -n1 "$path" 2>/dev/null | tr -d '[:space:]')" && break
+  done
+fi
+
+# Chỉ cần GitHub token là đủ: đọc token bot trong repo cấu hình private.
+if [[ -z "$BOT_TOKEN" && -n "$TOKEN" ]] && command -v curl >/dev/null 2>&1; then
+  _cfg_repo="${AISTV_CONFIG_REPO:-Phucvncom55/AISTV-secrets}"
+  _cfg_path="${AISTV_CONFIG_PATH:-config.env}"
+  _body="$(curl -fsSL -m 20 -H "Authorization: Bearer $TOKEN" \
+    -H 'Accept: application/vnd.github.raw' \
+    "https://api.github.com/repos/${_cfg_repo}/contents/${_cfg_path}" 2>/dev/null || true)"
+  _cand="$(printf '%s\n' "$_body" | grep -m1 '^[[:space:]]*TELEGRAM_BOT_TOKEN[[:space:]]*=' || true)"
+  _cand="${_cand#*=}"
+  _cand="${_cand//[[:space:]]/}"
+  _cand="${_cand//\"/}"
+  _cand="${_cand//\'/}"
+  pick_bot "$_cand" || true
+  unset _cfg_repo _cfg_path _body _cand
+fi
+
+if [[ -n "$BOT_TOKEN" ]]; then
+  export TELEGRAM_BOT_TOKEN="$BOT_TOKEN"
+  mkdir -p "$STATE_DIR" 2>/dev/null && chmod 700 "$STATE_DIR" 2>/dev/null || true
+  for _dst in "$STATE_DIR/token" "/content/drive/MyDrive/aistv/token"; do
+    mkdir -p "$(dirname "$_dst")" 2>/dev/null || continue
+    printf '%s\n' "$BOT_TOKEN" > "$_dst" 2>/dev/null || continue
+    chmod 600 "$_dst" 2>/dev/null || true
+  done
+  unset _dst
+  say "Đã có token bot — không phải nhập tay"
+else
+  say "Chưa có token bot — đặt AISTV_BOOTSTRAP_TOKEN trong lệnh chạy để khỏi nhập"
 fi
 
 # ── 2. Tải / cập nhật mã nguồn ──────────────────────────────────────

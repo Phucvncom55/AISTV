@@ -61,6 +61,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/aistv-boot/main/
 
 `bootstrap.sh` tự tìm token theo thứ tự: biến môi trường (`AISTV_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`) → Colab Secrets → file token (`~/.config/aistv/github_token`, `~/.aistv_token`, `$STV_HOME/.secrets/github_token`) → `gh auth token`. Token được lưu vào `~/.config/aistv/git-credentials` (quyền `600`) để `git pull` / `git push` sau đó không cần nhập lại; token không bao giờ được in ra hay ghi vào `.git/config`.
 
+Token bot Telegram (từ v7) không phải nhập tay nếu có **một** trong các nguồn: `AISTV_BOOTSTRAP_TOKEN` / `AISTV_BOT_TOKEN` trong lệnh chạy → file `~/.config/aistv/token`, `~/.aistv_token`, `/content/drive/MyDrive/aistv/token` → repo cấu hình private `AISTV-secrets/config.env` (đọc bằng chính token GitHub ở trên). Nghĩa là máy mới chỉ cần **một bí mật duy nhất** là token GitHub; tìm được token bot thì script tự ghi lại vào `~/.config/aistv/token` (và Drive nếu đã mount) để lần sau khỏi hỏi.
+
 Lưu ý: repo private dùng **Actions có tính phút** (2.000 phút/tháng, runner Windows tính gấp đôi) — workflow tạo máy ảo Windows chỉ nên dùng với repo public.
 
 ## 2. Cấu hình tối thiểu

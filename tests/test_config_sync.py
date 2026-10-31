@@ -240,5 +240,53 @@ class ConfigJsonTest(unittest.TestCase):
         self.assertIn("env TELEGRAM_BOT_TOKEN", lines)
 
 
+class BootstrapTokenTest(unittest.TestCase):
+    """Máy mới chỉ có GitHub token vẫn lấy được token bot từ repo private."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg_dir = self.tmp / "cfg"
+        self.cfg_dir.mkdir()
+        cfg._REPO_BOT_TOKEN = None
+        # Máy thật đang có token trong /content/... — test phải coi như máy trắng.
+        patcher = mock.patch.object(cfg, "bootstrap_token_files", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        cfg._REPO_BOT_TOKEN = None
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _env(self, **extra):
+        data = {"HOME": str(self.tmp / "home"), "AISTV_CONFIG_DIR": str(self.cfg_dir)}
+        for key in ("GITHUB_TOKEN", "GH_TOKEN", "AISTV_CONFIG_TOKEN", "AISTV_GITHUB_TOKEN",
+                    "AISTV_BOOTSTRAP_TOKEN", "AISTV_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"):
+            os.environ.pop(key, None)
+        data.update(extra)
+        return mock.patch.dict(os.environ, data)
+
+    def test_reads_token_from_config_repo(self):
+        text = f"GEMINI_API_KEY=AIza\nTELEGRAM_BOT_TOKEN={GOOD_TOKEN}\n"
+        with self._env(GITHUB_TOKEN="ghp_" + "a" * 36), \
+                mock.patch.object(cfg, "fetch_github_status", return_value=(text, 200)):
+            self.assertEqual(cfg.bootstrap_token(), GOOD_TOKEN)
+
+    def test_env_shortcut_wins(self):
+        with self._env(AISTV_BOT_TOKEN=GOOD_TOKEN), \
+                mock.patch.object(cfg, "fetch_github_status", side_effect=AssertionError("không gọi mạng")):
+            self.assertEqual(cfg.bootstrap_token(), GOOD_TOKEN)
+
+    def test_repo_lookup_can_be_disabled(self):
+        with self._env(GITHUB_TOKEN="ghp_" + "a" * 36, AISTV_BOOT_REPO="0"), \
+                mock.patch.object(cfg, "fetch_github_status", side_effect=AssertionError("không gọi mạng")):
+            self.assertEqual(cfg.repo_bot_token(), "")
+
+    def test_bad_value_ignored(self):
+        text = "TELEGRAM_BOT_TOKEN=khong-phai-token\n"
+        with self._env(GITHUB_TOKEN="ghp_" + "a" * 36), \
+                mock.patch.object(cfg, "fetch_github_status", return_value=(text, 200)):
+            self.assertEqual(cfg.bootstrap_token(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
