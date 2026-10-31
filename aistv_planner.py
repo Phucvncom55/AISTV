@@ -443,6 +443,12 @@ def render_plan(plan: dict, show_request: bool = True) -> str:
         lines.append(line)
         if step.get("status") == "failed" and step.get("last_verify"):
             lines.append(f"　　<code>{esc(oneline(step['last_verify'], 300))}</code>")
+    if plan.get("work_branch"):
+        lines.append(f"\n🌿 Nhánh công việc: <code>{esc(plan['work_branch'])}</code>")
+        if plan.get("work_merged"):
+            lines.append("<i>Đã gộp vào nhánh chính (chưa commit) — bấm ⬆️ Push.</i>")
+        else:
+            lines.append("<i>Code chính không đổi · máy khác gõ “tiếp tục công việc”.</i>")
     return "\n".join(lines)
 
 
@@ -454,6 +460,30 @@ def render_report(plan: dict) -> str:
             f"<b>{done}/{total}</b> bước xong"
             + (f" · lỗi ở bước {', '.join(str(s['n']) for s in failed)}" if failed else ""))
     lines = [head]
+    if plan.get("work_dropped"):
+        lines.append("\n🗑 Đã xoá nhánh công việc. Nhánh chính không đổi.")
+    elif plan.get("work_branch"):
+        back = plan.get("work_back")
+        pushed = plan.get("work_pushed")
+        lines.append("\n🌿 <b>Nhánh công việc:</b> "
+                     f"<code>{esc(plan['work_branch'])}</code>")
+        bits = []
+        if plan.get("work_commits"):
+            bits.append(f"{plan['work_commits']} commit")
+        bits.append("đã đẩy GitHub" if pushed else "chưa đẩy được GitHub")
+        if back:
+            bits.append(f"đã trả về {plan.get('work_base') or 'nhánh chính'}")
+        lines.append("• " + esc(" · ".join(bits)))
+        if plan.get("work_error"):
+            lines.append("• ⚠️ " + esc(oneline(plan["work_error"], 300)))
+        if plan.get("work_merged"):
+            lines.append("• 🔀 Đã gộp vào nhánh chính (chưa commit) — bấm ⬆️ Push.")
+        else:
+            lines.append("• Code chính không bị sửa.")
+            lines.append("• Máy khác: gõ “tiếp tục công việc” hoặc <code>/tieptuc</code>.")
+    elif plan.get("work_error"):
+        lines.append("\n⚠️ Không tạo được nhánh công việc: "
+                     + esc(oneline(plan["work_error"], 400)))
     ver = plan.get("verify") or {}
     if ver:
         lines.append("\n🧪 <b>Kiểm chứng:</b> "

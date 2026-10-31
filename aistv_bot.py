@@ -268,6 +268,11 @@ except Exception:                       # thiếu module → tắt /plan, bot v�
     planner = None
 
 try:
+    import aistv_work as workmod       # nhánh công việc dài, tiếp tục trên máy khác
+except Exception:                       # thiếu module → /plan chạy kiểu cũ
+    workmod = None
+
+try:
     import aistv_vm as vm_lib          # tạo máy ảo Windows (GitHub Actions + Tailscale)
 except Exception:                       # thiếu module → tắt /vm, bot vẫn chạy
     vm_lib = None
@@ -836,6 +841,11 @@ AUTO_PUSH = os.getenv("AISTV_AUTO_PUSH", "0").strip().lower() not in ("0", "off"
 PLAN_BUSY: set = set()          # chat_id đang chạy /plan (để không hiện diff giữa chừng)
 PLAN_CANCEL: set = set()        # chat_id yêu cầu huỷ plan
 LAST_CHECKPOINT: dict = {}      # chat_id -> checkpoint id của lượt sửa gần nhất
+try:
+    WORK_MIN_STEPS = int(os.getenv("AISTV_WORK_MIN_STEPS", "3") or 3)
+except ValueError:
+    WORK_MIN_STEPS = 3
+                                # kế hoạch từ chừng này bước trở lên → chạy trên nhánh riêng
 
 THINKING: dict = {}                # chat_id -> [các đoạn reasoning model đã trả về]
 LIVE: dict = {}                    # chat_id -> dòng thời gian sự kiện (think/tool) để cuộn như terminal
@@ -5249,13 +5259,25 @@ async def respond(message, context, chat_id: int, text: str, skill: Optional[tup
 def plan_keyboard(plan: dict) -> InlineKeyboardMarkup:
     pid = plan.get("id") or ""
     st = plan.get("status") or "draft"
+    wb = plan.get("work_branch") or ""
+    dropped = bool(plan.get("work_dropped"))
     rows = []
     if st in ("draft", "failed", "cancelled"):
         rows.append([InlineKeyboardButton("▶️ Thực thi", callback_data=f"plan:run:{pid}"),
                      InlineKeyboardButton("✏️ Lập lại", callback_data=f"plan:edit:{pid}")])
     if st == "running":
-        rows.append([InlineKeyboardButton("⛔ Dừng", callback_data="stop")])
-    if st in ("done", "failed") and plan.get("diff") and plan["diff"] != "không có thay đổi":
+        rows.append([InlineKeyboardButton("▶️ Tiếp tục", callback_data=f"plan:run:{pid}"),
+                     InlineKeyboardButton("⛔ Dừng", callback_data="stop")])
+    if wb and not dropped and st in ("done", "failed", "cancelled"):
+        act = []
+        if plan.get("work_error") or not plan.get("work_pushed"):
+            act.append(InlineKeyboardButton("⬆️ Đẩy nhánh", callback_data=f"work:push:{pid}"))
+        if not plan.get("work_merged"):
+            act.append(InlineKeyboardButton("🔀 Gộp vào main", callback_data=f"work:merge:{pid}"))
+        if act:
+            rows.append(act)
+        rows.append([InlineKeyboardButton("🗑 Xoá nhánh", callback_data=f"work:drop:{pid}")])
+    elif st in ("done", "failed") and plan.get("diff") and plan["diff"] != "không có thay đổi":
         rows.append([InlineKeyboardButton("⬆️ Push", callback_data=f"plan:push:{pid}"),
                      InlineKeyboardButton("↩️ Hoàn tác", callback_data=f"plan:undo:{pid}")])
     elif plan.get("checkpoint") and st in ("done", "failed", "cancelled"):
@@ -5275,7 +5297,8 @@ def plans_list_text() -> tuple:
     for p in items:
         done, total = planner.progress(p)
         st = planner.PLAN_STATUS.get(p.get("status") or "", p.get("status") or "")
-        lines.append(f"• {esc(oneline(p.get('title') or '?', 60))} — {done}/{total} "
+        mark = "🌿 " if p.get("work_branch") and not p.get("work_dropped") else ""
+        lines.append(f"• {mark}{esc(oneline(p.get('title') or '?', 60))} — {done}/{total} "
                      f"bước · {esc(st)}")
         rows.append([InlineKeyboardButton(
             oneline(p.get("title") or p["id"], 30), callback_data=f"plan:view:{p['id']}")])
@@ -5290,6 +5313,77 @@ async def _plan_edit(msg, plan: dict, note: str = "") -> None:
         await msg.edit_text(text[:4000], parse_mode=HTML, reply_markup=STOP_KB)
     except Exception:
         pass
+
+
+# ── Nhánh công việc: mỗi bước commit + push, máy khác làm tiếp ──────
+async def _work_begin(rd, plan: dict) -> None:
+    """Đưa kế hoạch dài sang nhánh riêng (nếu repo sạch và đủ bước)."""
+    if not (workmod and rd and planner):
+        return
+    if len(plan.get("steps") or []) < WORK_MIN_STEPS:
+        return
+    slug = current_repo_slug() or repo_remote_slug()
+    if slug:
+        try:
+            await asyncio.to_thread(_gh_set_origin, rd, slug)
+        except Exception as e:  # noqa
+            log.warning("Không đặt được origin trước khi tạo nhánh: %s", oneline(str(e), 160))
+    try:
+        prep = await asyncio.to_thread(workmod.prepare, rd, plan)
+    except Exception as e:  # noqa
+        plan["work_error"] = "Không tạo được nhánh: " + oneline(str(e), 240)
+        return
+    if not prep.get("ok"):
+        plan["work_error"] = prep.get("error") or "không tạo được nhánh công việc"
+        if plan.get("work_branch"):
+            raise RuntimeError("Không mở lại được nhánh công việc: "
+                               + oneline(plan["work_error"], 300))
+        return
+    plan["work_branch"] = prep.get("branch") or ""
+    plan["work_base"] = prep.get("base") or ""
+    plan["work_base_sha"] = prep.get("base_sha") or ""
+    plan["work_resumed"] = bool(prep.get("resumed"))
+    plan["work_error"] = ""
+    plan["status"] = "running"
+    planner.save_plan(HOME, plan)
+    await _work_sync(rd, plan, note="bắt đầu kế hoạch")
+
+
+async def _work_sync(rd, plan: dict, step=None, note: str = "") -> None:
+    """Commit + push trạng thái hiện tại lên nhánh công việc (lỗi không chặn)."""
+    if not (workmod and rd and plan.get("work_branch")):
+        return
+    try:
+        cur = await asyncio.to_thread(workmod.current_branch, rd)
+        if cur != plan.get("work_branch"):
+            return                      # đã trả về nhánh chính — không ghi lỗi giả
+        res = await asyncio.to_thread(workmod.commit_step, rd, plan, step, note)
+    except Exception as e:  # noqa
+        plan["work_error"] = "Đồng bộ nhánh lỗi: " + oneline(str(e), 240)
+        return
+    if not res.get("ok"):
+        plan["work_error"] = res.get("error") or "không commit được lên nhánh"
+        return
+    plan["work_pushed"] = bool(res.get("pushed"))
+    plan["work_commit"] = res.get("sha") or plan.get("work_commit") or ""
+    plan["work_error"] = res.get("error") or ""
+
+
+async def _work_finish(rd, plan: dict) -> None:
+    """Chốt state cuối, đo thay đổi so với nhánh chính rồi trả repo về nhánh cũ."""
+    if not (workmod and rd and plan.get("work_branch")):
+        return
+    try:
+        await _work_sync(rd, plan, note="kết thúc kế hoạch")
+        plan["diff"] = await asyncio.to_thread(workmod.diff_from_base, rd, plan)
+        plan["work_commits"] = await asyncio.to_thread(workmod.commit_count, rd, plan)
+        ok, detail = await asyncio.to_thread(
+            workmod.return_to_base, rd, plan.get("work_base") or "")
+        plan["work_back"] = bool(ok)
+        if not ok:
+            plan["work_error"] = detail
+    except Exception as e:  # noqa
+        plan["work_error"] = "Kết thúc nhánh lỗi: " + oneline(str(e), 240)
 
 
 async def create_plan(chat_id: int, request: str, msg) -> None:
@@ -5334,15 +5428,21 @@ async def run_plan(chat_id: int, plan_id: str) -> None:
     PLAN_BUSY.add(chat_id)
     PLAN_CANCEL.discard(chat_id)
     msg = None
+    rd = None
     try:
         rd = repo_dir()
-        if rd and not plan.get("checkpoint"):
+        cp_ok = bool(plan.get("checkpoint")
+                     and planner.load_checkpoint(HOME, plan["checkpoint"]))
+        if rd and not cp_ok:
+            plan["checkpoint"] = ""
             meta, _err = await asyncio.to_thread(
                 planner.create_checkpoint, HOME, rd,
                 f"plan {plan['id']}: {plan.get('title') or ''}")
             if meta:
                 plan["checkpoint"] = meta["id"]
                 LAST_CHECKPOINT[chat_id] = meta["id"]
+        if rd:
+            await _work_begin(rd, plan)          # kế hoạch dài → nhánh riêng
         plan["status"] = "running"
         planner.save_plan(HOME, plan)
         msg = await BOT_OBJ.send_message(chat_id, planner.render_plan(plan)[:4000],
@@ -5400,6 +5500,7 @@ async def run_plan(chat_id: int, plan_id: str) -> None:
                 plan["status"] = "cancelled"
                 planner.set_step(plan, step["n"], status="skipped", finished=time.time())
                 planner.save_plan(HOME, plan)
+                await _work_sync(rd, plan, step, note="dừng kế hoạch")
                 break
             if step.get("status") != "done":
                 plan["status"] = "failed"
@@ -5407,20 +5508,25 @@ async def run_plan(chat_id: int, plan_id: str) -> None:
                                  finished=time.time(),
                                  last_verify=oneline(hint or answer, 400))
                 planner.save_plan(HOME, plan)
+                await _work_sync(rd, plan, step, note="bước lỗi")
                 break
+            await _work_sync(rd, plan, step)
             await _plan_edit(msg, plan, f"✅ Xong bước {step['n']}/{total}")
         ver = (await asyncio.to_thread(planner.verify_repo, rd, False)
                if rd else {"ok": True, "summary": "không có repo để kiểm chứng"})
         plan["verify"] = {"ok": bool(ver.get("ok")), "summary": oneline(ver.get("summary"), 800)}
-        if rd:
-            stat = await asyncio.to_thread(planner.diff_stat, rd)
-            plan["diff"] = stat.get("text") or ""
         if plan["status"] == "running":
             plan["status"] = "done" if ver.get("ok") else "failed"
+        if rd and not plan.get("work_branch"):
+            stat = await asyncio.to_thread(planner.diff_stat, rd)
+            plan["diff"] = stat.get("text") or ""
         done, total = planner.progress(plan)
         plan["report"] = (f"Bot tự chạy {done}/{total} bước; kiểm chứng "
                           f"{'PASS' if ver.get('ok') else 'FAIL'}.")
         planner.save_plan(HOME, plan)
+        if rd and plan.get("work_branch"):
+            await _work_finish(rd, plan)         # chốt nhánh + trả repo về nhánh cũ
+            planner.save_plan(HOME, plan)
         if msg:
             try:
                 await msg.edit_reply_markup(reply_markup=None)
@@ -5437,6 +5543,11 @@ async def run_plan(chat_id: int, plan_id: str) -> None:
         log.exception("Kế hoạch %s lỗi", plan_id)
         plan["status"] = "failed"
         plan["report"] = "Lỗi hệ thống: " + oneline(str(e), 300)
+        if rd and plan.get("work_branch"):
+            try:
+                await _work_sync(rd, plan, note="lỗi hệ thống")
+            except Exception:  # noqa
+                pass
         try:
             planner.save_plan(HOME, plan)
         except Exception:
@@ -5449,6 +5560,13 @@ async def run_plan(chat_id: int, plan_id: str) -> None:
             except Exception:
                 pass
     finally:
+        if workmod and rd and plan.get("work_branch"):
+            try:
+                await asyncio.to_thread(workmod.return_to_base, rd,
+                                        plan.get("work_base") or "")
+                planner.save_plan(HOME, plan)
+            except Exception:  # noqa
+                pass
         PLAN_BUSY.discard(chat_id)
         PLAN_CANCEL.discard(chat_id)
 
@@ -5593,6 +5711,19 @@ async def _on_plan_button(q, data: str) -> None:
         return
     if action == "push":
         await q.answer("Đang push…")
+        if plan.get("work_branch") and workmod:
+            rd = repo_dir()
+            res = await asyncio.to_thread(workmod.push_branch, rd, plan) if rd else \
+                {"ok": False, "error": "không thấy repo"}
+            if res.get("ok"):
+                plan["work_pushed"] = True
+                plan["work_error"] = ""
+                planner.save_plan(HOME, plan)
+                await _q_edit(q, "✅ <b>Đã đẩy nhánh công việc lên GitHub.</b>")
+            else:
+                await _q_edit(q, "❌ Đẩy nhánh lỗi: "
+                              + esc(oneline(res.get("error") or "", 600)))
+            return
         await _q_edit(q, "⬆️ Đang push lên GitHub…", markup=None)
         try:
             out = await push_repo_now()
@@ -5631,6 +5762,261 @@ async def _on_plan_button(q, data: str) -> None:
     await q.answer()
 
 
+# ────────────────────────────────────────────────────────────────────
+# 7c. NHÁNH CÔNG VIỆC · TIẾP TỤC TRÊN MÁY KHÁC
+# ────────────────────────────────────────────────────────────────────
+def _task_when(t: dict) -> str:
+    ts = t.get("updated") or 0
+    return time.strftime("%d/%m %H:%M", time.localtime(ts)) if ts else "?"
+
+
+def _task_line(t: dict) -> str:
+    st = t.get("status") or "?"
+    label = {"draft": "nháp", "running": "đang chạy", "failed": "lỗi",
+             "cancelled": "đã dừng", "done": "xong", "unknown": "?"}.get(st, st)
+    return (f"• <b>{esc(oneline(t.get('title') or '?', 90))}</b>\n"
+            f"  {t.get('done') or 0}/{t.get('total') or 0} bước · {esc(label)} · "
+            f"{_task_when(t)}" + (f" · <code>{esc(t.get('machine') or '')}</code>"
+                                  if t.get("machine") else ""))
+
+
+def _work_list_text(tasks: list) -> tuple:
+    if not tasks:
+        return ("🌿 <b>CHƯA CÓ NHÁNH CÔNG VIỆC</b>\n"
+                "Kế hoạch từ 3 bước trở lên sẽ tự chạy trên nhánh riêng và được "
+                "đẩy lên GitHub sau từng bước."), None
+    lines = ["🌿 <b>VIỆC ĐANG DỞ TRÊN GITHUB</b>", ""]
+    rows = []
+    for t in tasks[:8]:
+        lines.append(_task_line(t))
+        if t.get("id"):
+            rows.append([InlineKeyboardButton(
+                f"▶️ {oneline(t.get('title') or t['id'], 36)}",
+                callback_data=f"work:resume:{t['id']}")])
+    if rows:
+        lines += ["", "Bấm một việc để làm tiếp từ bước còn dở."]
+    return "\n".join(lines), (InlineKeyboardMarkup(rows) if rows else None)
+
+
+async def _fetch_work_tasks(rd) -> list:
+    if not (workmod and rd):
+        return []
+    try:
+        return await asyncio.to_thread(workmod.fetch_tasks, rd)
+    except Exception as e:  # noqa
+        log.warning("Không đọc được nhánh công việc: %s", oneline(str(e), 200))
+        return []
+
+
+async def _resume_task(chat_id: int, task: dict, msg=None) -> bool:
+    """Khôi phục nhánh của task rồi chạy tiếp các bước còn dở."""
+    if planner is None or workmod is None:
+        if msg:
+            await msg.reply_text("❌ Thiếu mô-đun kế hoạch — chạy /update.")
+        return False
+    if chat_id in PLAN_BUSY:
+        if msg:
+            await msg.reply_text("⏳ Đang chạy một kế hoạch khác — dừng nó trước đã.")
+        return False
+    rd = repo_dir()
+    if not rd:
+        if msg:
+            await msg.reply_text("Không tìm thấy repo git trên máy này.")
+        return False
+    plan, err = await asyncio.to_thread(workmod.checkout_task, rd, task)
+    if err:
+        if msg:
+            await msg.reply_text("❌ " + esc(err), parse_mode=HTML)
+        return False
+    plan["checkpoint"] = ""                  # checkpoint máy cũ không dùng được
+    plan["status"] = "draft"
+    plan["resumed"] = True
+    plan["chat_id"] = int(chat_id)
+    planner.save_plan(HOME, plan)
+    done, total = planner.progress(plan)
+    note = ("🌿 <b>Đã khôi phục việc đang dở</b>\n"
+            f"• {esc(oneline(plan.get('title') or '', 120))}\n"
+            f"• Nhánh: <code>{esc(task.get('branch') or '')}</code>\n"
+            f"• Tiến độ: <b>{done}/{total}</b> bước"
+            + (f" · máy cũ: <code>{esc(task.get('machine') or '')}</code>"
+               if task.get("machine") else "")
+            + "\n\n▶️ Đang làm tiếp bước còn dở…")
+    if msg:
+        await msg.reply_text(note[:4000], parse_mode=HTML)
+    else:
+        await BOT_OBJ.send_message(chat_id, note[:4000], parse_mode=HTML)
+    asyncio.create_task(run_plan(chat_id, plan["id"]))
+    return True
+
+
+async def _resume_from_remote(chat_id: int, key: str = "", msg=None,
+                              always_reply: bool = False) -> bool:
+    """Tìm việc đang dở (mới nhất hoặc theo mã) rồi khôi phục."""
+    rd = repo_dir()
+    if workmod is None or not rd:
+        if always_reply and msg:
+            await msg.reply_text("Không tìm thấy repo git để khôi phục việc.")
+        return False
+    status = None
+    if msg:
+        status = await msg.reply_text("🔎 <i>Đang tìm việc đang dở trên GitHub…</i>",
+                                      parse_mode=HTML)
+    tasks = await _fetch_work_tasks(rd)
+    todo = workmod.unfinished(tasks) if workmod else []
+    task = workmod.find_task(tasks, key) if key else None
+    if key and not task:
+        if status:
+            await status.edit_text("❌ Không tìm thấy việc có mã này.", parse_mode=HTML)
+        return True
+    if task and (task.get("status") or "") in ("done", "merged"):
+        if status:
+            await status.edit_text(
+                "✅ Việc này đã xong hết các bước.\n"
+                "Muốn sửa tiếp thì mở kế hoạch và bấm <b>Lập lại</b>.", parse_mode=HTML)
+        return True
+    if not task:
+        if not todo:
+            if status:
+                if always_reply:
+                    await status.edit_text(
+                        "🌿 Không có việc nào đang dở trên GitHub.\n"
+                        "Dùng <code>/plan &lt;yêu cầu lớn&gt;</code> để bắt đầu việc mới.",
+                        parse_mode=HTML)
+                else:
+                    try:
+                        await status.delete()
+                    except Exception:
+                        pass
+            return bool(always_reply)
+        if len(todo) > 1:
+            text, markup = _work_list_text(todo)
+            if status:
+                await status.edit_text(text[:4000], parse_mode=HTML, reply_markup=markup)
+            return True
+        task = todo[0]
+    if (task.get("status") or "") == "done" and not key:
+        if status:
+            await status.edit_text("✅ Việc gần nhất đã xong, không còn bước nào để làm tiếp.")
+        return True
+    if status:
+        try:
+            await status.delete()
+        except Exception:
+            pass
+    return await _resume_task(chat_id, task, msg)
+
+
+async def _on_work_button(q, data: str) -> None:
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    pid = parts[2] if len(parts) > 2 else ""
+    uid = q.from_user.id if q.from_user else 0
+    chat_id = q.message.chat_id if q.message else uid
+    if not is_owner(uid):
+        await q.answer("Chỉ chủ bot được điều khiển nhánh công việc.", show_alert=True)
+        return
+    if chat_id in PLAN_BUSY:
+        await q.answer("Đang chạy kế hoạch khác — dừng nó trước đã.", show_alert=True)
+        return
+    if workmod is None or planner is None:
+        await q.answer("Thiếu mô-đun nhánh công việc — chạy /update.")
+        return
+    rd = repo_dir()
+    if action == "resume":
+        await q.answer("Đang khôi phục…")
+        tasks = await _fetch_work_tasks(rd)
+        task = workmod.find_task(tasks, pid)
+        if not task:
+            await q.answer("Không tìm thấy việc này.", show_alert=True)
+            return
+        if (task.get("status") or "") in ("done", "merged"):
+            await q.answer("Việc này đã xong hết các bước.", show_alert=True)
+            return
+        await _resume_task(chat_id, task, q.message)
+        return
+    plan = planner.load_plan(HOME, pid)
+    if not plan:
+        await q.answer("Không tìm thấy kế hoạch này.", show_alert=True)
+        return
+    if action == "push":
+        await q.answer("Đang đẩy nhánh…")
+        res = await asyncio.to_thread(workmod.push_branch, rd, plan) if rd else \
+            {"ok": False, "error": "không thấy repo"}
+        if res.get("ok"):
+            plan["work_pushed"] = True
+            plan["work_error"] = ""
+            planner.save_plan(HOME, plan)
+            await _q_edit(q, "✅ <b>Đã đẩy nhánh công việc lên GitHub.</b>\n"
+                             "Máy khác mở bot và gõ “tiếp tục công việc” là làm tiếp được.")
+        else:
+            plan["work_error"] = res.get("error") or ""
+            planner.save_plan(HOME, plan)
+            await _q_edit(q, "❌ Đẩy nhánh lỗi: " + esc(oneline(res.get("error") or "", 600)))
+        return
+    if action == "merge":
+        if not rd:
+            await q.answer("Không thấy repo.", show_alert=True)
+            return
+        await q.answer("Đang gộp…")
+        cp = await asyncio.to_thread(make_checkpoint, chat_id,
+                                      f"trước khi gộp {plan.get('work_branch') or ''}")
+        ok, detail = await asyncio.to_thread(workmod.merge_into_base, rd, plan)
+        if not ok:
+            await _q_edit(q, "❌ " + esc(detail))
+            return
+        plan["work_merged"] = True
+        planner.save_plan(HOME, plan)
+        stat = await asyncio.to_thread(planner.diff_stat, rd)
+        await q.message.reply_text(
+            ("🔀 <b>Đã gộp nhánh vào nhánh chính (chưa commit).</b>\n"
+             f"{esc(detail)}\n• {esc(stat.get('text') or '')}\n\n"
+             "Kiểm tra rồi bấm <b>⬆️ Push</b> để đẩy lên GitHub."
+             + ("" if cp else "\n<i>Không tạo được checkpoint hoàn tác.</i>")),
+            parse_mode=HTML, reply_markup=review_markup(chat_id))
+        return
+    if action == "drop":
+        await q.answer()
+        await _q_edit(
+            q,
+            "🗑 <b>Xoá nhánh công việc?</b>\n"
+            f"Nhánh <code>{esc(plan.get('work_branch') or '')}</code> sẽ bị xoá trên máy "
+            "và trên GitHub. Code trong nhánh mất, nhánh chính không đổi.",
+            markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✔️ Xoá nhánh", callback_data=f"work:drop2:{pid}"),
+                InlineKeyboardButton("✖️ Không", callback_data=f"plan:view:{pid}")]]))
+        return
+    if action == "drop2":
+        await q.answer("Đang xoá…")
+        ok, detail = await asyncio.to_thread(workmod.drop_branch, rd, plan) if rd else \
+            (False, "không thấy repo")
+        if ok:
+            plan["work_dropped"] = True
+            plan["status"] = "cancelled"
+            plan["diff"] = ""
+            plan["work_error"] = ""
+        planner.save_plan(HOME, plan)
+        await _q_edit(q, ("✅ " if ok else "❌ ") + esc(detail), markup=None)
+        return
+    await q.answer()
+
+
+@guard(owner_only=True)
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat_id = update.effective_chat.id
+    args = [a for a in (context.args or []) if a.strip()]
+    if args and args[0].lower() in ("list", "ls", "danh", "danhsach", "danh-sach"):
+        rd = repo_dir()
+        tasks = await _fetch_work_tasks(rd)
+        if workmod:
+            tasks = workmod.unfinished(tasks)
+        text, markup = _work_list_text(tasks)
+        await msg.reply_text(text[:4000], parse_mode=HTML, reply_markup=markup)
+        return
+    key = args[0] if args else ""
+    await _resume_from_remote(chat_id, key, msg, always_reply=True)
+
+
 @guard()
 async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -5647,7 +6033,8 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(
                 "🧭 <b>KẾ HOẠCH TỰ TRỊ</b>\nDùng: <code>/plan &lt;yêu cầu lớn&gt;</code>\n"
                 "Bot chia thành 2–8 bước, tự chạy từng bước, tự kiểm chứng và tự sửa "
-                "trước khi báo cáo.\n\n/undo — hoàn tác thay đổi gần nhất",
+                "trước khi báo cáo.\n\nViệc dài tự lưu trên nhánh GitHub — máy khác gõ "
+                "<code>/tieptuc</code> để làm tiếp.\n/undo — hoàn tác thay đổi gần nhất",
                 parse_mode=HTML)
             return
         body = (planner.render_report(plan) if plan.get("status") in ("done", "failed", "cancelled")
@@ -5932,6 +6319,8 @@ HELP_TEXT = (
     "<b>Kế hoạch &amp; an toàn (chủ bot)</b>\n"
     "/plan &lt;yêu cầu lớn&gt; — chia 2–8 bước, tự chạy, tự kiểm chứng, tự sửa\n"
     "/plan · /plan list · /plan cancel — xem / danh sách / huỷ kế hoạch\n"
+    "/tieptuc — làm tiếp việc đang dở (kế hoạch dài tự lưu trên nhánh GitHub)\n"
+    "Máy khác chỉ cần nhắn “tiếp tục công việc” là bot tự khôi phục và làm tiếp.\n"
     "/undo — hoàn tác thay đổi chưa commit gần nhất (quay về checkpoint)\n"
     "Agent sửa repo xong bot hiện diff kèm nút ⬆️ Push / ↩️ Hoàn tác — không tự push.\n\n"
     "<b>GitHub &amp; tự cập nhật (chủ bot)</b>\n/github login — kết nối GitHub bằng mã, lưu lâu dài\n"
@@ -7650,6 +8039,14 @@ async def _guest_answer(msg, context, chat, user, text: str, direct: bool = Fals
         await send_rich(msg, answer, footer)
 
 
+_RESUME_WORDS = re.compile(
+    r"(?i)^\s*(?:hãy\s+|hay\s+)?(?:tiếp tục|tiep tuc|làm tiếp|lam tiep)\s+"
+    r"(?:công việc|cong viec|việc|viec|cái việc|cai viec)\b"
+    r"|\b(?:tiếp tục|tiep tuc)\s+(?:việc|viec)\s+(?:đang làm|dang lam|đang dở|dang do|cũ|cu)\b"
+    r"|^\s*(?:continue|resume)(?:\s+the)?\s+work\b"
+)
+
+
 async def _dispatch_text(msg, context, chat, text: str, direct: bool = False):
     """Dùng chung cho tin nhắn gõ tay và tin nhắn thoại đã chép lời (chỉ chủ bot)."""
     text = (text or "").strip()
@@ -7677,6 +8074,10 @@ async def _dispatch_text(msg, context, chat, text: str, direct: bool = False):
                         parse_mode=HTML)
             except Exception:
                 pass
+            return
+    if (chat.type == "private" and is_owner(user.id) and workmod
+            and _RESUME_WORDS.search(text)):
+        if await _resume_from_remote(chat.id, "", msg):
             return
     if chat.type != "private" and not direct:        # trong nhóm: chỉ trả lời khi được nhắc tên / reply
         if not _addressed_to_bot(msg, context, text):
@@ -8737,6 +9138,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if data.startswith("plan:"):
         await _on_plan_button(q, data)
+        return
+    if data.startswith("work:"):
+        await _on_work_button(q, data)
         return
     if data.startswith("up:"):
         await _on_review_button(q, data)
@@ -10386,6 +10790,7 @@ async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE):
 COMMANDS = [
     ("start", "Giới thiệu & menu"), ("new", "Cuộc trò chuyện mới"), ("stop", "Huỷ tác vụ đang chạy"),
     ("plan", "Lập kế hoạch & tự thực thi"), ("undo", "Hoàn tác thay đổi gần nhất"),
+    ("tieptuc", "Làm tiếp việc đang dở trên máy khác"),
     ("status", "Trạng thái bot"), ("model", "Xem / đổi model"), ("models", "Danh sách model"),
     ("remember", "Ghi nhớ dài hạn"), ("memory", "Xem trí nhớ"), ("forget", "Xoá trí nhớ"),
     ("skills", "Danh sách skills"), ("skill", "Chạy / thêm skill"),
@@ -10681,6 +11086,7 @@ def main() -> None:
            .build())
     for names, fn in [(["start"], cmd_start), (["help"], cmd_help), (["new", "reset", "clear"], cmd_new),
                       (["stop"], cmd_stop), (["plan"], cmd_plan), (["undo"], cmd_undo),
+                      (["tieptuc", "resume", "continue"], cmd_resume),
                       (["status"], cmd_status), (["model"], cmd_model),
                       (["models"], cmd_models), (["remember"], cmd_remember), (["memory"], cmd_memory),
                       (["forget"], cmd_forget), (["skills"], cmd_skills), (["skill"], cmd_skill),

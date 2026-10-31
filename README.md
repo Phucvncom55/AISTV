@@ -66,6 +66,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 ## 3. Bot làm được gì
 
 - **Sửa code như agent:** sửa file trong workspace, chạy lệnh, báo diff. `/plan <yêu cầu>` chia 2–8 bước, tự chạy – tự kiểm chứng – tự sửa. `/undo` hoàn tác, nút ⬆️ Push để đẩy lên GitHub (mặc định không tự push).
+- **Việc dài sống qua máy khác:** kế hoạch từ 3 bước trở lên tự chạy trên nhánh `aistv/work-…`; sau mỗi bước bot commit + đẩy nhánh và trạng thái lên GitHub, nhánh chính **không đổi**. Máy khác chỉ cần nhắn “tiếp tục công việc” (hoặc `/tieptuc`) là bot khôi phục đúng bước đang dở. Khi xong có nút 🔀 Gộp vào main và 🗑 Xoá nhánh.
 - **Trí nhớ dài hạn:** `/remember`, `/memory`, `/forget`; tự tóm tắt hội thoại cũ vào `MEMORY.md`; lưu cloud nên restart vẫn còn. Lịch sử chat, trí nhớ, nhắc việc và watch trên cloud đều **mã hoá bằng token bot** — đọc DB cũng không thấy nội dung.
 - **Nhắc việc & tự động:** `/remind +30m uống nước`, `/task daily 9:00 kiểm tra repo`, `/watch git owner/repo`, `/watch log <file>`, `/watch file <đường dẫn>`.
 - **Ảnh:** gửi ảnh kèm câu hỏi → Gemini mô tả, OCR, đọc biểu đồ. `/see <url>`, `/image <mô tả>` tạo ảnh (nhiều style, tỉ lệ), `/mindmap <chủ đề>` vẽ sơ đồ tư duy.
@@ -85,6 +86,7 @@ Dữ liệu (trí nhớ, lịch sử, file agent tạo) nằm ngoài repo ở `~
 |---|---|
 | `/new` `/stop` `/status` | Chat mới · huỷ tác vụ · trạng thái |
 | `/plan <yêu cầu>` | Chia bước và tự thực thi |
+| `/tieptuc` | Làm tiếp việc đang dở trên nhánh công việc (máy khác vẫn dùng được) |
 | `/undo` `/push` | Hoàn tác · đẩy code lên GitHub |
 | `/model` `/models` | Xem / đổi model |
 | `/gemini` | Chủ bot: trạng thái, bật/tắt, làm mới Gemini dự phòng (chat, ảnh, video, sơ đồ) |

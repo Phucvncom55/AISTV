@@ -25,6 +25,7 @@ archive/
 watch/
 state.json
 .venv/
+.aistv/
 
 # Hệ điều hành / công cụ
 .DS_Store
