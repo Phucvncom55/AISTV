@@ -9482,6 +9482,14 @@ async def cloud_push_secrets() -> bool:
             await asyncio.to_thread(config_lib.vault_push, data)
         except Exception as e:
             log.warning("Không cập nhật được kho cấu hình: %s", oneline(str(e), 120))
+    # Giữ blob khởi động khớp token bot hiện tại: đổi token mà không cập nhật
+    # blob thì máy trắng đọc blob cũ sẽ không mở được kho cấu hình.
+    try:
+        import aistv_boot
+        await asyncio.to_thread(aistv_boot.boot_push, data,
+                                os.getenv("TELEGRAM_BOT_TOKEN", ""))
+    except Exception as e:
+        log.warning("Không cập nhật được blob khởi động: %s", oneline(str(e), 120))
     return True
 
 

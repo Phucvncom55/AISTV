@@ -59,9 +59,28 @@ Lệnh chạy vẫn một dòng:
 bash <(curl -fsSL https://raw.githubusercontent.com/Phucvncom55/aistv-boot/main/bootstrap.sh)
 ```
 
-`bootstrap.sh` tự tìm token theo thứ tự: biến môi trường (`AISTV_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`) → Colab Secrets → file token (`~/.config/aistv/github_token`, `~/.aistv_token`, `$STV_HOME/.secrets/github_token`) → `gh auth token`. Token được lưu vào `~/.config/aistv/git-credentials` (quyền `600`) để `git pull` / `git push` sau đó không cần nhập lại; token không bao giờ được in ra hay ghi vào `.git/config`.
+`bootstrap.sh` tự tìm token theo thứ tự: biến môi trường (`AISTV_GITHUB_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`) → Colab Secrets → blob khởi động Firebase (mục 1.2) → file token (`~/.config/aistv/github_token`, `~/.aistv_token`, `$STV_HOME/.secrets/github_token`) → kho cấu hình mã hoá → `gh auth token`. Token được lưu vào `~/.config/aistv/git-credentials` (quyền `600`) để `git pull` / `git push` sau đó không cần nhập lại; token không bao giờ được in ra hay ghi vào `.git/config`.
 
 Token bot Telegram (từ v7) không phải nhập tay nếu có **một** trong các nguồn: `AISTV_BOOTSTRAP_TOKEN` / `AISTV_BOT_TOKEN` trong lệnh chạy → file `~/.config/aistv/token`, `~/.aistv_token`, `/content/drive/MyDrive/aistv/token` → repo cấu hình private `AISTV-secrets/config.env` (đọc bằng chính token GitHub ở trên). Nghĩa là máy mới chỉ cần **một bí mật duy nhất** là token GitHub; tìm được token bot thì script tự ghi lại vào `~/.config/aistv/token` (và Drive nếu đã mount) để lần sau khỏi hỏi.
+
+### 1.2. Máy trắng: không phải nhập gì (v8)
+
+`aistv_boot.py` giữ một **blob nhỏ, mã hoá** trên Firebase (`aistv/boot.json`) chứa `TELEGRAM_BOT_TOKEN`; từ token đó mở kho 17 mục và lấy `GITHUB_TOKEN` để clone repo riêng tư. `bootstrap.sh` đọc blob này **trước** mọi nguồn khác, nên máy mới chỉ cần một lệnh `curl` là chạy, không hỏi mã GitHub, không hỏi token bot.
+
+```bash
+python3 aistv_boot.py status   # blob có? giải mã được? mấy mục?
+python3 aistv_boot.py push     # đẩy token hiện tại lên Firebase (sau khi đổi key)
+python3 aistv_boot.py pull     # kiểm tra, in tên mục (không in giá trị)
+```
+
+Đổi token bot bằng `/key` thì bot tự đẩy lại blob (nếu không, máy mới sẽ không mở được kho). Đổi `GITHUB_TOKEN` không cần đụng blob — bootstrap lấy bản mới trong kho.
+
+**Nói thật về mức an toàn:** khoá giải mã nằm ngay trong `bootstrap.sh` công khai, nên nó chỉ chống công cụ quét token tự động và người xem qua loa — **người đọc kỹ vẫn giải mã được**. Ai lấy được blob là điều khiển được bot và toàn bộ key trong kho. Vì vậy:
+
+- Dùng **fine-grained PAT** (chỉ repo `AISTV`, Contents + Workflows) thay cho classic PAT có `admin:org`, `delete_repo`…; PAT classic lộ là mất cả tài khoản.
+- Nghi blob bị lộ → thu hồi PAT + `/newbot` (hoặc BotFather `/revoke`) rồi `aistv_boot.py push` lại.
+- Muốn chống thật thì phải nhập một bí mật: 🔑 Colab Secrets (`TELEGRAM_BOT_TOKEN`) hoặc file `MyDrive/aistv/token`. Khi có, `bootstrap.sh` dùng luôn nguồn đó và **không cần** blob.
+- Firebase đang để rules mở (đọc/ghi không cần auth). Người lạ chỉ ghi đè được blob (làm hỏng, không đọc được), nhưng nên siết `database.rules.json` khi rảnh.
 
 Lưu ý: repo private dùng **Actions có tính phút** (2.000 phút/tháng, runner Windows tính gấp đôi) — workflow tạo máy ảo Windows chỉ nên dùng với repo public.
 

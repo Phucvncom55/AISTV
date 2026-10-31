@@ -1,6 +1,6 @@
 # CODEMAP — bản đồ code AISTV
 
-> Tự sinh bởi `scripts/code_map.py` · 35 file Python · 28511 dòng. Đừng sửa tay: chỉnh code rồi chạy lại `python scripts/code_map.py`.
+> Tự sinh bởi `scripts/code_map.py` · 37 file Python · 28858 dòng. Đừng sửa tay: chỉnh code rồi chạy lại `python scripts/code_map.py`.
 
 ## Cách dùng cho agent
 
@@ -13,7 +13,8 @@
 
 | File | Dòng | Mục đích |
 |---|---:|---|
-| `aistv_bot.py` | 11136 | AI STV AGENT — Telegram × OpenCode (dán 1 ô Colab là chạy) |
+| `aistv_boot.py` | 197 | aistv_boot.py — bí mật khởi động cho máy trắng (Firebase, blob mã hoá). |
+| `aistv_bot.py` | 11144 | AI STV AGENT — Telegram × OpenCode (dán 1 ô Colab là chạy) |
 | `aistv_browser.py` | 251 | aistv_browser.py — Điều khiển trình duyệt thật bằng Playwright. |
 | `aistv_cloudflare.py` | 506 | aistv_cloudflare.py — Cloudflare API wrapper cho bot AI STV. |
 | `aistv_config.py` | 1219 | AI STV - đồng bộ cấu hình (token / API key) cho MỌI môi trường. |
@@ -38,6 +39,7 @@
 | `scripts/check_firebase_rules.py` | 101 | Kiểm tra Firebase RTDB đã khóa chưa: người lạ phải bị từ chối đọc. |
 | `scripts/code_map.py` | 207 | code_map.py — sinh bản đồ code (CODEMAP) để agent định vị nhanh. |
 | `scripts/verify.py` | 155 | verify.py — một lệnh kiểm chứng repo trước khi báo "xong". |
+| `tests/test_boot.py` | 142 | Kiểm tra blob khởi động Firebase (aistv_boot.py) + bootstrap.sh đi kèm. |
 | `tests/test_cloud_crypto.py` | 74 | Kiểm tra mã hoá dữ liệu cloud (envelope) trong aistv_bot. |
 | `tests/test_config_sync.py` | 292 | Kiểm tra đọc/ghi cấu hình dùng chung (aistv_config.py). |
 | `tests/test_guest.py` | 198 | Kiểm tra chế độ khách: phân loại yêu cầu, giới hạn chống spam, tách dữ liệu. |
@@ -48,6 +50,23 @@
 | `tests/test_reminders.py` | 68 | Kiểm tra phân loại nhắc việc: tới hạn, quá hạn, quá cũ, định kỳ. |
 | `tests/test_vm.py` | 137 | Kiểm tra helper tạo máy ảo (aistv_vm.py). |
 | `tests/test_work.py` | 177 | Kiểm tra nhánh công việc dài (aistv_work.py) trên repo git tạm. |
+
+## aistv_boot.py
+
+_aistv_boot.py — bí mật khởi động cho máy trắng (Firebase, blob mã hoá)._
+
+```text
+L50    def boot_key()  — Chuỗi dùng làm khoá mã hoá blob khởi động.
+L55    def boot_base(values: dict=None)
+L64    def boot_endpoint(values: dict=None)
+L69    def boot_encrypt(data: dict)
+L73    def boot_decrypt(blob: str)
+L78    def _get(url: str, timeout: int=15)
+L86    def boot_read(values: dict=None, log=None)  — Đọc + giải mã blob khởi động. Lỗi gì cũng trả {} (không chặn máy mới).
+L109   def boot_push(data: dict=None, bot_token: str='', log=None)  — Mã hoá 2 giá trị cần thiết rồi PUT lên Firebase. Không in giá trị.
+L143   def cmd_status(quiet: bool=False)
+L172   def main(argv=None)
+```
 
 ## aistv_bot.py
 
@@ -411,69 +430,69 @@ L9425  def encrypt_secrets(data: dict)
 L9429  def decrypt_secrets(blob: str)
 L9434  def _local_secret_values()
 L9460  async def cloud_push_secrets()
-L9488  async def cloud_restore_secrets()  — Máy mới: giải mã bí mật trên cloud và ghi vào config.env (không ghi đè cái đã có).
-L9554  async def cloud_merge_memory()  — Gộp MEMORY.md cục bộ với bản trên cloud (giữ thứ tự, không trùng).
-L9574  async def cloud_push_memory()
-L9579  async def cloud_push_history(chat_id: int)
-L9584  async def cloud_pull_history(chat_id: int)
-L9596  async def ensure_history(chat_id: int)  — Máy mới / Colab reset: lấy lại hội thoại của chat này từ cloud.
-L9605  async def cloud_restore_all()
-L9637  async def cloud_loop()  — Gom thay đổi rồi đẩy lên Firebase (tránh gọi mạng mỗi lần append).
-L9660  def add_memory_lines(lines: list)
-L9679  async def ask_model_once(prompt: str, timeout: int=300)  — Gọi OpenCode 1 lần, không tool, không đụng state hội thoại.
-L9702  async def summarize_chat(chat_id: int, force: bool=False)  — Cô đọng các lượt cũ thành gạch đầu dòng trong MEMORY.md rồi cắt lịch sử.
-L9741  def maybe_schedule_summary(chat_id: int)
-L9767  def _new_id(prefix: str)
-L9771  def _when_str(ts)
-L9779  def _in_str(ts)
-L9793  def _next_at(hh: int, mm: int, add_days: int=0)
-L9803  def parse_schedule(text: str)  — Trả (epoch|None, kiểu lặp, phần nội dung còn lại).
-L9839  async def rem_save(push: bool=True)
-L9845  def _prune_reminders(records: dict, now_ts: float | None=None)  — Lọc nhắc việc: bỏ mục hỏng, đánh dấu quá hạn, bỏ mục quá cũ (>30 ngày).
-L9865  async def rem_restore()
-L9877  def build_reminders()
-L9896  async def send_plain(app, chat_id: int, text: str, html_ok: bool=False, markup=None)
-L9918  async def _run_scheduled_task_guarded(app, rec: dict)
-L9932  async def _run_scheduled_task(app, rec: dict)
-L9947  async def tick_reminders(app)
-L10003 def _norm_repo(s: str)
-L10008 def _path_digest(p: Path)
-L10025 async def watch_save()
-L10031 async def watch_restore()
-L10041 async def _watch_git(app, w: dict)
-L10065 async def _watch_log(app, w: dict)
-L10100 async def _watch_file(app, w: dict)
-L10111 async def tick_watches(app)
-L10128 def build_watches()
-L10145 async def install_self_watch()
-L10160 async def _scheduler_loop(app)
-L10178 @guard() async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L10183 @guard() async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L10187 async def _add_schedule(update, context, kind: str)
-L10212 @guard() async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L10217 @guard() async def cmd_unremind(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L10235 @guard() async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L10293 @guard() async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L10303 def build_cloud(chat_id: int)
-L10335 @guard() async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L10385 def _email_fp(cfg: dict)  — Vân tay cấu hình: đổi email/mật khẩu/host → kết quả test cũ không còn giá trị.
-L10392 def _clean_app_password(parts)  — Gmail hiển thị App Password dạng 'abcd efgh ijkl mnop' — bỏ hết khoảng trắng.
-L10400 def _email_pw_label(cfg: dict)
-L10409 def build_email()
-L10442 def _parse_email_read(chat_id: int, key: str)
-L10455 @guard() async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE)
-L10580 async def _web2api_loop()  — Giữ cookie/server luôn mới: dán cookie.txt là tự chạy, máy mới tự kéo.
-L10600 @guard(owner_only=True) async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Bật/tắt và chặn khách khi nhóm spam (chỉ chủ bot).
-L10706 @guard() async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Quản lý Gemini dự phòng (chỉ chủ bot).
-L10817 def _merge_env_file(path: Path, text: str)  — Thêm các biến còn thiếu từ text vào path; không ghi đè giá trị đang có.
-L10860 def _remote_config_text()  — Tải config.env từ AISTV_ENV_URL hoặc repo private (dự phòng cho bản cũ).
-L10907 def _bootstrap_remote_config()  — Máy mới: tự nạp token/API key từ config.env dùng chung trên GitHub.
-L10928 def _valid_bot_token(value: str)  — Token BotFather: 123456789:AAH... — chan dan nham lenh khac vao prompt.
-L10933 def _prompt_bot_token()  — Hỏi token bot ngay (trước khi đồng bộ) để mở được kho cấu hình mã hoá.
-L10960 def get_token()
-L11006 def _startup_github()
-L11017 async def post_init(app)
-L11061 def main()
+L9496  async def cloud_restore_secrets()  — Máy mới: giải mã bí mật trên cloud và ghi vào config.env (không ghi đè cái đã có).
+L9562  async def cloud_merge_memory()  — Gộp MEMORY.md cục bộ với bản trên cloud (giữ thứ tự, không trùng).
+L9582  async def cloud_push_memory()
+L9587  async def cloud_push_history(chat_id: int)
+L9592  async def cloud_pull_history(chat_id: int)
+L9604  async def ensure_history(chat_id: int)  — Máy mới / Colab reset: lấy lại hội thoại của chat này từ cloud.
+L9613  async def cloud_restore_all()
+L9645  async def cloud_loop()  — Gom thay đổi rồi đẩy lên Firebase (tránh gọi mạng mỗi lần append).
+L9668  def add_memory_lines(lines: list)
+L9687  async def ask_model_once(prompt: str, timeout: int=300)  — Gọi OpenCode 1 lần, không tool, không đụng state hội thoại.
+L9710  async def summarize_chat(chat_id: int, force: bool=False)  — Cô đọng các lượt cũ thành gạch đầu dòng trong MEMORY.md rồi cắt lịch sử.
+L9749  def maybe_schedule_summary(chat_id: int)
+L9775  def _new_id(prefix: str)
+L9779  def _when_str(ts)
+L9787  def _in_str(ts)
+L9801  def _next_at(hh: int, mm: int, add_days: int=0)
+L9811  def parse_schedule(text: str)  — Trả (epoch|None, kiểu lặp, phần nội dung còn lại).
+L9847  async def rem_save(push: bool=True)
+L9853  def _prune_reminders(records: dict, now_ts: float | None=None)  — Lọc nhắc việc: bỏ mục hỏng, đánh dấu quá hạn, bỏ mục quá cũ (>30 ngày).
+L9873  async def rem_restore()
+L9885  def build_reminders()
+L9904  async def send_plain(app, chat_id: int, text: str, html_ok: bool=False, markup=None)
+L9926  async def _run_scheduled_task_guarded(app, rec: dict)
+L9940  async def _run_scheduled_task(app, rec: dict)
+L9955  async def tick_reminders(app)
+L10011 def _norm_repo(s: str)
+L10016 def _path_digest(p: Path)
+L10033 async def watch_save()
+L10039 async def watch_restore()
+L10049 async def _watch_git(app, w: dict)
+L10073 async def _watch_log(app, w: dict)
+L10108 async def _watch_file(app, w: dict)
+L10119 async def tick_watches(app)
+L10136 def build_watches()
+L10153 async def install_self_watch()
+L10168 async def _scheduler_loop(app)
+L10186 @guard() async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L10191 @guard() async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L10195 async def _add_schedule(update, context, kind: str)
+L10220 @guard() async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L10225 @guard() async def cmd_unremind(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L10243 @guard() async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L10301 @guard() async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L10311 def build_cloud(chat_id: int)
+L10343 @guard() async def cmd_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L10393 def _email_fp(cfg: dict)  — Vân tay cấu hình: đổi email/mật khẩu/host → kết quả test cũ không còn giá trị.
+L10400 def _clean_app_password(parts)  — Gmail hiển thị App Password dạng 'abcd efgh ijkl mnop' — bỏ hết khoảng trắng.
+L10408 def _email_pw_label(cfg: dict)
+L10417 def build_email()
+L10450 def _parse_email_read(chat_id: int, key: str)
+L10463 @guard() async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE)
+L10588 async def _web2api_loop()  — Giữ cookie/server luôn mới: dán cookie.txt là tự chạy, máy mới tự kéo.
+L10608 @guard(owner_only=True) async def cmd_guest(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Bật/tắt và chặn khách khi nhóm spam (chỉ chủ bot).
+L10714 @guard() async def cmd_web2api(update: Update, context: ContextTypes.DEFAULT_TYPE)  — Quản lý Gemini dự phòng (chỉ chủ bot).
+L10825 def _merge_env_file(path: Path, text: str)  — Thêm các biến còn thiếu từ text vào path; không ghi đè giá trị đang có.
+L10868 def _remote_config_text()  — Tải config.env từ AISTV_ENV_URL hoặc repo private (dự phòng cho bản cũ).
+L10915 def _bootstrap_remote_config()  — Máy mới: tự nạp token/API key từ config.env dùng chung trên GitHub.
+L10936 def _valid_bot_token(value: str)  — Token BotFather: 123456789:AAH... — chan dan nham lenh khac vao prompt.
+L10941 def _prompt_bot_token()  — Hỏi token bot ngay (trước khi đồng bộ) để mở được kho cấu hình mã hoá.
+L10968 def get_token()
+L11014 def _startup_github()
+L11025 async def post_init(app)
+L11069 def main()
 ```
 
 ## aistv_browser.py
@@ -1316,6 +1335,34 @@ L82    def check_tests()
 L91    def check_ruff()
 L105   def check_bash()
 L124   def main()
+```
+
+## tests/test_boot.py
+
+_Kiểm tra blob khởi động Firebase (aistv_boot.py) + bootstrap.sh đi kèm._
+
+```text
+L19    class CryptoTest
+  L20    def test_roundtrip(self)
+  L25    def test_wrong_key_fails(self)
+  L31    def test_tampered_fails(self)
+  L38    def test_nonce_is_random(self)
+L42    class EndpointTest
+  L43    def test_default_endpoint(self)
+  L49    def test_boot_url_override(self)
+  L53    def test_read_swallows_network_error(self)
+  L57    def test_read_swallows_bad_blob(self)
+  L61    def test_read_returns_values(self)
+L67    class BootstrapScriptTest  — bootstrap.sh phải dùng đúng khoá/endpoint và không chứa token trần.
+  L71    @classmethod def setUpClass(cls)
+  L74    def test_uses_same_key(self)
+  L78    def test_uses_boot_endpoint(self)
+  L82    def test_no_plaintext_tokens(self)
+  L87    def test_bootstrap_only_guard(self)
+  L90    def test_bash_syntax_if_available(self)
+L100   class PushFilterTest
+  L101   def test_push_needs_bot_token(self)
+  L114   def test_push_writes_encrypted_payload(self)
 ```
 
 ## tests/test_cloud_crypto.py
