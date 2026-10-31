@@ -341,7 +341,7 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="cmd")
     p = sub.add_parser("create", help="fork (nếu cần) + ghi secrets + kích hoạt workflow")
     p.add_argument("--pat", required=True, help="GitHub PAT của tài khoản sẽ chạy máy ảo")
-    p.add_argument("--key", required=True, help="Tailscale auth key (tag:vm-user)")
+    p.add_argument("--key", required=True, help="Tailscale auth key (tag vm-user là tuỳ chọn)")
     p.add_argument("--bot-token", default="", help="Telegram bot token để workflow gửi DM")
     p.add_argument("--chat-id", default="", help="Telegram chat id nhận thông tin đăng nhập")
     p.add_argument("--windows", default="", help="windows-latest | windows-2022 | windows-2025")

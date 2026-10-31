@@ -1465,7 +1465,7 @@ export default tool({
     "By default the bot uses the admin credentials already configured (GitHub token + saved",
     "Tailscale key): the bot forks the AISTV repo if needed, stores the Tailscale key as a repo",
     "secret, and dispatches the Windows integration-test workflow. The workflow connects to",
-    "Tailscale (tag:vm-user), opens RDP and sends the login details (IP, username, password,",
+    "Tailscale, opens RDP and sends the login details (IP, username, password,",
     "Tailscale key and how to log in) via private Telegram DM to the person who asked — never",
     "print credentials in the chat or in the workflow log. Pass github_token/tailscale_authkey",
     "only if the user explicitly gives their own; otherwise omit them so the admin credentials",

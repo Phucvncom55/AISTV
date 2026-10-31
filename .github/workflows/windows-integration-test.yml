@@ -1,7 +1,7 @@
 # AI STV - Windows Environment Integration Test
 # ------------------------------------------------------------------
 # Secrets cần cấu hình trên Repository (Settings > Secrets and variables > Actions):
-#   TAILSCALE_AUTHKEY  : Tailscale pre-authenticated key (REUSABLE), gắn sẵn tag:vm-user
+#   TAILSCALE_AUTHKEY  : Tailscale pre-authenticated key (REUSABLE). Không bắt buộc gắn tag.
 #   TELEGRAM_BOT_TOKEN : Token của bot Telegram dùng để gửi DM riêng tư
 #   TELEGRAM_CHAT_ID   : (tuỳ chọn) chat ID mặc định khi bấm "Run workflow" tay
 # GH_PAT không cần trong workflow này - nó do hệ thống bot/Telegram quản lý riêng.
@@ -136,10 +136,19 @@ jobs:
           $env:Path += ';C:\Program Files\Tailscale'
 
           $tsHostname = 'stv-' + $env:COMPUTERNAME
-          Write-Host "Connecting to Tailnet (hostname: $tsHostname, tag:vm-user)..."
-          # Auth key should be a reusable pre-authenticated key tagged tag:vm-user;
-          # --advertise-tags is a fallback in case the key has no tag yet.
-          & 'C:\Program Files\Tailscale\tailscale.exe' up --authkey=$env:TAILSCALE_AUTHKEY --hostname=$tsHostname --accept-routes --advertise-tags=tag:vm-user --timeout=30s
+          $tsExe = 'C:\Program Files\Tailscale\tailscale.exe'
+          Write-Host "Connecting to Tailnet (hostname: $tsHostname)..."
+
+          # Try 1: plain join. Works whether the auth key is tagged or untagged,
+          # and needs no tagOwners entry in the tailnet ACL.
+          & $tsExe up --authkey=$env:TAILSCALE_AUTHKEY --hostname=$tsHostname --accept-routes --timeout=30s
+
+          # Try 2: only if the plain join failed, advertise the tag. This needs
+          # "tagOwners": { "tag:vm-user": ["autogroup:admin"] } in the ACL.
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host 'Plain join failed, retrying with --advertise-tags=tag:vm-user ...'
+            & $tsExe up --authkey=$env:TAILSCALE_AUTHKEY --hostname=$tsHostname --accept-routes --advertise-tags=tag:vm-user --timeout=30s
+          }
           if ($LASTEXITCODE -ne 0) { throw 'tailscale up failed' }
 
           # Get the Tailscale IP (retry for up to 60 seconds)
