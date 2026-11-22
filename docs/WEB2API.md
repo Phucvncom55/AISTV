@@ -164,8 +164,8 @@ python aistv_watch.py image anh.png --engine web2api --json
 ```
 
 **Nghe voice (speech-to-text).** Voice message/file âm thanh được gửi lên Web2API dưới
-dạng `inline_data`, Gemini Web chép lời rồi bot đưa nguyên văn cho model chính
-(`deepseek-v4.1-flash-free`) xử lý — không tốn request Gemini API. `do_voice` tự chọn
+dạng `inline_data`, Gemini Web chép lời rồi bot đưa nguyên văn cho model agent chính
+xử lý — không tốn request Gemini API. `do_voice` tự chọn
 nguồn theo thứ tự Web2API → Gemini API → Whisper local (`--engine` để ép một nguồn).
 
 Gemini Web chỉ chép lời đúng với **MP3/WAV**. OGG/Opus (Telegram), FLAC, M4A… được
