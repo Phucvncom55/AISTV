@@ -282,14 +282,17 @@ USE_GOOGLE_DRIVE = False        # True = lưu trí nhớ/lịch sử vào Google
 FULL_ACCESS = True              # True = agent được đọc/ghi NGOÀI workspace, chạy lệnh & truy cập web
                                 #        không cần hỏi quyền (mọi tool của OpenCode đều được auto-approve)
 # Model chính, đổi nhanh bằng /model hoặc OPENCODE_MODEL.
-# Mặc định DeepSeek v4.1 Flash. Model này thường KHÔNG phát event reasoning
-# (chỉ trả text), nên khung 💭 Suy nghĩ sẽ báo rõ "không trả reasoning".
-# Muốn thấy reasoning: /model chọn glm-5.3-flash-free / flint-40b-free / nemotron.
+# DeepSeek v4.1 Flash Free là model agent chính theo cấu hình của chủ bot.
+# Gemini chỉ là fallback khi OpenCode báo lỗi thật sự hoặc hết quota.
 DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"
+MIGRATED_GLM_MODEL = "opencode/glm-5.3-flash-free"
 LEGACY_GEMINI_MODEL = "google/gemini-3.8-flash"       # bản trước lỡ đặt Gemini làm model chính → tự quay lại model mặc định
 VISION_MODEL = "gemini-3.8-flash"                     # mắt + tai: đọc ảnh / xem video (không phải model trả lời)
 WEB2API_MODEL = (os.getenv("WEB2API_MODEL") or "gemini-3.5-flash-thinking").strip()
                                                       # mặc định think cao (server: "Deep thinking mode")
+if os.getenv("OPENCODE_MODEL", "").strip() == MIGRATED_GLM_MODEL:
+    os.environ["OPENCODE_MODEL"] = DEFAULT_MODEL
+    ENV_FROM_FILES.add("OPENCODE_MODEL")
 WEB2API_FALLBACK = os.getenv("WEB2API_FALLBACK", "1") != "0"   # 0 = tắt dự phòng Gemini Web2API
 # Người không phải chủ bot: chat, tạo ảnh/sơ đồ và nhờ Gemini đọc ảnh/video qua Web2API.
 GUEST_CHAT = os.getenv("AISTV_GUEST_CHAT", "1") != "0"         # 0 = chặn hoàn toàn người lạ
@@ -902,11 +905,9 @@ def opencode_model() -> str:
     return model
 
 
-# Máy đã lỡ lưu model Gemini 3.8 Flash làm model chính → tự quay lại DeepSeek v4.1
-# (Gemini chỉ còn là mắt/tai đọc ảnh, xem video). Chỉ đổi một lần, tôn trọng /model của chủ bot.
+# Máy đã lỡ lưu GLM/Gemini từ bản sửa trước → đưa về DeepSeek theo lựa chọn của chủ bot.
 if (not os.getenv("OPENCODE_MODEL")
-        and STATE.get("model") == LEGACY_GEMINI_MODEL
-        and not STATE.get("model_primary_deepseek")):
+        and STATE.get("model") in (MIGRATED_GLM_MODEL, LEGACY_GEMINI_MODEL)):
     STATE["model"] = DEFAULT_MODEL
     STATE["model_primary_deepseek"] = True
     try:
@@ -4415,6 +4416,18 @@ def _is_server_error(text: str) -> bool:
     return any(marker in low for marker in _SERVER_ERROR_MARKERS)
 
 
+_MODEL_RESOLUTION_MARKERS = (
+    "model not found", "model unavailable", "unknown model",
+    "no model is available", "model does not exist", "invalid model",
+)
+
+
+def _is_model_resolution_error(text: str) -> bool:
+    """Model đã bị xoá/đổi tên hoặc provider chưa bật model đó."""
+    low = (text or "").lower()
+    return bool(low) and any(marker in low for marker in _MODEL_RESOLUTION_MARKERS)
+
+
 def _human_secs(sec: float) -> str:
     """Đổi số giây thành chuỗi ngắn kiểu '18 giờ 20 phút'."""
     try:
@@ -4749,7 +4762,8 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
                 return True, text
             err_text = text
             quota = _is_quota_error(err_text)
-            server = (not quota) and _is_server_error(err_text)
+            model_resolution = _is_model_resolution_error(err_text)
+            server = (not quota and not model_resolution) and _is_server_error(err_text)
             # Model dự phòng mà OpenCode báo lỗi nội bộ (500/UnknownError) → gọi
             # thẳng Web2API. Chỉ làm khi chưa có tool nào chạy để tránh trùng tác dụng.
             if model.startswith("web2api/") and not tools_ran:
@@ -4760,8 +4774,9 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
                 log.warning("Web2API trực tiếp cũng lỗi (%s): %s", model, direct_text[-300:])
                 err_text = direct_text
                 quota = _is_quota_error(err_text)
-                server = (not quota) and _is_server_error(err_text)
-            if not quota and not server:
+                model_resolution = _is_model_resolution_error(err_text)
+                server = (not quota and not model_resolution) and _is_server_error(err_text)
+            if not quota and not server and not model_resolution:
                 if attempt + 1 < attempts:
                     continue
                 return False, _agent_failure(err_text)
@@ -4775,8 +4790,10 @@ async def run_agent(chat_id: int, prompt: str, retries: int = 1) -> tuple:
                     await asyncio.to_thread(web2api.ensure_server)
                 except Exception:
                     pass
+            reason = ("model không khả dụng" if model_resolution
+                      else ("hết hạn mức" if quota else "server"))
             log.warning("Lỗi model ở %s (%s) → chuyển sang %s", model,
-                        "hết hạn mức" if quota else "server", models[index + 1])
+                        reason, models[index + 1])
             break
     return False, _agent_failure(err_text, quota=True)
 

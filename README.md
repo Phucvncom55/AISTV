@@ -3,7 +3,7 @@
 Bot Telegram dạng agent: nhận yêu cầu, chạy **OpenCode** trong workspace rồi trả kết quả về chat.
 Có trí nhớ dài hạn, nhắc việc, skills, gửi/nhận file, và đọc được ảnh, video, YouTube, Facebook, TikTok.
 
-**Model:** DeepSeek v4.1 (chính) + Gemini 3.8 Flash (đọc ảnh, xem video).
+**Model:** DeepSeek v4.1 Flash Free (agent chính) + Gemini 3.8 Flash (đọc ảnh, xem video/fallback).
 Chạy trên Colab, VPS, Linux/macOS và Windows — chỉ cần Python 3.10+ và mạng.
 
 ## 1. Chạy bot
